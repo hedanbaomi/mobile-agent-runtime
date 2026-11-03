@@ -23,6 +23,8 @@ enum class WorkspaceUiKind {
     SAF,
     PRIVILEGED_SHIZUKU,
     PRIVILEGED_WIRED,
+    PRIVILEGED_ROOT_DIRECT,
+    PRIVILEGED_SHIZUKU_ROOT,
 }
 
 data class WorkspaceUiPresentation(
@@ -63,6 +65,7 @@ fun persistedWorkspaceFolderLabel(
     requestedName: String,
     ordinal: Int,
     fullDevice: Boolean,
+    authority: Authority? = null,
 ): String {
     if (backendType == WorkspaceBackendType.INTERNAL) return WorkspaceUiPresentation.APP_PRIVATE_TITLE_ZH
     if (fullDevice) return "设备文件区"
@@ -82,7 +85,11 @@ fun persistedWorkspaceFolderLabel(
         cleaned.take(128)
     } else {
         when (backendType) {
-            WorkspaceBackendType.PRIVILEGED -> "ADB 目录 $ordinal"
+            WorkspaceBackendType.PRIVILEGED -> when (authority) {
+                Authority.ROOT_DIRECT -> "Root 直连目录 $ordinal"
+                Authority.SHIZUKU_ROOT -> "Shizuku Root 目录 $ordinal"
+                else -> "ADB 目录 $ordinal"
+            }
             WorkspaceBackendType.SAF_TREE -> "用户工作区 $ordinal"
             WorkspaceBackendType.INTERNAL -> WorkspaceUiPresentation.APP_PRIVATE_TITLE_ZH
         }
@@ -95,6 +102,8 @@ fun WorkspaceUiKind.defaultTitle(chinese: Boolean): String = when (this) {
     WorkspaceUiKind.SAF -> if (chinese) "已授权文件夹" else "Authorized folder"
     WorkspaceUiKind.PRIVILEGED_SHIZUKU -> if (chinese) "Shizuku 目录" else "Shizuku directory"
     WorkspaceUiKind.PRIVILEGED_WIRED -> if (chinese) "电脑 ADB 目录" else "Desktop ADB directory"
+    WorkspaceUiKind.PRIVILEGED_ROOT_DIRECT -> if (chinese) "直接 Root 目录" else "Direct Root directory"
+    WorkspaceUiKind.PRIVILEGED_SHIZUKU_ROOT -> if (chinese) "Shizuku Root 目录" else "Shizuku Root directory"
 }
 
 fun workspaceUiKind(workspace: Workspace, authority: Authority?): WorkspaceUiKind = when (workspace.backendType) {
@@ -102,6 +111,8 @@ fun workspaceUiKind(workspace: Workspace, authority: Authority?): WorkspaceUiKin
     WorkspaceBackendType.SAF_TREE -> WorkspaceUiKind.SAF
     WorkspaceBackendType.PRIVILEGED -> when (authority) {
         Authority.WIRED_ADB -> WorkspaceUiKind.PRIVILEGED_WIRED
+        Authority.ROOT_DIRECT -> WorkspaceUiKind.PRIVILEGED_ROOT_DIRECT
+        Authority.SHIZUKU_ROOT -> WorkspaceUiKind.PRIVILEGED_SHIZUKU_ROOT
         else -> WorkspaceUiKind.PRIVILEGED_SHIZUKU
     }
 }
@@ -134,6 +145,8 @@ fun fallbackWorkspaceUiPresentation(
         }
         WorkspaceUiKind.PRIVILEGED_SHIZUKU,
         WorkspaceUiKind.PRIVILEGED_WIRED,
+        WorkspaceUiKind.PRIVILEGED_ROOT_DIRECT,
+        WorkspaceUiKind.PRIVILEGED_SHIZUKU_ROOT,
         -> privilegedUiTitle(workspace.displayName) ?: kind.defaultTitle(chinese)
     }
     return runCatching {

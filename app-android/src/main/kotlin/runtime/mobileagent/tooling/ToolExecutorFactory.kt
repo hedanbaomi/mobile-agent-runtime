@@ -39,14 +39,24 @@ class ToolExecutorFactory(
      * preserves source compatibility for current callers.
      */
     private val memory: ToolExecutor? = null,
+    /**
+     * Optional Root-owned executor.  When present it **replaces** the ordinary
+     * workspace/shell providers instead of supplementing them: a Root run must
+     * not silently fall back to a non-Root file or shell backend, and a tool
+     * name must never be owned twice.  This parameter is appended after the
+     * existing ones so every positional caller keeps its current meaning.
+     */
+    private val root: ToolExecutor? = null,
 ) {
     private val providers: List<NamedExecutor> = listOfNotNull(
         web?.let { NamedExecutor("web", it) },
         mcp?.let { NamedExecutor("mcp", it) },
         python?.let { NamedExecutor("python", it) },
         memory?.let { NamedExecutor("memory", it) },
-        workspace?.let { NamedExecutor("workspace", it) },
-        shell?.let { NamedExecutor("shell", it) },
+        // Root is an alternative composition, not an additional authority.  The
+        // workspace/shell providers are omitted entirely while it is present.
+        if (root != null) NamedExecutor("root", root) else workspace?.let { NamedExecutor("workspace", it) },
+        if (root == null) shell?.let { NamedExecutor("shell", it) } else null,
     )
 
     /** Combined legacy boundary for the current runtime until it consumes the shared registry. */
@@ -131,11 +141,15 @@ class ToolExecutorFactory(
     suspend fun invoke(invocation: ToolInvocation): ToolExecution = registry.dispatch(invocation)
 
     /**
-     * Cancellation is intentionally a separate typed seam: only the shell
-     * executor owns an active one-shot request, and it routes cancellation to
-     * the already-selected authority without provider fallback.
+     * Cancellation is intentionally a separate typed seam with a single owner:
+     * a Root run routes cancellation only to its Root executor, otherwise only
+     * the shell executor owns an active one-shot request.  There is no provider
+     * fallback or broadcast.
      */
-    suspend fun cancel(requestId: String): Boolean = shell?.cancel(requestId) == true
+    suspend fun cancel(requestId: String): Boolean = when {
+        root != null -> (root as? TypedToolExecutor)?.cancel(requestId) == true
+        else -> shell?.cancel(requestId) == true
+    }
 
     private data class NamedExecutor(
         val ownerId: String,
@@ -145,6 +159,7 @@ class ToolExecutorFactory(
             when (val typed = executor) {
                 is UnifiedWorkspaceToolExecutor -> return typed.invoke(invocation)
                 is ShellToolExecutor -> return typed.invoke(invocation)
+                is TypedToolExecutor -> return typed.invoke(invocation)
             }
             // Legacy executors use ToolCall.callId as their execution/cache key.
             // The typed boundary must pass the runtime ID, never model correlation.
@@ -172,6 +187,23 @@ class ToolExecutorFactory(
             }
         }
     }
+}
+
+/**
+ * Optional typed seam for a provider-owned executor that needs both the model
+ * correlation id and the runtime invocation id.
+ *
+ * A legacy [ToolExecutor] only ever sees one id in [ToolCall.callId]; the
+ * runtime passes its own invocation id there, so the model id would be lost.
+ * Implementations of this seam receive the shared [ToolInvocation] unchanged
+ * and must keep `invocation.requestId` as the sole execution/approval key.
+ * `cancel` defaults to false because a provider without an active one-shot
+ * request has nothing to cancel.
+ */
+interface TypedToolExecutor {
+    suspend fun invoke(invocation: ToolInvocation): ToolExecution
+
+    suspend fun cancel(requestId: String): Boolean = false
 }
 
 /** Safe counts only; names, schemas, paths and provider details are deliberately absent. */
@@ -262,6 +294,26 @@ private class CompositeToolExecutor(executors: List<ToolExecutor>) : ToolExecuto
 
     override suspend fun authorizeDeferredResult(call: ToolCall): Boolean {
         return authorizeCompleted(call, ResultDisclosure.DEFERRED)
+    }
+
+    override suspend fun precheckDeferredResult(call: ToolCall): Boolean {
+        val binding = synchronized(lock) {
+            callsById[call.callId]?.takeIf {
+                it.state == LegacyCallState.SETTLED && it.call == call && owners[call.name] === it.owner
+            }
+        } ?: return false
+        return runCatching { binding.owner.precheckDeferredResult(call) }.getOrDefault(false)
+    }
+
+    override suspend fun withholdDeferredResult(call: ToolCall) {
+        val binding = synchronized(lock) { callsById[call.callId] } ?: return
+        synchronized(lock) {
+            if (binding.state == LegacyCallState.SETTLED) {
+                binding.state = LegacyCallState.REPLAY_DENIED
+                binding.result = replayDenied()
+            }
+        }
+        runCatching { binding.owner.withholdDeferredResult(call) }
     }
 
     private suspend fun authorizeCompleted(call: ToolCall, disclosure: ResultDisclosure): Boolean {

@@ -205,6 +205,15 @@ class ShizukuLiveDeviceTest {
     // Shizuku delivers its server binder asynchronously after process creation.
     // The required live run waits for that delivery; ordinary device suites still skip promptly.
     private suspend fun waitForServer(bridge: ShizukuAuthorityBridge, required: Boolean): Boolean {
+        if (required && !bridge.refresh().binderAlive) {
+            val ctx = ApplicationProvider.getApplicationContext<Context>()
+            runCatching {
+                ctx.startActivity(
+                    android.content.Intent(ctx, runtime.mobileagent.MainActivity::class.java)
+                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }
+        }
         repeat(if (required) 100 else 1) {
             if (bridge.refresh().permissionGranted) return true
             kotlinx.coroutines.delay(50)

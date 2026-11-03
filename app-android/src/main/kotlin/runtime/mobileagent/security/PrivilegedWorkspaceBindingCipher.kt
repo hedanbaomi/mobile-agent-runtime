@@ -34,7 +34,7 @@ data class PrivilegedWorkspaceBindingAad(
     val workspaceId: String,
     val authority: Authority,
     val locatorVersion: Int,
-) {
+) : WorkspaceBindingAad {
     init {
         require(isSafeIdentity(appInstanceId)) { "App identity is invalid" }
         require(isSafeIdentity(workspaceId)) { "Workspace identity is invalid" }
@@ -240,20 +240,27 @@ class PrivilegedWorkspaceBindingEnvelope private constructor(
  * process restarts.  A caller may provide a unique alias in tests; production
  * should use the default alias through [AndroidKeystorePrivilegedWorkspaceBindingCipherFactory].
  */
-class PrivilegedWorkspaceBindingCipher(
-    private val keyAlias: String = DEFAULT_KEY_ALIAS,
+class PrivilegedWorkspaceBindingCipher private constructor(
+    private val keyAlias: String,
+    private val rootPurpose: Boolean,
 ) {
+    /** Legacy construction remains shell-only, including existing test aliases. */
+    constructor(keyAlias: String = DEFAULT_KEY_ALIAS) : this(keyAlias,false)
+
     // A process-wide alias lock also protects two independently injected
     // cipher instances from racing while creating the same Keystore entry.
     private val monitor = LOCKS.computeIfAbsent(keyAlias) { Any() }
 
     init {
+        require(rootPurpose == (keyAlias == ROOT_KEY_ALIAS || keyAlias.startsWith(ROOT_TEST_ALIAS_PREFIX))) {
+            "Workspace cipher key purpose is invalid"
+        }
         require(keyAlias.length in 1..128)
         require(keyAlias.all { it.isLetterOrDigit() || it == '.' || it == '-' || it == '_' })
     }
 
     /** Encrypt a provider-specific canonical locator for database persistence. */
-    fun seal(locator: ByteArray, binding: PrivilegedWorkspaceBindingAad): PrivilegedWorkspaceBindingSealResult {
+    fun seal(locator: ByteArray, binding: WorkspaceBindingAad): PrivilegedWorkspaceBindingSealResult {
         if (locator.isEmpty() || locator.size > MAX_LOCATOR_BYTES) {
             return sealFailure(PrivilegedWorkspaceBindingErrorCode.INVALID_INPUT)
         }
@@ -308,13 +315,13 @@ class PrivilegedWorkspaceBindingCipher(
     /** Open an envelope already decoded from a SQLite BLOB. */
     fun open(
         envelope: PrivilegedWorkspaceBindingEnvelope,
-        binding: PrivilegedWorkspaceBindingAad,
+        binding: WorkspaceBindingAad,
     ): PrivilegedWorkspaceBindingOpenResult = openInternal(envelope, binding)
 
     /** Decode and open a SQLite BLOB in one typed operation. */
     fun open(
         encoded: ByteArray,
-        binding: PrivilegedWorkspaceBindingAad,
+        binding: WorkspaceBindingAad,
     ): PrivilegedWorkspaceBindingOpenResult = when (val decoded = PrivilegedWorkspaceBindingEnvelope.decode(encoded)) {
         is PrivilegedWorkspaceBindingEnvelopeDecodeResult.Failure ->
             PrivilegedWorkspaceBindingOpenResult.Failure(decoded.error)
@@ -331,12 +338,12 @@ class PrivilegedWorkspaceBindingCipher(
     fun open(
         encryptedLocator: ByteArray,
         locatorNonce: ByteArray,
-        binding: PrivilegedWorkspaceBindingAad,
+        binding: WorkspaceBindingAad,
     ): PrivilegedWorkspaceBindingOpenResult = openParts(encryptedLocator, locatorNonce, binding)
 
     private fun openInternal(
         envelope: PrivilegedWorkspaceBindingEnvelope,
-        binding: PrivilegedWorkspaceBindingAad,
+        binding: WorkspaceBindingAad,
     ): PrivilegedWorkspaceBindingOpenResult {
         val aad = try {
             canonicalAad(binding)
@@ -402,7 +409,7 @@ class PrivilegedWorkspaceBindingCipher(
     private fun openParts(
         encryptedLocator: ByteArray,
         locatorNonce: ByteArray,
-        binding: PrivilegedWorkspaceBindingAad,
+        binding: WorkspaceBindingAad,
     ): PrivilegedWorkspaceBindingOpenResult {
         if (
             locatorNonce.size != NONCE_BYTES ||
@@ -459,26 +466,9 @@ class PrivilegedWorkspaceBindingCipher(
         }
     }
 
-    private fun canonicalAad(binding: PrivilegedWorkspaceBindingAad): ByteArray {
-        val output = ByteArrayOutputStream()
-        val data = DataOutputStream(output)
-        data.write(AAD_DOMAIN)
-        data.writeInt(AAD_FORMAT_VERSION)
-        writeUtf8(data, binding.appInstanceId)
-        writeUtf8(data, binding.workspaceId)
-        writeUtf8(data, binding.authority.name)
-        data.writeInt(binding.locatorVersion)
-        return output.toByteArray()
-    }
-
-    private fun writeUtf8(data: DataOutputStream, value: String) {
-        val bytes = value.toByteArray(StandardCharsets.UTF_8)
-        try {
-            data.writeInt(bytes.size)
-            data.write(bytes)
-        } finally {
-            bytes.fill(0)
-        }
+    private fun canonicalAad(binding: WorkspaceBindingAad): ByteArray {
+        require(rootPurpose == (binding is RootWorkspaceBindingAad)) { "Workspace cipher AAD purpose is invalid" }
+        return WorkspaceBindingAadCodec.encode(binding)
     }
 
     private fun sha256(value: ByteArray): ByteArray =
@@ -548,6 +538,16 @@ class PrivilegedWorkspaceBindingCipher(
     }
 
     companion object {
+        private const val ROOT_KEY_ALIAS = "runtime.mobileagent.root.workspace.locator.v2"
+        private const val ROOT_TEST_ALIAS_PREFIX = "runtime.mobileagent.test.rootpwb."
+
+        internal fun forRoot(): PrivilegedWorkspaceBindingCipher = PrivilegedWorkspaceBindingCipher(ROOT_KEY_ALIAS,true)
+
+        internal fun forRootTesting(keyAlias: String): PrivilegedWorkspaceBindingCipher {
+            require(keyAlias.startsWith(ROOT_TEST_ALIAS_PREFIX))
+            return PrivilegedWorkspaceBindingCipher(keyAlias,true)
+        }
+
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val KEY_BYTES = 32
@@ -555,8 +555,6 @@ class PrivilegedWorkspaceBindingCipher(
         private const val GCM_TAG_BYTES = 16
         private const val MAX_LOCATOR_BYTES = 64 * 1024
         private const val MAX_CIPHERTEXT_BYTES = MAX_LOCATOR_BYTES + GCM_TAG_BYTES
-        private const val AAD_FORMAT_VERSION = 1
-        private val AAD_DOMAIN = "MAR-PRIVILEGED-WORKSPACE-BINDING-AAD".toByteArray(StandardCharsets.US_ASCII)
         private const val DEFAULT_KEY_ALIAS = "runtime.mobileagent.privileged.workspace.locator.v1"
         private val LOCKS = ConcurrentHashMap<String, Any>()
 

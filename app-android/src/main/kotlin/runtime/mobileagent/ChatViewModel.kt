@@ -73,15 +73,47 @@ import java.time.LocalDate
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicLong
 
+/**
+ * Trusted onApprove boundary, not an event/Inspector projection. Keep the exact original bytes
+ * beside the executor-owned invocation identity; never reconstruct arguments from redacted events.
+ * A missing route is an error, not permission to manufacture a different approval identity.
+ */
+internal fun persistChatApprovalInvocation(
+    runs: runtime.mobileagent.data.RunRepository,
+    runId: String,
+    runtimeInvocationId: String?,
+    call: ToolCall,
+    knownSecrets: List<String> = emptyList(),
+): ToolInvocation {
+    val id = requireNotNull(runtimeInvocationId?.takeIf { it.isNotBlank() }) {
+        "Pending tool invocation identity is unavailable"
+    }
+    fun safe(value: String): Boolean = SecretRedactor.redact(value, knownSecrets) == value
+    fun safeJson(value: JsonElement): Boolean = when (value) {
+        // Re-serialization restores decoded field names beside their values, so field-based
+        // redaction rules cannot be bypassed by JSON Unicode escapes in a key.
+        is JsonObject -> safe(value.toString()) && value.all { (key, item) -> safe(key) && safeJson(item) }
+        is JsonArray -> value.all(::safeJson)
+        is JsonPrimitive -> !value.isString || safe(value.content)
+    }
+    require(safe(call.argumentsJson) && safeJson(Json.parseToJsonElement(call.argumentsJson))) {
+        "Sensitive tool arguments cannot be persisted for approval"
+    }
+    val invocation = ToolInvocation(id, runId, call.callId, call.name, call.argumentsJson,
+        state = "WAITING_APPROVAL", createdAt = Utc.nowIso())
+    runs.recordInvocation(invocation)
+    return invocation
+}
+
 /** Diagnostic classification uses the declared contract, never substrings in model tool names. */
 internal fun chatDiagnosticToolCapability(capability: String?): DiagnosticToolCapability = when (capability) {
     "python.execute" -> DiagnosticToolCapability.PYTHON_EXECUTE
     CapabilityId.SHELL_EXECUTE -> DiagnosticToolCapability.SHELL_EXECUTE
     CapabilityId.WORKSPACE_ENUMERATE, CapabilityId.FILE_LIST, CapabilityId.FILE_STAT, CapabilityId.FILE_READ_TEXT,
-    "workspace.read", "shizuku.workspace.read" ->
+    CapabilityId.FILE_METADATA_READ, "workspace.read", "shizuku.workspace.read" ->
         DiagnosticToolCapability.WORKSPACE_READ
     CapabilityId.FILE_WRITE_TEXT, CapabilityId.FILE_CREATE_DIRECTORY, CapabilityId.FILE_MOVE, CapabilityId.FILE_DELETE,
-    "file.apply_patch", "workspace.write", "shizuku.workspace.write" -> DiagnosticToolCapability.WORKSPACE_WRITE
+    CapabilityId.FILE_METADATA_WRITE, "file.apply_patch", "workspace.write", "shizuku.workspace.write" -> DiagnosticToolCapability.WORKSPACE_WRITE
     CapabilityId.MEMORY_READ, CapabilityId.MEMORY_SEARCH -> DiagnosticToolCapability.MEMORY_READ
     CapabilityId.MEMORY_APPEND, CapabilityId.MEMORY_REPLACE -> DiagnosticToolCapability.MEMORY_WRITE
     "network.search", "knowledge.search" -> DiagnosticToolCapability.SEARCH
@@ -96,6 +128,8 @@ internal fun chatDiagnosticAuthority(
     DiagnosticToolCapability.SHELL_EXECUTE -> when (selectedAuthority) {
         "SHIZUKU" -> DiagnosticAuthority.SHIZUKU
         "WIRED_ADB" -> DiagnosticAuthority.WIRED_ADB
+        "ROOT_DIRECT" -> DiagnosticAuthority.ROOT_DIRECT
+        "SHIZUKU_ROOT" -> DiagnosticAuthority.SHIZUKU_ROOT
         else -> DiagnosticAuthority.NONE
     }
     DiagnosticToolCapability.WORKSPACE_READ, DiagnosticToolCapability.WORKSPACE_WRITE -> workspaceAuthority
@@ -1340,6 +1374,14 @@ class ChatViewModel internal constructor(
                 }
                 val onApprove: suspend (ToolCall) -> Boolean = approvalDecision@{ call ->
                     if (!withContext(Dispatchers.Main) { canProjectRun(owner) }) return@approvalDecision false
+                    // onApprove carries the original executor call. Runtime events are redacted
+                    // presentation only and must never supply the durable authorization binding.
+                    val invocation = withContext(Dispatchers.IO) {
+                        persistChatApprovalInvocation(container.runs, run.runId,
+                            invocationId(call.callId, call.name), call,
+                            secret?.let { listOf(String(it)) }.orEmpty())
+                    }
+                    withContext(Dispatchers.Main) { invocations[invocation.invocationId] = invocation }
                     // RuntimeIntegration.snapshot() is the canonical, UI-safe
                     // projection but reads repositories/content permissions;
                     // collect the two enum labels off the Main dispatcher.
@@ -1361,12 +1403,16 @@ class ChatViewModel internal constructor(
                         capability = diagnosticToolCapability(call.name, toolExecutor.specs),
                         authority = diagnosticToolAuthority(call.name, toolExecutor.specs, threadWorkspaceId, selectedAuthority),
                     )
-                    if (rememberPendingApproval(approvalAudit)) {
-                        recordToolApprovalState(approvalAudit, DiagnosticApprovalState.REQUESTED, "permission")
-                    }
+                    rememberPendingApproval(approvalAudit)
+                    recordToolApprovalState(approvalAudit, DiagnosticApprovalState.REQUESTED, "permission")
                     if (!withContext(Dispatchers.Main) { canProjectRun(owner) }) return@approvalDecision false
                     val liveAgent = container.agents.get(binding.snapshot.agentId)
-                    if (!AgentToolConfirmation.requiresExplicitApproval(call.name) &&
+                    if (!AgentToolConfirmation.requiresExplicitApproval(
+                            toolName = call.name,
+                            selectedAuthority = selectedAuthority,
+                            workspaceAuthority = approvalAudit.authority,
+                            rootRun = runtime.mobileagent.data.RootRunManifest.hasRootStamp(record.manifestJson),
+                        ) &&
                         AgentToolConfirmation.allows(binding.snapshot.permissionSettingsJson,
                             liveAgent?.permissionSettingsJson)) {
                         markPendingApprovalDecision(run.runId, approvalAudit.invocationId, call.callId, "APPROVED")
@@ -1590,28 +1636,23 @@ class ChatViewModel internal constructor(
                             }
                             is RuntimeEvent.ToolApprovalRequested -> {
                                 toolWaitingApproval = true
+                                rememberPendingApproval(
+                                    PendingApprovalAudit(
+                                        runId = run.runId,
+                                        callId = event.callId,
+                                        invocationId = invocationId(event.callId, event.name),
+                                        agentId = binding.snapshot.agentId,
+                                        sessionRef = conversationId,
+                                        capability = diagnosticToolCapability(event.name, toolExecutor.specs),
+                                        authority = DiagnosticAuthority.NONE,
+                                    ),
+                                )
                                 recordToolInvocation(
                                     event.callId, event.name, DiagnosticToolRunState.WAITING_APPROVAL, run.runId,
                                 )
                                 record = record.copy(state = RunStatus.WAITING_TOOL_APPROVAL)
-                                val runtimeInvocationId = invocationId(event.callId, event.name)
-                                    ?: InternalRequestIds.new()
-                                val invocation = ToolInvocation(runtimeInvocationId, run.runId, event.callId, event.name,
-                                    event.argumentsJson, state = "WAITING_APPROVAL", createdAt = Utc.nowIso())
-                                val approvalAudit = PendingApprovalAudit(
-                                    runId = run.runId,
-                                    callId = event.callId,
-                                    invocationId = runtimeInvocationId,
-                                    agentId = binding.snapshot.agentId,
-                                    sessionRef = conversationId,
-                                    capability = diagnosticToolCapability(event.name, toolExecutor.specs),
-                                    authority = diagnosticToolAuthority(event.name, toolExecutor.specs, threadWorkspaceId),
-                                )
-                                if (rememberPendingApproval(approvalAudit)) {
-                                    recordToolApprovalState(approvalAudit, DiagnosticApprovalState.REQUESTED, "permission")
-                                }
-                                invocations[runtimeInvocationId] = invocation
-                                withContext(Dispatchers.IO) { container.runs.recordInvocation(invocation) }
+                                // Arguments here are presentation-only. The trusted onApprove
+                                // callback persists the original call before any approval decision.
                                 persistRun = true
                             }
                             is RuntimeEvent.ToolResultProduced -> {
@@ -1664,7 +1705,7 @@ class ChatViewModel internal constructor(
                                         permissionDecision = persistedDecision ?: "NOT_REQUESTED",
                                         updatedAt = Utc.nowIso())
                                 withContext(Dispatchers.IO) {
-                                    if (runtimeInvocationId in invocations) container.runs.updateInvocation(invocation) else container.runs.recordInvocation(invocation)
+                                    container.runs.observeRuntimeInvocation(invocation)
                                     val diffPart = event.toDiffPartOrNull()
                                     container.conversations.append(conversationId, MessageRole.TOOL, event.resultJson,
                                         messageId = event.messageId ?: EntityId.random().value,
@@ -2353,6 +2394,7 @@ class ChatViewModel internal constructor(
             existing.callId == audit.callId -> {
                 processPendingApprovals[audit.runId] = audit.copy(
                     invocationId = audit.invocationId ?: existing.invocationId,
+                    authority = if (audit.authority != DiagnosticAuthority.NONE) audit.authority else existing.authority,
                 )
                 false
             }

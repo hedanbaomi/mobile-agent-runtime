@@ -201,7 +201,15 @@
     "runtime.mobileagent.resident.ResidentAdbLiveDeviceTest": "Requires explicit disposable-device resident activation via requireResident.",
     "runtime.mobileagent.resident.ResidentAdbProcessRestartDeviceTest": "Requires host-orchestrated app/daemon kills, seeded phases and explicit disposable-device activation.",
     "runtime.mobileagent.resident.ResidentAdbDirectoryReattachDeviceTest": "Requires explicit disposable-device resident activation and daemon replacement.",
-    "runtime.mobileagent.resident.RuntimeResidentToolExposureDeviceTest": "Requires explicit disposable non-debuggable review device via requireReview."
+    "runtime.mobileagent.resident.RuntimeResidentToolExposureDeviceTest": "Requires explicit disposable non-debuggable review device via requireReview.",
+    "runtime.mobileagent.privileged.BoundedProcessDeviceTest": "Device-only bounded child-process regression; run explicitly on the isolated AVD.",
+    "runtime.mobileagent.privileged.ForeignTypedChannelAcceptanceTest": "Requires the non-debuggable foreign 0700 fixture APK, Magisk policy or UID0 Shizuku server, and per-channel host reset on the dedicated Root AVD.",
+    "runtime.mobileagent.privileged.RootConnectorCancellationFenceDeviceTest": "Device-only acquisition-fence regression; needs a real su provider on the isolated AVD.",
+    "runtime.mobileagent.privileged.RootDirectSuProductionAcceptanceTest": "Requires a real su manager decision (Magisk policy fixture); modes granted/denied/pending/cancel/live-revoke run explicitly.",
+    "runtime.mobileagent.privileged.RootDirectTypedProductionAcceptanceTest": "Requires a real Magisk su policy and UID 0 exclusive /data/adb/root-typed-acceptance fixture on the dedicated Root AVD.",
+    "runtime.mobileagent.privileged.RootEmulatorAcceptanceDeviceTest": "Needs explicit live Shizuku server, UID2000 and foreign 0700 fixture arguments.",
+    "runtime.mobileagent.privileged.RootNextAgentAcceptanceTest": "Requires real UID0 Shizuku server, two-step permission dialog/revoke orchestration, and Magisk su helper on the dedicated Root AVD.",
+    "runtime.mobileagent.security.RootWorkspaceBindingCipherDeviceTest": "Device-only root workspace binding cipher fixture; run explicitly on the isolated AVD."
   },
   "fresh_host_first": [
     "runtime.mobileagent.ApiEmbeddingDeviceTest"

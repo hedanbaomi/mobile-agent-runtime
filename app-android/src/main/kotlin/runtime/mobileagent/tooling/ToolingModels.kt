@@ -423,4 +423,6 @@ private fun Authority.userIntent(): AuthorityUserIntent = when (this) {
     Authority.NONE -> AuthorityUserIntent.NONE
     Authority.SHIZUKU -> AuthorityUserIntent.SHIZUKU
     Authority.WIRED_ADB -> AuthorityUserIntent.WIRED_ADB
+    Authority.ROOT_DIRECT -> AuthorityUserIntent.ROOT_DIRECT
+    Authority.SHIZUKU_ROOT -> AuthorityUserIntent.SHIZUKU_ROOT
 }

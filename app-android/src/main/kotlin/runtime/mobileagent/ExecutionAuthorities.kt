@@ -31,10 +31,11 @@ data class SettingsAuthorityProviderState(
     val connection: Connection = Connection.DISCONNECTED,
     val configured: Boolean = false,
     val trust: DesktopTrustStatus? = null,
+    val rootShellConsentEnabled: Boolean = false,
 ) {
     init {
-        require(authority == Authority.SHIZUKU || authority == Authority.WIRED_ADB) {
-            "Settings only supports Shizuku and wired ADB authorities"
+        require(authority != Authority.NONE) {
+            "SettingsAuthorityProviderState requires an elevated authority"
         }
     }
 }
@@ -58,6 +59,8 @@ data class SettingsAuthoritySnapshot(
     val appPrivateAvailable: Boolean = true,
     val shizuku: SettingsAuthorityProviderState = SettingsAuthorityProviderState(Authority.SHIZUKU),
     val wiredAdb: SettingsAuthorityProviderState = SettingsAuthorityProviderState(Authority.WIRED_ADB),
+    val rootDirect: SettingsAuthorityProviderState = SettingsAuthorityProviderState(Authority.ROOT_DIRECT),
+    val shizukuRoot: SettingsAuthorityProviderState = SettingsAuthorityProviderState(Authority.SHIZUKU_ROOT),
     val saf: SettingsSafGrantState = SettingsSafGrantState(),
     val dangerousMode: DangerousMode = DangerousMode.DISABLED,
     /** Durable policy from the canonical store; [dangerousMode] is the effective fail-closed policy. */
@@ -66,7 +69,15 @@ data class SettingsAuthoritySnapshot(
     val dangerousModeBuildKnown: Boolean = false,
     val dangerousModeReason: String = "DANGEROUS_MODE_BUILD_DENIED",
     val revision: Long = 0L,
-)
+) {
+    fun providerFor(authority: Authority): SettingsAuthorityProviderState? = when (authority) {
+        Authority.SHIZUKU -> shizuku
+        Authority.WIRED_ADB -> wiredAdb
+        Authority.ROOT_DIRECT -> rootDirect
+        Authority.SHIZUKU_ROOT -> shizukuRoot
+        Authority.NONE -> null
+    }
+}
 
 data class SettingsAuthorityMutation(
     val accepted: Boolean,
@@ -151,7 +162,23 @@ interface SettingsAuthorityPort {
 
     /** Explicit foreground user action; no request is made during refresh. */
     fun requestShizukuPermission(): SettingsAuthoritySnapshot
+
+    /**
+     * Root-channel permission request: never touches the legacy Shizuku shell configuration
+     * and never binds the legacy user service. The Root handshake proves the UID0 server.
+     */
+    fun requestRootShizukuPermission(): SettingsAuthoritySnapshot =
+        error("Root permission requests require the runtime integration")
     fun openShizuku(): Boolean
+
+    /**
+     * Real platform fact for the Root-over-Shizuku first step: permission granted, live binder
+     * and a UID0 server. Independent of the local consent and the Root service connection.
+     */
+    fun rootShizukuPlatformReady(): Boolean = false
+
+    /** Opens the installed su manager app for the direct Root channel; false when absent. */
+    fun openRootManager(): Boolean = false
 
     /** Explicit trust lifecycle actions for the wired companion. */
     fun reauthorizeWiredAdb(): SettingsAuthoritySnapshot = snapshot()
@@ -192,6 +219,13 @@ interface SettingsAuthorityPort {
     fun setDangerousMode(mode: DangerousMode, confirmed: Boolean): SettingsAuthorityMutation
     fun disableDangerousMode(): SettingsAuthoritySnapshot =
         setDangerousMode(DangerousMode.DISABLED, confirmed = true).snapshot
+
+    /** Independent per-channel Root Shell confirmation (`ROOT_DIRECT` or `SHIZUKU_ROOT`). */
+    fun setRootShellConsent(
+        authority: Authority,
+        enabled: Boolean,
+        confirmed: Boolean,
+    ): SettingsAuthorityMutation = error("AUTHORITY_ADAPTER_UNAVAILABLE")
 }
 
 /** AppContainer implements this provider once its canonical adapters are wired. */
@@ -345,5 +379,76 @@ fun openShizuku(context: Context): Boolean {
     }.getOrDefault(false)
 }
 
+/** Opens the installed su manager (Magisk) or its official download page when absent. */
+fun openRootManager(context: Context): Boolean {
+    val manager = context.packageManager.getLaunchIntentForPackage(ROOT_MANAGER_PACKAGE)
+        ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    val guide = Intent(Intent.ACTION_VIEW, Uri.parse(ROOT_MANAGER_GUIDE))
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    return runCatching {
+        context.startActivity(manager ?: guide)
+        true
+    }.getOrDefault(false)
+}
+
+private const val ROOT_MANAGER_PACKAGE = "com.topjohnwu.magisk"
+private const val ROOT_MANAGER_GUIDE = "https://github.com/topjohnwu/Magisk/releases/latest"
+
 private const val SHIZUKU_MANAGER_PACKAGE = "moe.shizuku.privileged.api"
 private const val SHIZUKU_INSTALL_GUIDE = "https://shizuku.rikka.app/download/"
+
+internal fun mutateRootShellConsent(
+    rootCoordinator: runtime.mobileagent.privileged.RootRuntimeCoordinator,
+    authority: Authority,
+    enabled: Boolean,
+    confirmed: Boolean,
+    authorityManager: runtime.mobileagent.tooling.AuthorityManager,
+    shizukuState: ShizukuAuthorityState?,
+    snapshotProvider: () -> SettingsAuthoritySnapshot,
+): SettingsAuthorityMutation {
+    if (authority != Authority.ROOT_DIRECT && authority != Authority.SHIZUKU_ROOT) {
+        return SettingsAuthorityMutation(false, snapshotProvider(), "UNSUPPORTED_ROOT_AUTHORITY")
+    }
+    if (enabled && !confirmed) {
+        return SettingsAuthorityMutation(false, snapshotProvider(), "DANGEROUS_MODE_CONFIRMATION_REQUIRED")
+    }
+    val accepted = runCatching {
+        rootCoordinator.setRootShellConsent(
+            authority = authority,
+            enabled = enabled,
+            userConfirmed = confirmed,
+            authorityManager = authorityManager,
+            shizukuState = shizukuState,
+        ) != null
+    }.getOrDefault(false)
+    val snapshot = snapshotProvider()
+    val reason = if (accepted) null else "ROOT_SHELL_CONSENT_SAVE_FAILED"
+    return SettingsAuthorityMutation(accepted = accepted, snapshot = snapshot, reason = reason)
+}
+
+internal fun applySettingsRootShellConsent(
+    port: SettingsAuthorityPort,
+    authorityValue: String,
+    enabled: Boolean,
+    confirmed: Boolean,
+    onSnapshot: (SettingsAuthoritySnapshot) -> Unit,
+    onError: (String?) -> Unit,
+    reasonMapper: (String?) -> String,
+    errorMapper: (Throwable) -> String,
+) {
+    val authority = when (authorityValue.trim().uppercase(java.util.Locale.ROOT)) {
+        "ROOT_DIRECT", "ROOT-DIRECT", "ROOT DIRECT" -> Authority.ROOT_DIRECT
+        "SHIZUKU_ROOT", "SHIZUKU-ROOT", "SHIZUKU ROOT" -> Authority.SHIZUKU_ROOT
+        else -> null
+    } ?: run {
+        onError("不支持的权限通道。")
+        return
+    }
+    val result = runCatching { port.setRootShellConsent(authority, enabled, confirmed) }
+        .getOrElse { failure ->
+            onError(errorMapper(failure))
+            return
+        }
+    onSnapshot(result.snapshot)
+    onError(if (result.accepted) null else reasonMapper(result.reason))
+}

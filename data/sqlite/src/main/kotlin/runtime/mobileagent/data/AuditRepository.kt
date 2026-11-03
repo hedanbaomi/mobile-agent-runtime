@@ -48,9 +48,12 @@ class AuditRepository(
     fun record(event: AuditEvent): AuditEvent = append(event)
 
     /** Tool audit accepts only the typed redacted detail; command/output/path plaintext is absent. */
-    fun append(detail: ToolAuditDetail): ToolAuditDetail = db.transaction {
+    fun append(detail: ToolAuditDetail): ToolAuditDetail = append(detail,null)
+
+    fun append(detail: ToolAuditDetail, runId: String?): ToolAuditDetail = db.transaction {
         val event = AuditEvent(
             id = detail.auditId,
+            runId = runId,
             createdAt = detail.createdAt,
             component = "tool",
             action = "tool.${detail.capability.value}",

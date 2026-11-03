@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import runtime.mobileagent.domain.Authority
+import runtime.mobileagent.domain.isRootAuthority
 import runtime.mobileagent.feature.agents.WorkspacePickerAttachedUi
 import runtime.mobileagent.feature.agents.WorkspacePickerAttachPhaseUi
 import runtime.mobileagent.feature.agents.WorkspacePickerNewThreadUi
@@ -132,6 +133,7 @@ class WorkspacePickerViewModel(
             clearDirectoryState()
             _state.value = _state.value.copy(
                 mode = mode,
+                rootDirectorySelectionAvailable = authority.selectedAuthority.isRootAuthority,
                 authority = authority.toUi(),
                 targetLabel = targetLabel,
                 // A health refresh that started after this fetch already
@@ -162,7 +164,7 @@ class WorkspacePickerViewModel(
                 errorMessage = null,
                 statusMessage = null,
             )
-            if (mode == WorkspacePickerModeUi.PRIVILEGED) {
+            if (mode == WorkspacePickerModeUi.PRIVILEGED && !_state.value.rootDirectorySelectionAvailable) {
                 browseRoot(generation, authority.selectedAuthority)
             } else if (mode == WorkspacePickerModeUi.AUTHORITY_UNAVAILABLE) {
                 _state.value = _state.value.copy(
@@ -179,6 +181,7 @@ class WorkspacePickerViewModel(
         clearDirectoryState()
         _state.value = _state.value.copy(
             mode = WorkspacePickerModeUi.SAF_FALLBACK,
+            rootDirectorySelectionAvailable = false,
             loadPhase = WorkspacePickerLoadPhaseUi.IDLE,
             loading = false,
             canUseSafFallback = false,
@@ -191,6 +194,21 @@ class WorkspacePickerViewModel(
     }
 
     fun retry() = refresh()
+
+    /** Called only by the foreground Root workspace confirmation form. */
+    fun confirmRootDirectory(path: String, writable: Boolean, metadata: Boolean, shell: Boolean) {
+        val authority = selectedAuthority
+        if (!RootWorkspacePickerRequest.canConfirm(_state.value, authorityReady)) return
+        val generation = nextGeneration()
+        val targetAtConfirmation = target
+        browseJob?.cancel()
+        _state.value = _state.value.copy(attachPhase = WorkspacePickerAttachPhaseUi.ATTACHING,
+            attached = null, errorCode = null, errorMessage = null, statusMessage = null)
+        browseJob = viewModelScope.launch {
+            val result = RootWorkspacePickerRequest.attach(port, authority, path, writable, metadata, shell, targetAtConfirmation)
+            if (isCurrent(generation)) applyAttachResult(result)
+        }
+    }
 
     fun openLocation(id: String) = openEntry(id)
 
@@ -714,7 +732,7 @@ class WorkspacePickerViewModel(
     }
 
     private fun isElevated(authority: Authority): Boolean =
-        authority == Authority.SHIZUKU || authority == Authority.WIRED_ADB
+        authority in setOf(Authority.SHIZUKU, Authority.WIRED_ADB, Authority.ROOT_DIRECT, Authority.SHIZUKU_ROOT)
 
     private fun newWorkspaceId(): String =
         "picker-${UUID.randomUUID().toString().replace("-", "").take(32)}"
@@ -730,6 +748,8 @@ class WorkspacePickerViewModel(
     private fun WorkspacePickerAuthoritySnapshot.displayLabel(): String = when (selectedAuthority) {
         Authority.SHIZUKU -> "Shizuku"
         Authority.WIRED_ADB -> "Wired ADB"
+        Authority.ROOT_DIRECT -> "Root"
+        Authority.SHIZUKU_ROOT -> "Shizuku Root"
         Authority.NONE -> "未选择增强访问"
     }
 
@@ -744,7 +764,13 @@ class WorkspacePickerViewModel(
     private fun WorkspaceAccessItem.toRecentUi(): WorkspacePickerRecentUi = WorkspacePickerRecentUi(
         id = workspaceId,
         displayName = displayName,
-        authorityLabel = authority?.let { if (it == Authority.SHIZUKU) "Shizuku" else "Wired ADB" } ?: "普通文件夹授权",
+        authorityLabel = authority?.let { when (it) {
+            Authority.SHIZUKU -> "Shizuku"
+            Authority.WIRED_ADB -> "Wired ADB"
+            Authority.ROOT_DIRECT -> "Root"
+            Authority.SHIZUKU_ROOT -> "Shizuku Root"
+            Authority.NONE -> "普通文件夹授权"
+        } } ?: "普通文件夹授权",
         statusLabel = status.toUiLabel(),
         durablyAuthorized = durablyAuthorized,
         enabled = status != WorkspaceAccessStatus.REVOKED,
@@ -798,20 +824,9 @@ class WorkspacePickerViewModel(
         WorkspacePickerErrorCodeUi.UNKNOWN_OUTCOME -> "工作区操作结果未知，请检查状态后再试。"
     }
 
-    private fun friendlyLocationLabel(name: String): String = when (name.lowercase()) {
-        "storage", "sdcard" -> "内部存储"
-        "download", "downloads" -> "下载"
-        "documents", "document" -> "文档"
-        else -> name
-    }
-
-    private fun isRecommendedPrivilegedRootLocation(name: String): Boolean =
-        name.equals("storage", ignoreCase = true) || name.equals("sdcard", ignoreCase = true)
-
-    private fun privilegedRootLocationPriority(name: String): Int = when {
-        name.equals("storage", ignoreCase = true) -> 0
-        else -> 1
-    }
+    private fun friendlyLocationLabel(name: String) = WorkspacePickerLocations.label(name)
+    private fun isRecommendedPrivilegedRootLocation(name: String) = WorkspacePickerLocations.recommended(name)
+    private fun privilegedRootLocationPriority(name: String) = WorkspacePickerLocations.priority(name)
 
     private fun pathHintForAttach(currentLabel: String): String {
         val trail = directoryStack.map { it.label }.filter {

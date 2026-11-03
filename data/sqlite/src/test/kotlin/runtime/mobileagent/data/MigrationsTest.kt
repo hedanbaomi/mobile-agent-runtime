@@ -574,7 +574,7 @@ class MigrationsTest {
             val firstPolicy = db.query("SELECT selected_authority, dangerous_mode, policy_version FROM authority_policy").single()
             assertEquals("NONE", firstPolicy.string("selected_authority"))
             assertEquals("DISABLED", firstPolicy.string("dangerous_mode"))
-            assertEquals(3, db.query("SELECT * FROM authority_preferences").size)
+            assertEquals(5, db.query("SELECT * FROM authority_preferences").size)
             assertEquals("table", db.query("SELECT type FROM sqlite_master WHERE name = 'capability_grants'").single().string("type"))
             assertEquals("view", db.query("SELECT type FROM sqlite_master WHERE name = 'workspace_acl'").single().string("type"))
             assertTrue(db.query("PRAGMA table_info(skill_memory_entries)").none { it.string("name") == "content" })

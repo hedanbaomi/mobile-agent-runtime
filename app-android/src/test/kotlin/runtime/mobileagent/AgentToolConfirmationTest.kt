@@ -3,13 +3,14 @@
 
 package runtime.mobileagent
 
-import org.junit.jupiter.api.Assertions.assertFalse
-import org.junit.jupiter.api.Assertions.assertTrue
-import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertNull
-import org.junit.jupiter.api.Test
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Test
+import runtime.mobileagent.diagnostics.DiagnosticAuthority
 
 class AgentToolConfirmationTest {
     @Test fun backgroundShellPreservesCommandDisclosureAndCannotSkipApproval() {
@@ -21,6 +22,72 @@ class AgentToolConfirmationTest {
         assertNull(AgentToolConfirmation.shellArguments("read_batch", arguments))
         assertNull(AgentToolConfirmation.shellArguments("job_start", Json.parseToJsonElement("""{"tool":"calculator","arguments":{}}""").jsonObject))
     }
+
+    @Test fun rootOperationsAlwaysRequireExplicitApprovalWithoutForcingUnrelatedTools() {
+        // Actual Root operations always require interactive approval regardless of skipToolConfirmations.
+        assertTrue(
+            AgentToolConfirmation.requiresExplicitApproval(
+                toolName = "file_write_text",
+                selectedAuthority = "ROOT_DIRECT",
+                workspaceAuthority = DiagnosticAuthority.ROOT_DIRECT,
+                rootRun = true,
+            ),
+        )
+        assertTrue(
+            AgentToolConfirmation.requiresExplicitApproval(
+                toolName = "read_batch",
+                selectedAuthority = "SHIZUKU_ROOT",
+                workspaceAuthority = DiagnosticAuthority.NONE,
+                rootRun = true,
+            ),
+        )
+        assertTrue(
+            AgentToolConfirmation.requiresExplicitApproval(
+                toolName = "shell_exec",
+                selectedAuthority = "ROOT_DIRECT",
+                workspaceAuthority = DiagnosticAuthority.ROOT_DIRECT,
+                rootRun = true,
+            ),
+        )
+        assertTrue(AgentToolConfirmation.requiresExplicitApproval("file_get_metadata"))
+        assertTrue(AgentToolConfirmation.requiresExplicitApproval("file_set_metadata"))
+        assertTrue(AgentToolConfirmation.requiresExplicitApproval("file_apply_patch"))
+
+        // Non-Root conversations/workspaces and unrelated tools are NOT forced into approval merely because Root is selected globally.
+        assertFalse(
+            AgentToolConfirmation.requiresExplicitApproval(
+                toolName = "file_write_text",
+                selectedAuthority = "ROOT_DIRECT",
+                workspaceAuthority = DiagnosticAuthority.NONE,
+                rootRun = false,
+            ),
+        )
+        assertFalse(
+            AgentToolConfirmation.requiresExplicitApproval(
+                toolName = "file_read_text",
+                selectedAuthority = "SHIZUKU_ROOT",
+                workspaceAuthority = DiagnosticAuthority.SHIZUKU,
+                rootRun = false,
+            ),
+        )
+        assertFalse(
+            AgentToolConfirmation.requiresExplicitApproval(
+                toolName = "mcp__demo__ping",
+                selectedAuthority = "ROOT_DIRECT",
+                workspaceAuthority = DiagnosticAuthority.NONE,
+                rootRun = false,
+            ),
+        )
+        assertFalse(
+            AgentToolConfirmation.requiresExplicitApproval(
+                toolName = "mcp__demo__ping",
+                selectedAuthority = "ROOT_DIRECT",
+                workspaceAuthority = DiagnosticAuthority.NONE,
+                rootRun = true,
+            ),
+        )
+    }
+
     @Test fun missingOrMalformedSettingsRequireConfirmation() {
         assertFalse(AgentToolConfirmation.skip(null))
         assertFalse(AgentToolConfirmation.skip("not-json"))

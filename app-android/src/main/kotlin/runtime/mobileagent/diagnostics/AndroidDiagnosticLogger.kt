@@ -11,7 +11,7 @@ import java.io.File
 import java.io.OutputStream
 
 /** Android-only adapter. It touches only files and a small SharedPreferences flag. */
-class AndroidDiagnosticLogger private constructor(
+class AndroidDiagnosticLogger internal constructor(
     val store: RollingDiagnosticLogStore,
 ) {
     companion object {

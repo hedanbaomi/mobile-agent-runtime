@@ -108,6 +108,7 @@ data class AuthorityUiState(
     val connection: String = "DISCONNECTED",
     val configured: Boolean = false,
     val trust: String = "",
+    val rootShellConsentEnabled: Boolean = false,
 )
 
 data class SafWorkspaceUiState(
@@ -188,6 +189,8 @@ data class SettingsUiState(
     val selectedAuthority: String = "NONE",
     val shizukuAuthority: AuthorityUiState = AuthorityUiState("SHIZUKU"),
     val wiredAdbAuthority: AuthorityUiState = AuthorityUiState("WIRED_ADB"),
+    val rootDirectAuthority: AuthorityUiState = AuthorityUiState("ROOT_DIRECT"),
+    val shizukuRootAuthority: AuthorityUiState = AuthorityUiState("SHIZUKU_ROOT"),
     val wiredPairing: WiredPairingUiState = WiredPairingUiState(),
     val safWorkspace: SafWorkspaceUiState = SafWorkspaceUiState(),
     val dangerousMode: String = DangerousMode.DISABLED.name,
@@ -235,6 +238,10 @@ data class SettingsActions(
     val onAuthorityIntent: (String, Boolean) -> Unit = { _, _ -> },
     val onRefreshAuthority: (String) -> Unit = {},
     val onRequestShizukuPermission: () -> Unit = {},
+    /** Explicit foreground enable of the Root-over-Shizuku channel (intent + select + permission). */
+    val onEnableShizukuRoot: () -> Unit = {},
+    /** Opens the installed su manager UI for the direct Root channel. */
+    val onOpenRootManager: () -> Unit = {},
     val onEnableShizuku: () -> Unit = {},
     val onOpenShizuku: () -> Unit = {},
     val onRequestWiredPairing: (Boolean) -> Unit = {},
@@ -249,6 +256,7 @@ data class SettingsActions(
     val onOpenAgents: () -> Unit = {},
     val onSetDangerousMode: (String) -> Unit = {},
     val onDisableDangerousMode: () -> Unit = {},
+    val onSetRootShellConsent: (String, Boolean) -> Unit = { _, _ -> },
 )
 
 @Composable
@@ -548,6 +556,7 @@ private fun AuthoritySettingsCard(
     var authorityMenu by remember { mutableStateOf(false) }
     var dangerousMenu by remember { mutableStateOf(false) }
     var pendingDangerousMode by remember { mutableStateOf<String?>(null) }
+    var pendingRootShellConsent by remember { mutableStateOf<String?>(null) }
     var pendingWiredPairingReplacement by remember { mutableStateOf(false) }
     // RuntimeIntegration already applies the build admission fail-closed
     // policy to dangerousMode. Keep that effective value visible while still
@@ -561,13 +570,17 @@ private fun AuthoritySettingsCard(
     val selectedProvider = when (state.selectedAuthority) {
         "SHIZUKU" -> state.shizukuAuthority
         "WIRED_ADB" -> state.wiredAdbAuthority
+        "ROOT_DIRECT" -> state.rootDirectAuthority
+        "SHIZUKU_ROOT" -> state.shizukuRootAuthority
         else -> null
     }
+    val isRootSelected = state.selectedAuthority == "ROOT_DIRECT" || state.selectedAuthority == "SHIZUKU_ROOT"
     val shellAvailable = displayedDangerousMode != DangerousMode.DISABLED.name &&
         selectedProvider?.let {
             it.platformGrant == "GRANTED" &&
                 it.availability == "READY" &&
-                it.connection == "CONNECTED"
+                it.connection == "CONNECTED" &&
+                (!isRootSelected || it.rootShellConsentEnabled)
         } == true
     val safConfigured = state.safWorkspace.configured || state.safWorkspace.status == "GRANT_LOST"
 
@@ -590,6 +603,8 @@ private fun AuthoritySettingsCard(
                         "NONE" to authorityLabel("NONE", chinese),
                         "SHIZUKU" to authorityLabel("SHIZUKU", chinese),
                         "WIRED_ADB" to authorityLabel("WIRED_ADB", chinese),
+                        "ROOT_DIRECT" to stringResource(R.string.sett_authority_root_direct),
+                        "SHIZUKU_ROOT" to stringResource(R.string.sett_authority_shizuku_root),
                     ).forEach { (value, label) ->
                         DropdownMenuItem(
                             text = { Text(label) },
@@ -679,6 +694,81 @@ private fun AuthoritySettingsCard(
                 stringResource(R.string.ui_connect_a_usb_data_cable_enable_4dc371d0),
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.testTag("settings.wired_adb.usb.instructions"),
+            )
+
+            ProviderLifecycleBlock(
+                state = state.rootDirectAuthority,
+                label = stringResource(R.string.sett_authority_root_direct),
+                chinese = chinese,
+                modifier = Modifier.testTag("settings.authority.root_direct"),
+                onIntent = { actions.onAuthorityIntent("ROOT_DIRECT", it) },
+                onRefresh = { actions.onRefreshAuthority("ROOT_DIRECT") },
+                onPrimaryAction = {
+                    actions.onSelectAuthority("ROOT_DIRECT")
+                    actions.onAuthorityIntent("ROOT_DIRECT", true)
+                },
+                primaryActionLabel = stringResource(R.string.sett_authority_root_enable),
+                primaryActionEnabled = state.rootDirectAuthority.availability != "UNSUPPORTED",
+                primaryActionTestTag = "settings.authority.root_direct.enable",
+                onSecondaryAction = { actions.onAuthorityIntent("ROOT_DIRECT", false) },
+                secondaryActionLabel = stringResource(R.string.sett_authority_root_revoke),
+                secondaryActionEnabled = state.rootDirectAuthority.userIntentEnabled || state.rootDirectAuthority.configured,
+            )
+            Text(
+                stringResource(R.string.sett_root_manager_open_hint),
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag("settings.authority.root_direct.manager_hint"),
+            )
+            TextButton(
+                onClick = { actions.onOpenRootManager() },
+                modifier = Modifier.testTag("settings.authority.root_direct.open_manager"),
+            ) {
+                Text(stringResource(R.string.sett_root_manager_open))
+            }
+            SettingSwitch(
+                stringResource(R.string.sett_root_shell_consent_switch),
+                state.rootDirectAuthority.rootShellConsentEnabled,
+                { enabled ->
+                    if (enabled) pendingRootShellConsent = "ROOT_DIRECT"
+                    else actions.onSetRootShellConsent("ROOT_DIRECT", false)
+                },
+                modifier = Modifier.testTag("settings.authority.root_direct.shell_consent"),
+            )
+
+            ProviderLifecycleBlock(
+                state = state.shizukuRootAuthority,
+                label = stringResource(R.string.sett_authority_shizuku_root),
+                chinese = chinese,
+                modifier = Modifier.testTag("settings.authority.shizuku_root"),
+                onIntent = { actions.onAuthorityIntent("SHIZUKU_ROOT", it) },
+                onRefresh = { actions.onRefreshAuthority("SHIZUKU_ROOT") },
+                onPrimaryAction = {
+                    // Root-over-Shizuku needs its own explicit foreground authorization: first click
+                    // requests permission only; second click after platform grant selects + enables.
+                    actions.onEnableShizukuRoot()
+                },
+                primaryActionLabel = stringResource(R.string.sett_authority_root_enable),
+                primaryActionEnabled = state.shizukuRootAuthority.availability != "UNSUPPORTED",
+                primaryActionTestTag = "settings.authority.shizuku_root.enable",
+                onSecondaryAction = { actions.onAuthorityIntent("SHIZUKU_ROOT", false) },
+                secondaryActionLabel = stringResource(R.string.sett_authority_root_revoke),
+                secondaryActionEnabled = state.shizukuRootAuthority.userIntentEnabled || state.shizukuRootAuthority.configured,
+            )
+            if (state.shizukuRootAuthority.platformGrant != "GRANTED") {
+                Text(
+                    stringResource(R.string.sett_shizuku_root_needs_permission),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag("settings.authority.shizuku_root.needs_permission"),
+                )
+            }
+            SettingSwitch(
+                stringResource(R.string.sett_root_shell_consent_switch),
+                state.shizukuRootAuthority.rootShellConsentEnabled,
+                { enabled ->
+                    if (enabled) pendingRootShellConsent = "SHIZUKU_ROOT"
+                    else actions.onSetRootShellConsent("SHIZUKU_ROOT", false)
+                },
+                modifier = Modifier.testTag("settings.authority.shizuku_root.shell_consent"),
             )
 
             Column(
@@ -891,6 +981,33 @@ private fun AuthoritySettingsCard(
             },
         )
     }
+
+    pendingRootShellConsent?.let { rootAuthority ->
+        AlertDialog(
+            onDismissRequest = { pendingRootShellConsent = null },
+            title = { Text(stringResource(R.string.sett_root_shell_confirm_title)) },
+            text = {
+                Text(
+                    stringResource(R.string.sett_root_shell_confirm_body),
+                    modifier = Modifier.testTag("settings.root_shell_consent.risk_dialog"),
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingRootShellConsent = null
+                        actions.onSetRootShellConsent(rootAuthority, true)
+                    },
+                    modifier = Modifier.testTag("settings.root_shell_consent.confirm"),
+                ) { Text(stringResource(R.string.ui_enable_8eeb2a71)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRootShellConsent = null }) {
+                    Text(stringResource(R.string.ui_cancel_998b9c48))
+                }
+            },
+        )
+    }
 }
 
 @Composable
@@ -1078,6 +1195,8 @@ private fun ActionRow(content: @Composable RowScope.() -> Unit) {
 private fun authorityLabel(value: String, chinese: Boolean): String = when (value.uppercase()) {
     "SHIZUKU" -> "Shizuku"
     "WIRED_ADB" -> if (chinese) "有线 ADB" else "Wired ADB"
+    "ROOT_DIRECT" -> "Root (su)"
+    "SHIZUKU_ROOT" -> "Shizuku Root"
     else -> if (chinese) "无（仅基础工作区）" else "None (basic workspace only)"
 }
 

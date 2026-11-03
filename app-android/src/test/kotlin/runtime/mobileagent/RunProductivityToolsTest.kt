@@ -10,6 +10,33 @@ import org.junit.jupiter.api.Test
 import runtime.mobileagent.skills.*
 
 class RunProductivityToolsTest {
+    @Test fun rootChildrenWithoutDurableApprovalAreRejectedBeforeJobCreation(): Unit = runBlocking {
+        var calls = 0
+        val core = object : ToolExecutor {
+            override val specs = listOf("file_read_text", "shell_exec", "calculator").map {
+                ToolSpec(it, "fixture", "{}", "", false)
+            }
+            override suspend fun invoke(call: ToolCall): ToolResult {
+                calls++
+                return ToolResult.Value("{}")
+            }
+            override suspend fun approve(callId: String): ToolResult = error("not required")
+        }
+        val tools = RunProductivityTools(core, this, { true }, { it },
+            excludedChildTools = setOf("file_read_text", "shell_exec"))
+        try {
+            for (tool in listOf("file_read_text", "shell_exec")) {
+                assertTrue(tools.executor.invoke(ToolCall("job-$tool", "job_start",
+                    "{\"tool\":\"$tool\",\"arguments\":{}}")) is ToolResult.Invalid)
+            }
+            assertEquals(0, calls)
+            assertTrue(tools.executor.invoke(ToolCall("direct", "file_read_text", "{}")) is ToolResult.Value)
+            assertEquals(1, calls, "Only nesting is excluded, not the direct approved path")
+            assertEquals(ToolResult.NeedsApproval, tools.executor.invoke(ToolCall("calculator-job", "job_start",
+                "{\"tool\":\"calculator\",\"arguments\":{}}")))
+        } finally { tools.executor.close() }
+    }
+
     @Test fun aLaterLegacyCallWithTheSameModelIdKeepsItsOwnApproval(): Unit = runBlocking {
         var approved: String? = null
         val core = object : ToolExecutor {
@@ -106,5 +133,99 @@ class RunProductivityToolsTest {
         withTimeout(1000) { while (core.calls == 0) yield() }
         tools.executor.close()
         assertTrue(tools.hasUnknownOutcomes)
+    }
+
+    @Test fun undispatchedInvalidControlCallMustNotResolveToCompletedPriorCall(): Unit = runBlocking {
+        val core = object : ToolExecutor {
+            override val specs = listOf(BuiltinTools.calculator)
+            override suspend fun invoke(call: ToolCall) = ToolResult.Value("""{"value":2}""")
+            override suspend fun approve(callId: String) = ToolResult.Invalid("unused")
+            override suspend fun authorizeReplay(call: ToolCall) = true
+            override suspend fun authorizeDeferredResult(call: ToolCall) = true
+        }
+        val tools = RunProductivityTools(core, this, liveContext = { true }, reserveCalls = { it })
+        val validBatch = """{"calls":[{"call_id":"child-1","tool":"calculator","arguments":{"expression":"1+1"}}]}"""
+        val validJob = """{"tool":"calculator","arguments":{"expression":"2+2"}}"""
+        var round = 0
+        val adapter = object : runtime.mobileagent.provider.ModelAdapter {
+            override suspend fun probe(profile: runtime.mobileagent.domain.ModelProfile): runtime.mobileagent.provider.CapabilityReport = error("unused")
+            override suspend fun embed(request: runtime.mobileagent.provider.EmbeddingRequest, secret: CharArray): runtime.mobileagent.provider.EmbeddingBatch = error("unused")
+            override fun stream(request: runtime.mobileagent.provider.ModelRequest, secret: CharArray) = kotlinx.coroutines.flow.flow {
+                when (round++) {
+                    0 -> emit(runtime.mobileagent.provider.ModelEvent.ToolCallDelta("reused-batch-id", "read_batch", validBatch))
+                    1 -> emit(runtime.mobileagent.provider.ModelEvent.ToolCallDelta("reused-batch-id", "read_batch", "{}"))
+                    2 -> emit(runtime.mobileagent.provider.ModelEvent.ToolCallDelta("reused-job-id", "job_start", validJob))
+                    3 -> emit(runtime.mobileagent.provider.ModelEvent.ToolCallDelta("reused-job-id", "job_start", "{}"))
+                    else -> emit(runtime.mobileagent.provider.ModelEvent.TextDelta("done"))
+                }
+                emit(runtime.mobileagent.provider.ModelEvent.Completed)
+            }
+        }
+        val statuses = mutableListOf<String>()
+        val ids = mutableListOf<String?>()
+        runtime.mobileagent.privileged.InMemoryRootSqlConnection().use { db ->
+            runtime.mobileagent.data.Migrations.apply(db)
+            val now = runtime.mobileagent.domain.Utc.nowIso()
+            db.execute(
+                "INSERT INTO agent_snapshots(id,schema_version,agent_id,prompt_revision_id,chat_model_id,provider_revision,knowledge_base_ids,skill_ids,created_at,provider_id,chat_model_revision,parameter_overrides_json,context_policy_json,permission_settings_json,binding_manifest_json,expanded_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                listOf("review-snapshot", 1, "agent-1", "prompt-1", "model-1", 1, "[]", "[]", now, "provider-1", 1, "{}", "{}", "{}", "{}", "{}"),
+            )
+            db.execute(
+                "INSERT INTO conversations(id,snapshot_id,agent_snapshot_id,title,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                listOf("review-conversation", "review-snapshot", "review-snapshot", "Review", now, now),
+            )
+            val runs = runtime.mobileagent.data.RunRepository(db)
+            runs.create(runtime.mobileagent.domain.RunRecord("review-control-run", "review-snapshot", "review-conversation", createdAt = now))
+            val f = runtime.mobileagent.agent.AgentRun("review-control-run", "review-snapshot", "review-conversation")
+            val invocations = linkedMapOf<String, runtime.mobileagent.domain.ToolInvocation>()
+            try {
+                runtime.mobileagent.agent.AgentRuntime(
+                    adapter = adapter,
+                    executor = tools.executor,
+                    onApprove = { true },
+                ).run(
+                    runtime.mobileagent.agent.AgentRuntimeRequest(
+                        f,
+                        runtime.mobileagent.agent.EffectivePrompt("fixture", "", emptyList(), emptyList(), emptyList(), "read"),
+                        "model",
+                        "synthetic-secret".toCharArray(),
+                        true,
+                    ),
+                ).collect { event ->
+                    if (event is runtime.mobileagent.agent.RuntimeEvent.ToolResultProduced) {
+                        statuses += event.status
+                        val resolved = tools.runtimeInvocationId(event.callId)
+                        ids += resolved
+                        val runtimeInvocationId = resolved ?: runtime.mobileagent.skills.tooling.InternalRequestIds.new()
+                        val invocation = (invocations[runtimeInvocationId] ?: runtime.mobileagent.domain.ToolInvocation(
+                            runtimeInvocationId,
+                            f.runId,
+                            event.callId,
+                            event.name,
+                            "{}",
+                            createdAt = now,
+                        )).copy(
+                            state = if (event.status == "VALUE") "SUCCEEDED" else "FAILED",
+                            resultJson = event.resultJson,
+                            permissionDecision = "NOT_REQUESTED",
+                            updatedAt = now,
+                        )
+                        runs.observeRuntimeInvocation(invocation)
+                        invocations[runtimeInvocationId] = invocation
+                    }
+                }
+            } finally {
+                tools.executor.close()
+            }
+            assertEquals(listOf("VALUE", "INVALID", "VALUE", "INVALID"), statuses)
+            assertNotNull(ids[0])
+            assertNull(ids[1], "Undispatched invalid read_batch call must not inherit prior completed runtimeInvocationId")
+            assertNotNull(ids[2])
+            assertNull(ids[3], "Undispatched invalid job_start call must not inherit prior completed runtimeInvocationId")
+            val persisted = runs.invocations(f.runId)
+            assertEquals(4, persisted.size)
+            assertEquals("SUCCEEDED", persisted.first { it.invocationId == ids[0] }.state)
+            assertEquals("SUCCEEDED", persisted.first { it.invocationId == ids[2] }.state)
+        }
     }
 }

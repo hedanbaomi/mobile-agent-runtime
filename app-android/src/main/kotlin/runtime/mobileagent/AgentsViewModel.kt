@@ -47,6 +47,7 @@ interface AgentGrantPort {
         get() = "授权存储未就绪。"
 
     fun listWorkspaces(): List<Workspace> = emptyList()
+    fun isRootWorkspace(workspaceId: String): Boolean = false
     fun listGrants(agentId: String, includeRevoked: Boolean = true): List<CapabilityGrant> = emptyList()
     fun saveGrant(grant: CapabilityGrant): CapabilityGrant = grantPortUnavailable(unavailableMessage)
     fun revokeGrant(grantId: String, expectedRevision: Long): CapabilityGrant = grantPortUnavailable(unavailableMessage)
@@ -173,13 +174,14 @@ private fun isAgentEditorLifetimeAllowed(lifetime: GrantLifetime): Boolean =
     lifetime == GrantLifetime.ONCE || lifetime == GrantLifetime.PERSISTENT
 
 /** Validate the complete draft before the profile or any grant mutation is attempted. */
-internal fun validateAgentGrantDraftForContext(editor: AgentEditorUi) {
+internal fun validateAgentGrantDraftForContext(editor: AgentEditorUi, grantPort: AgentGrantPort? = null) {
     val draft = editor.grantDraft ?: return
     require(isAgentEditorLifetimeAllowed(draft.lifetime)) { AGENT_EDITOR_LIFETIME_CONTEXT_ERROR }
     val workspace = draft.workspaceId?.let { workspaceId ->
         editor.workspaces.firstOrNull { it.id == workspaceId && it.enabled }
             ?: error("请选择可用工作区。")
     }
+    RootAgentGrantGuards.requireOrdinaryWorkspace(grantPort, workspace?.id)
     val skill = draft.skillInstallId?.let { installId ->
         editor.trustedSkills.firstOrNull { it.installId == installId && it.enabled && it.trusted }
             ?: error("Skill 安装或包授权未验证，不能创建绑定。")
@@ -207,12 +209,13 @@ internal fun saveAgentGrantDraft(
     createdAt: String = Utc.nowIso(),
 ): CapabilityGrant {
     require(grantPort.available) { grantPort.unavailableMessage }
-    validateAgentGrantDraftForContext(editor)
+    validateAgentGrantDraftForContext(editor, grantPort)
     val draft = editor.grantDraft ?: error("没有待保存的能力授权。")
     val workspace = draft.workspaceId?.let { workspaceId ->
         editor.workspaces.firstOrNull { it.id == workspaceId && it.enabled }
             ?: error("请选择可用工作区。")
     }
+    RootAgentGrantGuards.requireOrdinaryWorkspace(grantPort, workspace?.id)
     val skill = draft.skillInstallId?.let { installId ->
         editor.trustedSkills.firstOrNull { it.installId == installId && it.enabled && it.trusted }
             ?: error("Skill 安装或包授权未验证，不能创建绑定。")
@@ -220,7 +223,7 @@ internal fun saveAgentGrantDraft(
     val pathScope = draft.pathScope?.trim()?.ifBlank { null }
 
     // Final fail-closed gate immediately before constructing the canonical write payload.
-    validateAgentGrantDraftForContext(editor)
+    validateAgentGrantDraftForContext(editor, grantPort)
     val grant = CapabilityGrant(
         grantId = EntityId.random().value,
         agentId = agentId,
@@ -270,6 +273,7 @@ internal fun reauthorizeStaleAgentGrant(
     require(old.agentId == agentId && !old.revoked && !old.consumed) {
         "Revoked, consumed, or foreign grants cannot be re-authorized"
     }
+    RootAgentGrantGuards.requireOrdinaryWorkspace(grantPort, old.workspaceId)
     val now = java.time.Instant.now()
     val unexpired = old.expiresAt?.let { expiry ->
         runCatching { java.time.Instant.parse(expiry).isAfter(now) }.getOrDefault(false)
@@ -335,6 +339,7 @@ internal fun saveAgentWorkspaceGrantPreset(
     val preset = editor.workspaceGrantPreset ?: return emptyList()
     val workspace = editor.workspaces.firstOrNull { it.id == preset.workspaceId && it.enabled }
         ?: error("请选择可用工作区。")
+    RootAgentGrantGuards.requireOrdinaryWorkspace(grantPort, workspace.id)
     require(workspace.readable) { "该工作区没有读取权限。" }
     if (preset.access == AgentWorkspaceAccessPreset.READ_WRITE) {
         require(workspace.writable) { "该工作区仅有读取权限，不能授予读写工具。" }
@@ -719,7 +724,8 @@ class AgentsViewModel(
             require(!grantChanges || grantPort.available) {
                 grantPort.unavailableMessage
             }
-            if (editor.grantDraft != null) validateAgentGrantDraftForContext(editor)
+            if (editor.grantDraft != null) validateAgentGrantDraftForContext(editor, grantPort)
+            RootAgentGrantGuards.preflightEditorGrantMutations(editor, grantPort)
             editor.workspaceGrantPreset?.let { preset ->
                 val workspace = editor.workspaces.firstOrNull { it.id == preset.workspaceId && it.enabled }
                     ?: error("请选择可用工作区。")
@@ -827,7 +833,8 @@ class AgentsViewModel(
     private fun persistGrantChanges(editor: AgentEditorUi, agentId: String) {
         // Validate before revoking existing grants as well as before saving the new one.  An old
         // TASK/SESSION draft must not cause any grant-side mutation from this context-free page.
-        if (editor.grantDraft != null) validateAgentGrantDraftForContext(editor)
+        if (editor.grantDraft != null) validateAgentGrantDraftForContext(editor, grantPort)
+        RootAgentGrantGuards.preflightEditorGrantMutations(editor, grantPort)
         editor.grants
             .filter { !it.grant.revoked && !it.expired && !it.policyStale && !it.enabled }
             .forEach { pending ->
@@ -1010,7 +1017,7 @@ class AgentsViewModel(
             snapshotGrantBindings = grantData.snapshotBindings,
             defaultWorkspaceId = grantData.workspaceDefault?.workspaceId,
             defaultWorkspaceRevision = grantData.workspaceDefault?.revision ?: 0L,
-            workspacePresetWorkspaceId = grantData.workspaces.firstOrNull { it.enabled }?.id,
+            workspacePresetWorkspaceId = RootAgentGrantGuards.defaultOrdinaryPresetWorkspaceId(grantData.workspaces),
             retrievalMode = agent?.retrievalMode ?: "explicit",
             skipToolConfirmations = AgentToolConfirmation.skip(agent?.permissionSettingsJson),
             webSearchEnabled = AgentSearchPermission.enabled(agent?.permissionSettingsJson),
@@ -1042,6 +1049,7 @@ class AgentsViewModel(
                     maxFileBytes = workspace.maxFileBytes,
                     enabled = workspace.enabled,
                     revision = workspace.revision,
+                    isRoot = grantPort.isRootWorkspace(workspace.id),
                 )
             }
             val installedSkills = grantPort.listInstalledSkills()
@@ -1104,9 +1112,7 @@ class AgentsViewModel(
         snapshotGrantBindings = data.snapshotBindings,
         defaultWorkspaceId = data.workspaceDefault?.workspaceId,
         defaultWorkspaceRevision = data.workspaceDefault?.revision ?: 0L,
-        workspacePresetWorkspaceId = workspacePresetWorkspaceId
-            ?.takeIf { selected -> data.workspaces.any { it.id == selected && it.enabled } }
-            ?: data.workspaces.firstOrNull { it.enabled }?.id,
+        workspacePresetWorkspaceId = RootAgentGrantGuards.defaultOrdinaryPresetWorkspaceId(data.workspaces, workspacePresetWorkspaceId),
     )
 
     private fun isGrantExpired(grant: CapabilityGrant, now: String): Boolean {

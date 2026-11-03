@@ -141,6 +141,7 @@ data class WorkspacePickerUiState(
     val canUseCurrentDirectory: Boolean = false,
     val canUseSafFallback: Boolean = false,
     val advancedPathAvailable: Boolean = false,
+    val rootDirectorySelectionAvailable: Boolean = false,
     val attachPhase: WorkspacePickerAttachPhaseUi = WorkspacePickerAttachPhaseUi.IDLE,
     val attached: WorkspacePickerAttachedUi? = null,
     val pendingNewThread: WorkspacePickerNewThreadUi? = null,
@@ -161,6 +162,7 @@ data class WorkspacePickerActions(
     val onOpenRecent: (String) -> Unit = {},
     /** Advanced foreground-only path flow; the model has no access to this callback. */
     val onOpenAdvancedPath: () -> Unit = {},
+    val onConfirmRootDirectory: (String, Boolean, Boolean, Boolean) -> Unit = { _, _, _, _ -> },
 )
 
 /**
@@ -209,7 +211,7 @@ fun WorkspacePickerScreen(
                 }
                 Spacer(Modifier.height(8.dp))
                 AuthorityCard(state.authority, state.mode)
-                if (state.mode == WorkspacePickerModeUi.PRIVILEGED && state.canUseSafFallback) {
+                if (state.showsSafFallbackButton()) {
                     OutlinedButton(
                         onClick = actions.onUseSafFallback,
                         modifier = Modifier
@@ -281,7 +283,9 @@ fun WorkspacePickerScreen(
             }
         }
 
-        if (state.mode == WorkspacePickerModeUi.PRIVILEGED) {
+        rootDirectorySelectionItem(state, actions, zh)
+
+        if (state.showsDirectoryBrowser()) {
             item(key = "locations-title") {
                 Text((if (zh) "位置" else "Locations"), style = MaterialTheme.typography.titleMedium)
             }

@@ -108,6 +108,7 @@ import runtime.mobileagent.domain.AgentSnapshot
 import runtime.mobileagent.domain.AgentWorkspaceDefault
 import runtime.mobileagent.domain.Authority
 import runtime.mobileagent.domain.AuthorityPolicy
+import runtime.mobileagent.domain.isRootAuthority
 import runtime.mobileagent.domain.AuthorityPreferences
 import runtime.mobileagent.domain.AuthorityUserIntent
 import runtime.mobileagent.domain.CapabilityGrant
@@ -367,6 +368,7 @@ class RuntimeIntegration(
 
     private val authorityManager = AuthorityManager(authorityStateStore)
     private val dangerousModeManager = DangerousModeManager(dangerousModeStateStore, buildPolicy)
+    val rootCoordinator = runtime.mobileagent.privileged.RootRuntimeCoordinator(appContext, db)
     private val workspaceRegistry = WorkspaceRegistry()
     private val bindingCipher = AndroidKeystorePrivilegedWorkspaceBindingCipherFactory.create()
     private val appInstanceId = AndroidAppInstanceIdStoreFactory.create(appContext).loadOrCreateAppInstanceId()
@@ -457,14 +459,18 @@ class RuntimeIntegration(
     }
 
     init {
+        rootCoordinator.reconcileStartupRecovery()
         wireShizukuBackend()
         wireWiredBackend()
+        rootCoordinator.registerBackends(shellBackends, workspaceBackends, privilegedWorkspaceProviders, fullDeviceFilesGrantRepository)
         reconcileFullDeviceGrants()
         hydrateWorkspaces()
         installDiagnosticsCollectors()
         shizukuAuthority?.addStateListener(shizukuStateListener)
         shizukuAuthority?.addPermissionResultListener(shizukuPermissionListener)
         shizukuAuthority?.let { applyShizukuState(it.state.value) }
+        rootCoordinator.refreshLiveSessions(shizukuAuthority?.state?.value)
+        rootCoordinator.syncAuthorityManagerStates(authorityManager, shizukuAuthority?.state?.value)
         applyWiredState(wiredAuthority.status.value)
         scheduleWiredReconnect()
         refreshSafWorkspace()
@@ -514,7 +520,7 @@ class RuntimeIntegration(
         agentWorkspaceDefaultRepository.get(agentId)
 
     override fun resolveNewThreadWorkspace(agentId: String): String? =
-        agentWorkspaceDefaultRepository.resolveForNewThread(agentId)
+        agentWorkspaceDefaultRepository.resolveForNewThread(agentId)?.takeIf(rootWorkspaceUi::canSealNewThreadSnapshot)
 
     override fun saveAgentWorkspaceDefault(default: AgentWorkspaceDefault): AgentWorkspaceDefault {
         val previous = agentWorkspaceDefaultRepository.get(default.agentId)
@@ -546,41 +552,8 @@ class RuntimeIntegration(
     }
 
     override fun createSnapshotWithWorkspace(
-        agentId: String,
-        workspaceId: String?,
-        snapshotId: String,
-        at: String,
-    ): AgentSnapshot = db.transaction {
-        val workspace = workspaceId?.let { id ->
-            workspaceRepository.get(id)?.takeIf { it.enabled && it.readable }
-                ?: error("Workspace is unavailable")
-        }
-        val snapshot = agents.createSnapshot(agentId, snapshotId, at)
-        if (workspace != null) {
-            val now = Instant.ofEpochMilli(System.currentTimeMillis())
-            val policyVersion = authorityPolicyRepository.getPolicy().policyVersion
-            capabilityGrantRepository.forAgent(agentId, includeRevoked = false)
-                .filter { grant ->
-                    grant.workspaceId == workspace.id &&
-                        grant.policyVersion == policyVersion &&
-                        grant.isActiveFor(now, null, null)
-                }
-                .forEach { grant ->
-                    capabilityGrantRepository.bindSnapshot(
-                        SnapshotGrantBinding(
-                            snapshotId = snapshot.id,
-                            grantId = grant.grantId,
-                            capability = grant.capability,
-                            workspaceId = grant.workspaceId,
-                            pathScope = grant.pathScope,
-                            policyVersion = grant.policyVersion,
-                            boundAt = at,
-                        ),
-                    )
-                }
-        }
-        snapshot
-    }
+        agentId: String, workspaceId: String?, snapshotId: String, at: String,
+    ): AgentSnapshot = RootSnapshotFactory(db, rootCoordinator).withWorkspace(agentId, workspaceId, snapshotId, at)
 
     override fun createToolExecutionContextForWorkspace(
         snapshot: AgentSnapshot,
@@ -691,8 +664,7 @@ class RuntimeIntegration(
         .asSequence()
         .filter { it.enabled && it.scope == WorkspaceScope.SELECTED_DIRECTORY }
         .filter { workspace ->
-            workspace.backendType != WorkspaceBackendType.PRIVILEGED ||
-                privilegedWorkspaceBindingRepository.get(workspace.id) != null
+            rootWorkspaceUi.includeInRecent(workspace, privilegedWorkspaceBindingRepository.get(workspace.id) != null)
         }
         .mapIndexed { index, workspace -> workspaceAccessItem(workspace, index + 1, agentId) }
         .toList()
@@ -715,6 +687,13 @@ class RuntimeIntegration(
             writable = backend?.descriptor?.writable == true,
         )
     }
+
+    private val rootWorkspaceUi by lazy { RootWorkspaceUiController(db, rootCoordinator) }
+
+    override suspend fun attachRootDirectory(
+        authority: Authority, absolutePath: String, writable: Boolean, metadata: Boolean, shell: Boolean,
+        target: WorkspacePickerTarget,
+    ): WorkspaceAccessResult = rootWorkspaceUi.attach(authority, absolutePath, writable, metadata, shell, target)
 
     override suspend fun attachPrivilegedDirectory(
         authority: Authority,
@@ -749,17 +728,16 @@ class RuntimeIntegration(
     override suspend fun useRecentWorkspace(
         workspaceId: String,
         target: WorkspacePickerTarget,
-    ): WorkspaceAccessResult = useRecentWorkspace(
-        workspaceId = workspaceId,
-        pickerTarget = target,
-        plan = planFor(target),
-    )
+    ): WorkspaceAccessResult = useRecentWorkspace(workspaceId = workspaceId, pickerTarget = target, plan = planFor(target))
 
     internal suspend fun useRecentWorkspace(
         workspaceId: String,
         pickerTarget: WorkspacePickerTarget?,
         plan: WorkspaceIntentPlan,
     ): WorkspaceAccessResult {
+        if (rootWorkspaceUi.isRoot(workspaceId)) {
+            return rootWorkspaceUi.useRecentNullable(workspaceId, pickerTarget, plan)
+        }
         val workspace = workspaceRepository.get(workspaceId)
             ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND)
         if (!workspace.enabled || workspace.scope != WorkspaceScope.SELECTED_DIRECTORY) {
@@ -840,6 +818,9 @@ class RuntimeIntegration(
         currentWorkspaceId: String,
         requestedWorkspaceId: String,
     ): WorkspaceAccessResult {
+        if (rootWorkspaceUi.isRoot(requestedWorkspaceId)) return rootWorkspaceUi.confirmNewThread(
+            agentId, currentThreadId, currentWorkspaceId, requestedWorkspaceId,
+        )
         val agent = agents.get(agentId)
             ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.CONFLICT)
         val currentBinding = conversationWorkspaceBindingRepository.get(currentThreadId)
@@ -1016,6 +997,24 @@ class RuntimeIntegration(
         )
     }
 
+    override suspend fun attachRootDirectory(
+        authority: Authority,
+        absolutePath: String,
+        writable: Boolean,
+        metadata: Boolean,
+        shell: Boolean,
+        plan: WorkspaceIntentPlan,
+        target: WorkspaceTarget,
+    ): WorkspaceAccessResult = rootWorkspaceUi.attachWithPlan(
+        authority = authority,
+        path = absolutePath,
+        writable = writable,
+        metadata = metadata,
+        shell = shell,
+        plan = plan,
+        target = target,
+    )
+
     override suspend fun useRecent(
         workspaceId: String,
         plan: WorkspaceIntentPlan,
@@ -1032,6 +1031,9 @@ class RuntimeIntegration(
      * defaulted (or the reverse).
      */
     override suspend fun commitDraft(draft: WorkspaceDraft, agentId: String): WorkspaceAccessResult {
+        if (rootWorkspaceUi.isRoot(draft.workspaceId)) {
+            return rootWorkspaceUi.commitDraft(draft, agentId)
+        }
         val workspace = workspaceRepository.get(draft.workspaceId)
             ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND)
         if (!workspace.enabled || workspace.scope != WorkspaceScope.SELECTED_DIRECTORY) {
@@ -1221,13 +1223,16 @@ class RuntimeIntegration(
             },
         )
         val memory = createSkillMemoryToolExecutor(frozen)
+        val root = runtime.mobileagent.privileged.RootToolExecutorAdmission.create(db, rootCoordinator, agentContext)
+        val rootSelected = authorityPolicyRepository.getPolicy().selectedAuthority.isRootAuthority
         return ToolExecutorFactory(
             web = web,
             mcp = mcp,
             python = python,
             memory = memory,
             workspace = workspace,
-            shell = shell,
+            shell = if (rootSelected) null else shell,
+            root = root,
         )
     }
 
@@ -1249,12 +1254,7 @@ class RuntimeIntegration(
         val activeSafGrants = safGrants.filter { it.status == SafGrantStatus.ACTIVE }
         val enabledWorkspaces = workspaceRepository.list(enabledOnly = true)
         val readyWorkspaceIds = enabledWorkspaces.mapNotNull { workspace ->
-            val registered = workspaceRegistry.registered(workspace.id) ?: return@mapNotNull null
-            val descriptor = registered.descriptor
-            val usable = descriptor.enabled &&
-                (descriptor.readable || descriptor.writable) &&
-                registered.backend.capabilities.isNotEmpty()
-            workspace.id.takeIf { usable }
+            workspace.id.takeIf { rootWorkspaceUi.isDiagnosticWorkspaceReady(workspace, workspaceRegistry.registered(workspace.id)) }
         }.toSet()
         val emptyCapabilityWorkspaceIds = enabledWorkspaces.mapNotNull { workspace ->
             val registered = workspaceRegistry.registered(workspace.id) ?: return@mapNotNull null
@@ -1269,10 +1269,7 @@ class RuntimeIntegration(
             else -> DiagnosticBackendProbeState.FAILED
         }
         val authorityMismatchWorkspaceCount = enabledWorkspaces.count { workspace ->
-            if (workspace.backendType != WorkspaceBackendType.PRIVILEGED) return@count false
-            val authority = workspace.rootReference.removePrefix("authority:")
-                .let { runCatching { Authority.valueOf(it) }.getOrNull() }
-            authority == null || authority.toElevated() != selected
+            rootWorkspaceUi.isAuthorityMismatched(workspace, workspace.authorityOrNull(), selected)
         }
         val safBackendIds = activeSafGrants.map { it.workspaceId }.toSet()
         val readySafIds = safBackendIds.filter { it in readyWorkspaceIds }.toSet()
@@ -1355,46 +1352,8 @@ class RuntimeIntegration(
      * the exact persisted set is checked before the snapshot is returned.
      */
     fun createSnapshotWithCurrentGrants(
-        agentId: String,
-        snapshotId: String = EntityId.random().value,
-        at: String = Utc.nowIso(),
-    ): AgentSnapshot = db.transaction {
-        require(agentId.isNotBlank()) { "Agent id is missing" }
-        require(snapshotId.isNotBlank()) { "Snapshot id is missing" }
-        require(at.isNotBlank()) { "Snapshot timestamp is missing" }
-        val snapshot = agents.createSnapshot(agentId = agentId, snapshotId = snapshotId, at = at)
-        val policyVersion = authorityPolicyRepository.getPolicy().policyVersion
-        val now = Utc.nowIso()
-        val expected = capabilityGrantRepository.forAgent(agentId, includeRevoked = false)
-            .asSequence()
-            .filter { it.policyVersion == policyVersion }
-            // Validate a scoped grant against its persisted owner while taking the snapshot. The
-            // runtime supplies the active task/session identity again before dispatch.
-            .filter { grant -> grant.isActiveFor(java.time.Instant.parse(now), grant.taskId, grant.sessionId) }
-            .map { grant ->
-                SnapshotGrantBinding(
-                    snapshotId = snapshot.id,
-                    grantId = grant.grantId,
-                    capability = grant.capability,
-                    workspaceId = grant.workspaceId,
-                    pathScope = grant.pathScope,
-                    policyVersion = grant.policyVersion,
-                    boundAt = now,
-                )
-            }
-            .toList()
-        expected.forEach { binding ->
-            val persisted = capabilityGrantRepository.bindSnapshot(binding)
-            require(persisted == binding) {
-                "Snapshot grant binding save returned an unexpected binding"
-            }
-        }
-        val persisted = capabilityGrantRepository.listSnapshotBindings(snapshot.id)
-        require(persisted.size == expected.size && persisted.toSet() == expected.toSet()) {
-            "Snapshot grant binding verification failed"
-        }
-        snapshot
-    }
+        agentId: String, snapshotId: String = EntityId.random().value, at: String = Utc.nowIso(),
+    ): AgentSnapshot = RootSnapshotFactory(db, rootCoordinator).withCurrentGrants(agentId, snapshotId, at)
 
     /** Build a run context from an immutable Agent snapshot and current DB grants. */
     fun createToolExecutionContext(
@@ -1467,6 +1426,9 @@ class RuntimeIntegration(
             applyShizukuState(live)
         }
         refreshSafWorkspace()
+        val liveShizuku = RootPermissionEntry.resolveState(shizukuAuthority?.state?.value)
+        rootCoordinator.refreshLiveSessions(liveShizuku)
+        rootCoordinator.syncAuthorityManagerStates(authorityManager, liveShizuku)
         applyWiredState(wiredAuthority.status.value)
         scheduleWiredReconnect()
         return settingsSnapshot().also {
@@ -1477,6 +1439,7 @@ class RuntimeIntegration(
     override fun selectAuthority(authority: Authority): SettingsAuthoritySnapshot {
         require(authority in Authority.entries) { "Unsupported authority" }
         check(authorityManager.selectAuthority(authority.toElevated())) { "Authority policy changed; reload and retry" }
+        rootCoordinator.syncAuthorityManagerStates(authorityManager, RootPermissionEntry.resolveState(shizukuAuthority?.state?.value))
         return settingsSnapshot().also {
             recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
         }
@@ -1486,6 +1449,13 @@ class RuntimeIntegration(
         when (authority) {
             Authority.NONE -> require(!enabled) { "NONE cannot be enabled" }
             Authority.SHIZUKU -> check(authorityManager.setUserIntent(ElevatedAuthority.SHIZUKU, enabled))
+            Authority.ROOT_DIRECT, Authority.SHIZUKU_ROOT -> rootCoordinator.setUserIntent(
+                authority = authority,
+                enabled = enabled,
+                authorityManager = authorityManager,
+                dangerousMode = dangerousModeManager.policy(),
+                shizukuState = RootPermissionEntry.resolveState(shizukuAuthority?.state?.value),
+            )
             Authority.WIRED_ADB -> {
                 check(authorityManager.setUserIntent(ElevatedAuthority.WIRED_ADB, enabled))
                 wiredAuthority.setUserIntent(enabled)
@@ -1557,6 +1527,19 @@ class RuntimeIntegration(
         return refresh()
     }
 
+    /**
+     * Root-channel permission request. Unlike the legacy shell path it never writes the SHIZUKU
+     * configured marker and never binds the legacy user service; the Root handshake alone proves
+     * the UID0 server. The request is only issued from this explicit foreground action.
+     */
+    override fun requestRootShizukuPermission(): SettingsAuthoritySnapshot {
+        RootPermissionEntry.request(
+            sample = { runtime.mobileagent.privileged.RootShizukuLiveSampler.sample() },
+            refresh = { shizukuAuthority?.refresh() },
+        )
+        return refresh()
+    }
+
     override fun requestShizukuPermission(): SettingsAuthoritySnapshot {
         val bridge = shizukuAuthority ?: error("Shizuku is unavailable")
         shizukuPermissionRequestPending.set(true)
@@ -1578,6 +1561,12 @@ class RuntimeIntegration(
     }
 
     override fun openShizuku(): Boolean = runtime.mobileagent.openShizuku(appContext)
+
+    override fun openRootManager(): Boolean = runtime.mobileagent.openRootManager(appContext)
+
+    override fun rootShizukuPlatformReady(): Boolean =
+        RootPermissionEntry.platformReady(runtime.mobileagent.privileged.RootShizukuLiveSampler.sample())
+
 
     override fun reauthorizeWiredAdb(): SettingsAuthoritySnapshot {
         wiredAuthority.setUserIntent(true)
@@ -1669,6 +1658,7 @@ class RuntimeIntegration(
             return SettingsAuthorityMutation(false, snapshot, "DANGEROUS_MODE_CONFIRMATION_REQUIRED")
         }
         val changed = dangerousModeManager.setPolicy(mode)
+        rootCoordinator.onDangerousModeUpdated(mode, authorityManager, shizukuAuthority?.state?.value)
         val snapshot = settingsSnapshot()
         diagnostics.recordDangerousModeDecision(
             DangerousModeDecisionRecord(
@@ -1688,6 +1678,20 @@ class RuntimeIntegration(
         )
         return SettingsAuthorityMutation(changed.accepted, snapshot, changed.reason)
     }
+
+    override fun setRootShellConsent(
+        authority: Authority,
+        enabled: Boolean,
+        confirmed: Boolean,
+    ): SettingsAuthorityMutation = runtime.mobileagent.mutateRootShellConsent(
+        rootCoordinator = rootCoordinator,
+        authority = authority,
+        enabled = enabled,
+        confirmed = confirmed,
+        authorityManager = authorityManager,
+        shizukuState = shizukuAuthority?.state?.value,
+        snapshotProvider = ::settingsSnapshot,
+    )
 
     // ---- Backend hydration and state -------------------------------------------------------
 
@@ -2169,6 +2173,7 @@ class RuntimeIntegration(
         }
     }
 
+
     private fun applyShizukuState(state: ShizukuAuthorityState) {
         val definitiveGrant = when {
             state.errorCode == ShizukuAuthorityBridge.PERMISSION_CHECK_FAILED -> null
@@ -2212,6 +2217,12 @@ class RuntimeIntegration(
         }
         authorityManager.updateAvailability(ElevatedAuthority.SHIZUKU, availability)
         authorityManager.updateConnection(ElevatedAuthority.SHIZUKU, connection)
+        // The live listener must fence the Root session too, not only refresh the UI: an explicit
+        // platform denial invalidates old approvals even if the UID0 service is still responsive.
+        rootCoordinator.refreshLiveSessions(state)
+        // A permission answer or passive refresh only updates state; it never starts the Root
+        // service. The user performs the explicit second "enable" click after authorizing.
+        rootCoordinator.syncAuthorityManagerStates(authorityManager, state)
         diagnostics.recordShizukuLifecycle(
             ShizukuLifecycleRecord(
                 state = when {
@@ -2435,6 +2446,7 @@ class RuntimeIntegration(
         shizukuAuthority?.removePermissionResultListener(shizukuPermissionListener)
         scope.cancel()
         wiredReconnectInFlight.set(false)
+        runCatching { rootCoordinator.close() }
         privilegedWorkspaceProviders.values.forEach { provider -> runCatching { provider.close() } }
         privilegedWorkspaceProviders.clear()
     }
@@ -2566,11 +2578,12 @@ class RuntimeIntegration(
             else -> SettingsSafGrantState()
         }
         val policy = authorityPolicyRepository.getPolicy()
-        return SettingsAuthoritySnapshot(
-            selectedAuthority = selected,
+        return rootCoordinator.enrichSettingsSnapshot(
+            authorityManager = authorityManager,
+            selected = selected,
             appPrivateAvailable = workspaceRegistry.descriptor(INTERNAL_WORKSPACE_ID) != null,
             shizuku = shizuku,
-            wiredAdb = wired,
+            wired = wired,
             saf = saf,
             // DangerousModeManager exposes the effective, build-admitted
             // policy. Keep it separate from the durable DB policy below so a
@@ -2610,12 +2623,16 @@ class RuntimeIntegration(
         null, Authority.NONE -> null
         Authority.SHIZUKU -> ElevatedAuthority.SHIZUKU
         Authority.WIRED_ADB -> ElevatedAuthority.WIRED_ADB
+        Authority.ROOT_DIRECT -> ElevatedAuthority.ROOT_DIRECT
+        Authority.SHIZUKU_ROOT -> ElevatedAuthority.SHIZUKU_ROOT
     }
 
     private fun Authority.toDiagnostic(): DiagnosticAuthority = when (this) {
         Authority.NONE -> DiagnosticAuthority.NONE
         Authority.SHIZUKU -> DiagnosticAuthority.SHIZUKU
         Authority.WIRED_ADB -> DiagnosticAuthority.WIRED_ADB
+        Authority.ROOT_DIRECT -> DiagnosticAuthority.ROOT_DIRECT
+        Authority.SHIZUKU_ROOT -> DiagnosticAuthority.SHIZUKU_ROOT
     }
 
     private fun runtime.mobileagent.skills.tooling.AuthorityState.toSettings(authority: Authority) = SettingsAuthorityProviderState(
@@ -2623,6 +2640,8 @@ class RuntimeIntegration(
         userIntent = when (userIntent) {
             AuthorityUserIntent.SHIZUKU -> AuthorityUserIntent.SHIZUKU
             AuthorityUserIntent.WIRED_ADB -> AuthorityUserIntent.WIRED_ADB
+            AuthorityUserIntent.ROOT_DIRECT -> AuthorityUserIntent.ROOT_DIRECT
+            AuthorityUserIntent.SHIZUKU_ROOT -> AuthorityUserIntent.SHIZUKU_ROOT
             AuthorityUserIntent.NONE -> AuthorityUserIntent.NONE
         },
         platformGrant = grant,
@@ -2654,6 +2673,7 @@ class RuntimeIntegration(
 
     /** Stable, non-sensitive status for a workspace row exposed to UI callers. */
     private fun workspaceAccessStatus(workspace: Workspace): WorkspaceAccessStatus {
+        if (rootWorkspaceUi.isRoot(workspace.id)) return rootWorkspaceUi.status(workspace)
         val safGrant = if (workspace.backendType == WorkspaceBackendType.SAF_TREE) {
             safWorkspaceGrantRepository.get(workspace.id)
         } else {
@@ -2729,14 +2749,16 @@ class RuntimeIntegration(
         requestedName = requestedName,
         ordinal = ordinal,
         fullDevice = workspace.scope == WorkspaceScope.FULL_DEVICE_FILES,
+        authority = workspace.authorityOrNull(),
     )
 
     private fun Workspace.authorityOrNull(): Authority? = if (backendType != WorkspaceBackendType.PRIVILEGED) {
         null
     } else {
-        rootReference.removePrefix("authority:")
-            .let { runCatching { Authority.valueOf(it) }.getOrNull() }
-            ?.takeIf { it != Authority.NONE }
+        runtime.mobileagent.data.RootWorkspaceRepository(db).getOrigin(id)?.authority
+            ?: rootReference.removePrefix("authority:")
+                .let { runCatching { Authority.valueOf(it) }.getOrNull() }
+                ?.takeIf { it != Authority.NONE }
     }
 
     private fun recordConversationWorkspaceBinding(
@@ -2801,12 +2823,13 @@ class RuntimeIntegration(
     ): WorkspaceAccessItem {
         val status = workspaceAccessStatus(workspace)
         val now = Instant.ofEpochMilli(System.currentTimeMillis())
-        val grants = agentId?.let { capabilityGrantRepository.forAgent(it, includeRevoked = false) }
+        val rawGrants = agentId?.let { capabilityGrantRepository.forAgent(it, includeRevoked = false) }
             .orEmpty()
             .filter { grant ->
                 grant.workspaceId == workspace.id &&
                     grant.isActiveFor(now, null, null)
             }
+        val grants = rootWorkspaceUi.filterDurableWorkspaceGrants(workspace, rawGrants)
         val fullDeviceConfirmationPresent = workspace.scope != WorkspaceScope.FULL_DEVICE_FILES ||
             fullDeviceFilesGrantRepository.load(workspace.id) != null
         return committedWorkspaceAccessItem(
@@ -3159,6 +3182,7 @@ class RuntimeIntegration(
 
     /** Save one canonical Agent grant without mutating grants for other workspaces. */
     private fun saveAgentGrantWithCurrentWorkspaceInvariant(grant: CapabilityGrant): CapabilityGrant {
+        rootWorkspaceUi.requireOrdinaryGrantTarget(grant.workspaceId)
         grant.workspaceId?.let { workspaceId ->
             require(workspaceRepository.get(workspaceId)?.enabled == true) { "Workspace is unavailable" }
         }
@@ -3847,6 +3871,7 @@ class RuntimeIntegration(
         workspaceId: String,
         target: WorkspaceAccessGrantTarget,
     ): WorkspaceAccessResult {
+        if (rootWorkspaceUi.isRoot(workspaceId)) return workspaceAccessFailure(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
         val workspace = workspaceRepository.get(workspaceId)
             ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND)
         if (!workspace.enabled) return workspaceAccessFailure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
@@ -3884,6 +3909,7 @@ class RuntimeIntegration(
     }
 
     private fun renewExistingWorkspaceGrantsInternal(agentId: String, workspaceId: String): WorkspaceAccessResult {
+        if (rootWorkspaceUi.isRoot(workspaceId)) return workspaceAccessFailure(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
         val workspace = workspaceRepository.get(workspaceId)
             ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND)
         if (workspace.scope != WorkspaceScope.SELECTED_DIRECTORY || !workspace.enabled) {
@@ -4168,6 +4194,8 @@ class RuntimeIntegration(
             workspace.copy(rootReference = "workspace:${workspace.id}")
         }
 
+        override fun isRootWorkspace(workspaceId: String): Boolean = rootWorkspaceUi.isRoot(workspaceId)
+
         override fun listGrants(agentId: String, includeRevoked: Boolean): List<CapabilityGrant> =
             capabilityGrantRepository.forAgent(agentId, includeRevoked)
 
@@ -4192,6 +4220,7 @@ class RuntimeIntegration(
             val grant = capabilityGrantRepository.get(binding.grantId)
                 ?: error("Capability grant is missing")
             require(grant.agentId == snapshot.agentId) { "Snapshot grant belongs to another Agent" }
+            rootWorkspaceUi.requireOrdinarySnapshotBinding(binding.workspaceId, grant.workspaceId, grant.grantId)
             return capabilityGrantRepository.bindSnapshot(binding)
         }
 

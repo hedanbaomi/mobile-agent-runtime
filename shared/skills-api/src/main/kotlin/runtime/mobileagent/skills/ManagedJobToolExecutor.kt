@@ -351,10 +351,14 @@ class ManagedJobToolExecutor(
      * are proxied to the delegate, so a wrapper never blocks or widens another
      * owner's deferred channel.
      */
-    override suspend fun authorizeDeferredResult(call: ToolCall): Boolean {
-        if (call.name !in MANAGED_JOB_NAMES) return delegate.authorizeDeferredResult(call)
-        // Management tools cannot themselves be nested in another background job.
-        return false
+    override suspend fun authorizeDeferredResult(call: ToolCall): Boolean =
+        call.takeIf { it.name !in MANAGED_JOB_NAMES }?.let { delegate.authorizeDeferredResult(it) } == true
+
+    override suspend fun precheckDeferredResult(call: ToolCall): Boolean =
+        call.takeIf { it.name !in MANAGED_JOB_NAMES }?.let { delegate.precheckDeferredResult(it) } == true
+
+    override suspend fun withholdDeferredResult(call: ToolCall) {
+        call.takeIf { it.name !in MANAGED_JOB_NAMES }?.let { delegate.withholdDeferredResult(it) }
     }
 
     /** Cancel and join every job and watchdog; nothing survives the Run. */
@@ -373,6 +377,7 @@ class ManagedJobToolExecutor(
         }
         snapshot.forEach { job -> finish(job, ManagedJobStatus.CANCELLED, REASON_CLOSED, withheld = true) }
         synchronized(lock) { snapshot.forEach { dropContentLocked(it) } }
+        snapshot.forEach { withholdChildSafely(it) }
     }
 
     override val hasRunningJobs: Boolean
@@ -445,7 +450,7 @@ class ManagedJobToolExecutor(
                 finish(job, ManagedJobStatus.CANCELLED, REASON_REVOKED, withheld = true)
                 return
             }
-            val first = try {
+            val result = try {
                 // Reserve the one child call this job really makes, immediately
                 // before dispatch: a later revocation must not be charged.
                 if (reserveChildCall() < 1) {
@@ -453,31 +458,29 @@ class ManagedJobToolExecutor(
                     return
                 }
                 synchronized(lock) { job.dispatched = true }
-                withJobDeadline(deadlineAt) { delegate.invoke(job.childCall) }
-            } catch (_: TimeoutCancellationException) {
-                finish(job, ManagedJobStatus.TIMED_OUT, ToolErrorCode.TIMEOUT.name)
-                return
-            }
-            val result = if (first == ToolResult.NeedsApproval) {
-                if (!liveAuthorizedSafely()) {
-                    finish(job, ManagedJobStatus.CANCELLED, REASON_REVOKED, withheld = true)
-                    return
-                }
-                try {
+                val first = withJobDeadline(deadlineAt) { delegate.invoke(job.childCall) }
+                if (first == ToolResult.NeedsApproval) {
+                    if (!liveAuthorizedSafely()) {
+                        finish(job, ManagedJobStatus.CANCELLED, REASON_REVOKED, withheld = true)
+                        return
+                    }
                     withJobDeadline(deadlineAt) { delegate.approve(job.childCall.callId) }
-                } catch (_: TimeoutCancellationException) {
-                    finish(job, ManagedJobStatus.TIMED_OUT, ToolErrorCode.TIMEOUT.name)
-                    return
+                } else {
+                    first
                 }
-            } else {
-                first
+            } catch (_: TimeoutCancellationException) {
+                finish(job, ManagedJobStatus.TIMED_OUT, ToolErrorCode.TIMEOUT.name, withheld = true)
+                withholdChildSafely(job)
+                return
             }
             record(job, result)
         } catch (revoked: JobAuthorizationRevoked) {
             finish(job, ManagedJobStatus.CANCELLED, REASON_REVOKED, withheld = true)
+            withholdChildSafely(job)
             throw revoked
         } catch (cancelled: CancellationException) {
             finish(job, ManagedJobStatus.CANCELLED, REASON_CALLER, withheld = true)
+            withholdChildSafely(job)
             throw cancelled
         } catch (_: Exception) {
             // The delegate failed *after* it may have dispatched the call, so a tool
@@ -486,6 +489,7 @@ class ManagedJobToolExecutor(
             // completing.  A side-effect-free read changed nothing, so it fails.
             val status = failedAfterDispatchStatus(job.dispatched, job.sideEffect)
             finish(job, status, ToolErrorCode.INTERNAL_ERROR.name, withheld = true)
+            withholdChildSafely(job)
         }
     }
 
@@ -527,14 +531,12 @@ class ManagedJobToolExecutor(
         }
         val job = synchronized(lock) { jobs[args.jobId] } ?: return ToolResult.Invalid("Unknown job id")
         val cursorArg = args.cursor
-        val requestedOffset = when {
-            cursorArg != null -> {
-                val decoded = cursor.decode(cursorArg) ?: return ToolResult.Invalid("Cursor is invalid")
-                if (decoded.first != args.jobId) return ToolResult.Invalid("Cursor does not belong to this job")
-                decoded.second
-            }
-            args.offsetBytes != null -> args.offsetBytes ?: 0
-            else -> 0
+        val requestedOffset = if (cursorArg != null) {
+            val decoded = cursor.decode(cursorArg) ?: return ToolResult.Invalid("Cursor is invalid")
+            if (decoded.first != args.jobId) return ToolResult.Invalid("Cursor does not belong to this job")
+            decoded.second
+        } else {
+            args.offsetBytes ?: 0
         }
         val maxBytes = (args.maxBytes ?: budget.defaultChunkBytes).coerceIn(1, budget.maxChunkBytes)
         val waitMs = args.waitMs.coerceIn(0, budget.maxWaitMs.toInt())
@@ -585,6 +587,7 @@ class ManagedJobToolExecutor(
             job.watchdog?.cancel()
             job.work?.join()
             finish(job, ManagedJobStatus.CANCELLED, REASON_CALLER, withheld = true)
+            withholdChildSafely(job)
         }
         return ToolResult.Value(envelope(job).toString())
     }
@@ -664,6 +667,11 @@ class ManagedJobToolExecutor(
         job.work?.join()
         finish(job, ManagedJobStatus.CANCELLED, REASON_REVOKED, withheld = true)
         synchronized(lock) { dropContentLocked(job) }
+        withholdChildSafely(job)
+    }
+
+    private suspend fun withholdChildSafely(job: ManagedJob) {
+        if (job.dispatched) runCatching { delegate.withholdDeferredResult(job.childCall) }
     }
 
     private fun dropContentLocked(job: ManagedJob) {

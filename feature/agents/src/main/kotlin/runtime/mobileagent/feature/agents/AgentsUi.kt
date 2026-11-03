@@ -169,6 +169,7 @@ data class AgentWorkspaceUi(
     val maxFileBytes: Long,
     val enabled: Boolean,
     val revision: Long,
+    val isRoot: Boolean = false,
 )
 
 /** A canonical grant plus labels resolved from the current workspace/Skill inventory. */
@@ -1219,8 +1220,10 @@ private fun AgentGrantEditor(
                 style = MaterialTheme.typography.bodySmall,
             )
         }
+        val ordinaryWorkspaces = editor.workspaces.filterNot { it.isRoot }
         val presetWorkspaceId = editor.workspacePresetWorkspaceId
-            ?: editor.workspaces.firstOrNull { it.enabled }?.id
+            ?.takeIf { selected -> ordinaryWorkspaces.any { it.id == selected } }
+            ?: ordinaryWorkspaces.firstOrNull { it.enabled }?.id
         Column(
             Modifier.fillMaxWidth()
                 .padding(vertical = 8.dp)
@@ -1236,9 +1239,9 @@ private fun AgentGrantEditor(
             )
             WorkspaceDropdown(
                 selectedId = presetWorkspaceId,
-                workspaces = editor.workspaces,
+                workspaces = ordinaryWorkspaces,
                 zh = zh,
-                enabled = grantEditorReady && editor.workspaces.any { it.enabled },
+                enabled = grantEditorReady && ordinaryWorkspaces.any { it.enabled },
                 testTag = AgentTestTags.WORKSPACE_PRESET_SELECTOR,
                 allowAgentScope = false,
             ) { workspaceId ->
@@ -1249,7 +1252,7 @@ private fun AgentGrantEditor(
                     ),
                 )
             }
-            if (editor.workspaces.none { it.enabled }) {
+            if (ordinaryWorkspaces.none { it.enabled }) {
                 Text(
                     stringResource(R.string.ui_no_workspace_is_available_choose_a_67498e4c),
                     color = MaterialTheme.colorScheme.error,
@@ -1406,7 +1409,7 @@ private fun AgentGrantDraftEditor(editor: AgentEditorUi, actions: AgentsActions,
         }
         WorkspaceDropdown(
             selectedId = draft.workspaceId,
-            workspaces = editor.workspaces,
+            workspaces = editor.workspaces.filterNot { it.isRoot },
             zh = zh,
             enabled = enabled && draft.capability.value != CapabilityId.SHELL_EXECUTE,
             testTag = AgentTestTags.GRANT_WORKSPACE,

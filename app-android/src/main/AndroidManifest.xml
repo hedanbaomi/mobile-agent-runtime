@@ -5,6 +5,7 @@
         <intent><action android:name="android.intent.action.TTS_SERVICE" /></intent>
         <intent><action android:name="android.speech.action.RECOGNIZE_SPEECH" /></intent>
         <package android:name="moe.shizuku.privileged.api" />
+        <package android:name="com.topjohnwu.magisk" />
         <intent>
             <action android:name="android.intent.action.INSTALL_PACKAGE" />
             <data android:mimeType="application/vnd.android.package-archive" />

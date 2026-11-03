@@ -219,6 +219,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         selectedAuthority = authority.selectedAuthority.name,
         shizukuAuthority = authority.shizuku.toUiState().copy(selected = authority.selectedAuthority == Authority.SHIZUKU),
         wiredAdbAuthority = authority.wiredAdb.toUiState().copy(selected = authority.selectedAuthority == Authority.WIRED_ADB),
+        rootDirectAuthority = authority.rootDirect.toUiState().copy(selected = authority.selectedAuthority == Authority.ROOT_DIRECT),
+        shizukuRootAuthority = authority.shizukuRoot.toUiState().copy(selected = authority.selectedAuthority == Authority.SHIZUKU_ROOT),
         wiredPairing = wiredPairingUiState.value,
         safWorkspace = authority.saf.toUiState(),
         dangerousMode = authority.dangerousMode.name,
@@ -272,6 +274,22 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun requestShizukuPermission() {
         mutateAuthority { authorityPort.requestShizukuPermission() }
+    }
+
+    /** Explicit foreground enable of Root-over-Shizuku; selects first, then binds the intent. */
+    fun enableShizukuRoot() {
+        RootChannelEntryActions.enableShizukuRoot(
+            platformReady = { authorityPort.rootShizukuPlatformReady() },
+            requestPermission = { authorityState.value = authorityPort.requestRootShizukuPermission() },
+            select = { authorityState.value = authorityPort.selectAuthority(Authority.SHIZUKU_ROOT) },
+            setIntent = { authorityState.value = authorityPort.setUserIntent(Authority.SHIZUKU_ROOT, true) },
+            clearError = { error.value = null },
+            onError = { failure -> error.value = safeAuthorityError(failure) },
+        )
+    }
+
+    fun openRootManager() {
+        error.value = RootChannelEntryActions.openRootManagerMessage { authorityPort.openRootManager() }
     }
 
     /**
@@ -459,6 +477,19 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         error.value = if (result.accepted) null else authorityReason(result.reason)
     }
 
+    fun setRootShellConsent(value: String, enabled: Boolean, confirmed: Boolean = true) {
+        applySettingsRootShellConsent(
+            port = authorityPort,
+            authorityValue = value,
+            enabled = enabled,
+            confirmed = confirmed,
+            onSnapshot = { authorityState.value = it },
+            onError = { error.value = it },
+            reasonMapper = ::authorityReason,
+            errorMapper = ::safeAuthorityError,
+        )
+    }
+
     private fun publishWiredPairingState() {
         val prompt = wiredPairingPrompt
         wiredPairingUiState.value = WiredPairingUiState(
@@ -530,6 +561,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         "NONE", "APP_PRIVATE" -> Authority.NONE
         "SHIZUKU", "SHIZUKU_BINDER" -> Authority.SHIZUKU
         "WIRED_ADB", "WIRED-ADB", "WIRED ADB" -> Authority.WIRED_ADB
+        "ROOT_DIRECT", "ROOT-DIRECT", "ROOT DIRECT" -> Authority.ROOT_DIRECT
+        "SHIZUKU_ROOT", "SHIZUKU-ROOT", "SHIZUKU ROOT" -> Authority.SHIZUKU_ROOT
         else -> null
     }
 
@@ -843,6 +876,7 @@ private fun SettingsAuthorityProviderState.toUiState() =
         connection = connection.name,
         configured = configured,
         trust = trust?.name.orEmpty(),
+        rootShellConsentEnabled = rootShellConsentEnabled,
     )
 
 private fun SettingsSafGrantState.toUiState() =

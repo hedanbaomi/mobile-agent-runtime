@@ -316,9 +316,9 @@ class TransferRepository(
         item.manifest.copy(
             trpgCheckpoints = trpgTransfer.checkpointEntries(snapshot, expected.id),
             trpgJournal = if (snapshot.mode == runtime.mobileagent.domain.AgentMode.TRPG) TrpgRepository(db, clock).exportJournal(expected.id) else null,
-            messages = ConversationRepository(db).messages(expected.id),
-            runs = runs,
-            toolInvocations = runs.flatMap { runsRepo.invocations(it.runId) },
+            messages = RootRunManifest.sanitizeMessagesForTransfer(db, runs, runs.flatMap { runsRepo.invocations(it.runId) }, ConversationRepository(db).messages(expected.id)),
+            runs = runs.map { it.copy(manifestJson = RootRunManifest.forTransfer(it.manifestJson)) },
+            toolInvocations = RootRunManifest.sanitizeInvocationsForTransfer(db, runs, runs.flatMap { runsRepo.invocations(it.runId) }),
             auditEvents = runs.flatMap { auditRepo.list(it.runId) },
         )
     }

@@ -68,7 +68,8 @@ object Migrations {
     // v36 adds optional imported character metadata; old Agents and snapshots retain their values.
     // v38 fixes the Agent mode at creation and adds bounded per-conversation TRPG state/receipts.
     // It also repairs old API26 offset-timestamp ordering keys without rewriting messages.
-    const val VERSION = 39
+    // v40 adds explicit Root consent and session epochs without inheriting prior trust.
+    const val VERSION = 40
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",
@@ -110,8 +111,8 @@ object Migrations {
         "CREATE TABLE IF NOT EXISTS skill_packages (package_hash TEXT PRIMARY KEY, id TEXT NOT NULL, name TEXT NOT NULL, version TEXT NOT NULL, license_id TEXT NOT NULL, classification TEXT NOT NULL, manifest_json TEXT, skill_markdown TEXT, reasons TEXT NOT NULL, created_at TEXT NOT NULL, package_bytes BLOB, source_hash TEXT)",
         "CREATE TABLE IF NOT EXISTS skill_installs (install_id TEXT PRIMARY KEY, package_hash TEXT NOT NULL, enabled INTEGER NOT NULL, created_at TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS permission_grants (grant_id TEXT PRIMARY KEY, install_id TEXT NOT NULL, package_hash TEXT NOT NULL, capabilities TEXT NOT NULL, revision INTEGER NOT NULL, revoked INTEGER NOT NULL, scopes_json TEXT, lifetime TEXT NOT NULL DEFAULT 'PERSISTENT' CHECK(lifetime IN('ONCE','TASK','SESSION','PERSISTENT')), policy_version INTEGER NOT NULL DEFAULT 0 CHECK(policy_version >= 0), created_at TEXT NOT NULL DEFAULT '', expires_at TEXT, revoked_at TEXT)",
-        "CREATE TABLE IF NOT EXISTS authority_policy (id INTEGER NOT NULL PRIMARY KEY CHECK(id = 1), selected_authority TEXT NOT NULL CHECK(selected_authority IN('NONE','SHIZUKU','WIRED_ADB')), dangerous_mode TEXT NOT NULL CHECK(dangerous_mode IN('DISABLED','ENABLED_CONFIRM_HIGH_RISK','ENABLED_AUTONOMOUS')), policy_version INTEGER NOT NULL DEFAULT 0 CHECK(policy_version >= 0), updated_at TEXT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS authority_preferences (authority TEXT NOT NULL PRIMARY KEY CHECK(authority IN('NONE','SHIZUKU','WIRED_ADB')), user_intent_enabled INTEGER NOT NULL DEFAULT 0 CHECK(user_intent_enabled IN(0,1)), explicitly_configured INTEGER NOT NULL DEFAULT 0 CHECK(explicitly_configured IN(0,1)), updated_at TEXT NOT NULL)",
+        RootAuthoritySchema.POLICY_SQL,
+        RootAuthoritySchema.PREFERENCES_SQL,
         "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, display_name TEXT NOT NULL, backend_type TEXT NOT NULL CHECK(backend_type IN('INTERNAL','SAF_TREE','PRIVILEGED')), root_reference TEXT NOT NULL, readable INTEGER NOT NULL CHECK(readable IN(0,1)), writable INTEGER NOT NULL CHECK(writable IN(0,1)), quota_bytes INTEGER, max_file_bytes INTEGER NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN(0,1)), revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'SELECTED_DIRECTORY' CHECK(scope IN('SELECTED_DIRECTORY','FULL_DEVICE_FILES')))",
         "CREATE TABLE IF NOT EXISTS privileged_workspace_bindings (workspace_id TEXT PRIMARY KEY, authority TEXT NOT NULL CHECK(authority IN('SHIZUKU','WIRED_ADB')), encrypted_locator BLOB NOT NULL CHECK(length(encrypted_locator) > 0 AND length(encrypted_locator) <= 1048576), locator_nonce BLOB NOT NULL CHECK(length(locator_nonce) >= 12 AND length(locator_nonce) <= 32), locator_version INTEGER NOT NULL CHECK(locator_version > 0), key_version INTEGER NOT NULL CHECK(key_version > 0), aad_app_instance_id TEXT NOT NULL, aad_workspace_id TEXT NOT NULL, aad_authority TEXT NOT NULL CHECK(aad_authority IN('SHIZUKU','WIRED_ADB')), aad_locator_version INTEGER NOT NULL CHECK(aad_locator_version > 0), scope TEXT NOT NULL CHECK(scope IN('SELECTED_DIRECTORY','FULL_DEVICE_FILES')), status TEXT NOT NULL CHECK(status IN('ACTIVE','UNAVAILABLE','UNAVAILABLE_AUTHORITY','REATTACHING','WORKSPACE_NOT_FOUND','PERMISSION_DENIED','GRANT_LOST','BINDING_UNRECOVERABLE','REVOKED')), revision INTEGER NOT NULL CHECK(revision > 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(workspace_id) REFERENCES workspaces(id))",
         "CREATE TABLE IF NOT EXISTS conversation_workspace_bindings (session_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, bound_at TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), FOREIGN KEY(session_id) REFERENCES conversations(id) ON DELETE CASCADE, FOREIGN KEY(workspace_id) REFERENCES workspaces(id))",
@@ -132,11 +133,11 @@ object Migrations {
         "CREATE TABLE IF NOT EXISTS desktop_trust (desktop_id TEXT PRIMARY KEY, app_instance_id TEXT NOT NULL, secret_ref TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN('TRUSTED','REAUTH_REQUIRED','FORGOTTEN')), created_at TEXT NOT NULL, last_seen_at TEXT, forgotten_at TEXT, revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0))",
         "CREATE TABLE IF NOT EXISTS skill_memory_spaces (space_id TEXT PRIMARY KEY, install_id TEXT NOT NULL, package_hash TEXT NOT NULL, quota_bytes INTEGER NOT NULL CHECK(quota_bytes > 0), max_entries INTEGER NOT NULL CHECK(max_entries > 0), version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(install_id, package_hash))",
         "CREATE TABLE IF NOT EXISTS skill_memory_entries (entry_id TEXT PRIMARY KEY, space_id TEXT NOT NULL, path TEXT NOT NULL, content_hash TEXT NOT NULL, storage_ref TEXT NOT NULL, byte_length INTEGER NOT NULL CHECK(byte_length >= 0), version INTEGER NOT NULL CHECK(version > 0), created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(space_id, path), FOREIGN KEY(space_id) REFERENCES skill_memory_spaces(space_id))",
-        "CREATE TABLE IF NOT EXISTS approval_records (approval_id TEXT PRIMARY KEY, request_id TEXT NOT NULL, call_id TEXT NOT NULL, agent_id TEXT NOT NULL, skill_id TEXT, command_hash TEXT, cwd_hash TEXT, selected_authority TEXT NOT NULL CHECK(selected_authority IN('NONE','SHIZUKU','WIRED_ADB')), dangerous_mode TEXT NOT NULL CHECK(dangerous_mode IN('DISABLED','ENABLED_CONFIRM_HIGH_RISK','ENABLED_AUTONOMOUS')), tool_schema_version INTEGER NOT NULL CHECK(tool_schema_version > 0), policy_version INTEGER NOT NULL CHECK(policy_version >= 0), config_snapshot_hash TEXT NOT NULL, decision TEXT NOT NULL CHECK(decision IN('APPROVED','DENIED','EXPIRED','CONSUMED')), created_at TEXT NOT NULL, expires_at TEXT, consumed_at TEXT, UNIQUE(request_id))",
-        "CREATE TABLE IF NOT EXISTS tool_audit_details (audit_id TEXT PRIMARY KEY, request_id TEXT NOT NULL, agent_id TEXT NOT NULL, skill_id TEXT, capability TEXT NOT NULL, workspace_id TEXT, relative_path_sha256 TEXT, authority TEXT NOT NULL CHECK(authority IN('NONE','SHIZUKU','WIRED_ADB')), approval_id TEXT, dangerous_mode TEXT, policy_version INTEGER NOT NULL DEFAULT 0 CHECK(policy_version >= 0), cwd_sha256 TEXT, command_sha256 TEXT, exit_code INTEGER, timed_out INTEGER NOT NULL DEFAULT 0 CHECK(timed_out IN(0,1)), cancelled INTEGER NOT NULL DEFAULT 0 CHECK(cancelled IN(0,1)), stdout_truncated INTEGER NOT NULL DEFAULT 0 CHECK(stdout_truncated IN(0,1)), stderr_truncated INTEGER NOT NULL DEFAULT 0 CHECK(stderr_truncated IN(0,1)), stdout_bytes INTEGER NOT NULL DEFAULT 0 CHECK(stdout_bytes >= 0), stderr_bytes INTEGER NOT NULL DEFAULT 0 CHECK(stderr_bytes >= 0), duration_ms INTEGER NOT NULL DEFAULT 0 CHECK(duration_ms >= 0), result TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(audit_id) REFERENCES audit_events(id))",
+        RootAuthoritySchema.APPROVAL_SQL,
+        RootAuthoritySchema.AUDIT_SQL,
         "CREATE TABLE IF NOT EXISTS skill_invocations (invocation_id TEXT PRIMARY KEY, run_id TEXT, package_hash TEXT, grant_revision INTEGER, state TEXT NOT NULL, created_at TEXT NOT NULL)",
         "CREATE TABLE IF NOT EXISTS runs (run_id TEXT PRIMARY KEY, snapshot_id TEXT NOT NULL, conversation_id TEXT NOT NULL, state TEXT NOT NULL, budget_json TEXT NOT NULL, stop_reason TEXT, error_code TEXT, model_rounds INTEGER NOT NULL DEFAULT 0, tool_calls INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, started_at TEXT, finished_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, retry_acknowledged_at TEXT, manifest_json TEXT NOT NULL DEFAULT '{}', FOREIGN KEY(snapshot_id) REFERENCES agent_snapshots(id), FOREIGN KEY(conversation_id) REFERENCES conversations(id))",
-        "CREATE TABLE IF NOT EXISTS tool_invocations (invocation_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, call_id TEXT NOT NULL, name TEXT NOT NULL, arguments_json TEXT NOT NULL, permission_decision TEXT NOT NULL, state TEXT NOT NULL, result_json TEXT, error_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(run_id, call_id), FOREIGN KEY(run_id) REFERENCES runs(run_id))",
+        RootAuthoritySchema.TOOL_INVOCATIONS_SQL,
         "CREATE INDEX IF NOT EXISTS idx_prompt_revisions_agent_created ON prompt_revisions(agent_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_messages_conversation_created ON messages(conversation_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_runs_state ON runs(state)",
@@ -290,6 +291,7 @@ object Migrations {
             // v24 is additive and lazy: legacy jobs/cache rows are not guessed into unit plans.
             DocumentPipelineStore.schema.forEach { sql -> connection.execute(sql) }
             columns.forEach { column -> ensureColumn(connection, column) }
+            RootAuthoritySchema.install(connection, current)
             WorldBookSchema.install(connection)
             CharacterCardStorage.install(connection)
             TrpgSchema.install(connection)
@@ -1129,6 +1131,9 @@ object Migrations {
     }
 
     private fun readLegacyAuthorityPreference(facts: LegacyAuthorityFacts, key: String, raw: Any?) {
+        // Reserved control-plane state (unconfirmed Root drain obligations) is never a user
+        // preference and must not be reinterpreted as legacy consent during import.
+        if (RootPendingDrainRepository.isPendingDrainKey(key)) return
         val normalized = normalizeName(key)
         if (normalized.isBlank()) return
         if (normalized in SELECTED_AUTHORITY_KEYS) {
@@ -2149,38 +2154,6 @@ object Migrations {
      * same strict shape the repository enforces; source ids are unique and non-empty.
      */
     private fun validateContextCompactions(connection: SqlConnection) {
-        val json = Json { ignoreUnknownKeys = false; explicitNulls = false }
-        connection.query("SELECT * FROM context_compactions").forEach { row ->
-            val id = row.string("id")
-            val state = runCatching { ContextCompactionState.valueOf(row.string("state")) }.getOrElse {
-                invalid("context_compactions[$id] has an invalid state")
-            }
-            val summary = row.columns["summary_json"] as? String
-            if (state == ContextCompactionState.SUCCEEDED) {
-                val text = summary ?: invalid("context_compactions[$id] is SUCCEEDED without a summary")
-                if (runCatching { ContextSummary.canonicalize(text) }.isFailure) {
-                    invalid("context_compactions[$id] has an invalid summary")
-                }
-            } else if (summary != null) {
-                invalid("context_compactions[$id] carries a summary while ${state.name}")
-            }
-            val ids = runCatching { json.decodeFromString<List<String>>(row.string("source_message_ids_json")) }
-                .getOrElse { invalid("context_compactions[$id] has an invalid source id list") }
-            if (ids.isEmpty() || ids.distinct().size != ids.size) {
-                invalid("context_compactions[$id] source ids must be unique and non-empty")
-            }
-            if (row.string("source_content_hash").isBlank()) {
-                invalid("context_compactions[$id] has no source content digest")
-            }
-            listOf("before_units", "after_units", "input_tokens", "output_tokens").forEach { field ->
-                if (row.long(field) < 0) invalid("context_compactions[$id].$field is negative")
-            }
-            listOf(
-                "conversation_id", "snapshot_id", "run_id", "input_hash", "model_id",
-                "model_fingerprint", "authorization_fingerprint", "reason", "created_at", "updated_at",
-            ).forEach { field ->
-                if (row.string(field).isBlank()) invalid("context_compactions[$id].$field is blank")
-            }
-        }
+        MigrationValidation.contextCompactions(connection) { message -> invalid(message) }
     }
 }

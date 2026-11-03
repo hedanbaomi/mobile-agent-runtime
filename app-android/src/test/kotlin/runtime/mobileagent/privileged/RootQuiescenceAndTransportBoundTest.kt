@@ -500,11 +500,22 @@ class RootQuiescenceAndTransportBoundTest {
         try {
             assertTrue(workerStarted.await(5, TimeUnit.SECONDS))
             s.coordinator.detachSession(Authority.ROOT_DIRECT, "test_revoke_during_file_op")
+            assertNull(
+                s.coordinator.acknowledgeDegradedRecovery(Authority.ROOT_DIRECT, userConfirmed = true),
+                "Recovery must remain blocked while the file worker is held",
+            )
             releaseWorker.countDown()
             assertTrue(future.get(5, TimeUnit.SECONDS) is ToolResult.UnknownOutcome)
             assertTrue(RootAuthorityRepository(s.db).get(Authority.ROOT_DIRECT).degraded)
-            val recovered = s.coordinator.acknowledgeDegradedRecovery(Authority.ROOT_DIRECT, userConfirmed = true)
-            assertNotNull(recovered)
+            // UNKNOWN may reach the caller before the transport worker and retire thread finish.
+            // Recovery is eventual after verified drain, not synchronous with the caller's result.
+            val drainDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            var recovered = s.coordinator.acknowledgeDegradedRecovery(Authority.ROOT_DIRECT, userConfirmed = true)
+            while (recovered == null && System.nanoTime() < drainDeadline) {
+                Thread.sleep(10L)
+                recovered = s.coordinator.acknowledgeDegradedRecovery(Authority.ROOT_DIRECT, userConfirmed = true)
+            }
+            assertNotNull(recovered, "Released file worker must drain and permit recovery within the budget")
             assertFalse(recovered!!.degraded)
         } finally {
             releaseWorker.countDown()

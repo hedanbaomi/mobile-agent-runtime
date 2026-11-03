@@ -64,11 +64,9 @@ internal fun withheldVisualEvidenceNotice(
     detail: String? = null,
 ): String {
     val reason = policy?.code?.name ?: detail ?: "VISUAL_ATTACHMENT_UNAVAILABLE"
-    val guidance = if (policy != null) {
+    val guidance = policy?.let {
         "如需原图，请新建会话改用支持图像的对话模型；启用纯文本模式可在明知没有原图的情况下继续。"
-    } else {
-        ""
-    }
+    }.orEmpty()
     return "本次结果有 $count 处视觉证据未提供原图（原因：$reason）。" +
         "不得声称已查看这些图片，也不得只凭文本回答这些来源的问题。$guidance"
 }
@@ -92,8 +90,8 @@ internal fun AgentRepository.isLiveBinding(snapshot: AgentSnapshot): Boolean =
 
 /** Run-local routing, provider composition, and verified knowledge evidence. */
 class RunTools(
-    private val container: AppContainer,
-    context: Context,
+    private val containerOrNull: AppContainer?,
+    context: Context?,
     snapshot: AgentSnapshot,
     private val run: AgentRun,
     private val supportsImages: Boolean,
@@ -115,9 +113,27 @@ class RunTools(
      */
     private val providerHttp: HttpClient? = null,
 ) {
+    internal constructor(
+        snapshot: AgentSnapshot,
+        run: AgentRun,
+        runExecutor: ToolExecutor,
+        supportsImages: Boolean = false,
+        textDegradation: Boolean = false,
+    ) : this(
+        containerOrNull = null,
+        context = null,
+        snapshot = snapshot,
+        run = run,
+        supportsImages = supportsImages,
+        textDegradation = textDegradation,
+        runExecutor = runExecutor,
+    )
+
     init {
         require(run.runId.isNotBlank() && run.snapshotId == snapshot.id) { "Run and snapshot binding must match" }
     }
+
+    private val container: AppContainer get() = checkNotNull(containerOrNull)
 
     private val agentId = snapshot.agentId
     private val snapshotKnowledgeIds = snapshot.knowledgeBaseIds.toSet()
@@ -168,35 +184,46 @@ class RunTools(
         }
     }
 
-    private val builtins = boundBuiltinTools(container, snapshot)
-    private val trpg = TrpgSessionToolExecutor(snapshot, run,
-        read = { container.trpg.get(run.conversationId) },
-        update = { call, revision, state -> container.trpg.updateFromRun(
-            run.conversationId, snapshot.id, run.runId, call.callId, call.argumentsJson, revision, state) },
-        liveBinding = { container.agents.isLiveBinding(snapshot) },
-        command = { call, revision, command -> container.trpg.commandFromRun(
-            run.conversationId, snapshot.id, run.runId, call.callId, call.argumentsJson, revision, command) })
+    private val builtins: ToolExecutor? = containerOrNull?.let { boundBuiltinTools(it, snapshot) }
+    private val trpg: ToolExecutor? = containerOrNull?.let { c ->
+        TrpgSessionToolExecutor(snapshot, run,
+            read = { c.trpg.get(run.conversationId) },
+            update = { call, revision, state -> c.trpg.updateFromRun(
+                run.conversationId, snapshot.id, run.runId, call.callId, call.argumentsJson, revision, state) },
+            liveBinding = { c.agents.isLiveBinding(snapshot) },
+            command = { call, revision, command -> c.trpg.commandFromRun(
+                run.conversationId, snapshot.id, run.runId, call.callId, call.argumentsJson, revision, command) })
+    }
     // Always construct Python here so the factory receives the same run budget
     // and context used by the legacy path.  A factory-owned executor contains
     // Python/workspace/memory/shell; it replaces, rather than supplements, the
     // legacy provider list to prevent duplicate names or fallback routes.
-    private val python: ToolExecutor = pythonSkillTools(container, context, snapshot, run.runId, pythonBudget, providerHttp)
-    private val providerExecutor: ToolExecutor? = runExecutor ?: runExecutorFactory?.invoke(python)
-    private val screenObservation = ScreenObservationToolExecutor(
-        ScreenObservationRegistry.get(context),
-        liveContext = { container.agents.isLiveBinding(snapshot) },
-    )
-    private val screenActions = ScreenActionToolExecutor(
-        ScreenObservationRegistry.get(context),
-        authority = container.runtimeIntegration::screenActionAuthority,
-        liveContext = { container.agents.isLiveBinding(snapshot) },
-    )
+    private val python: ToolExecutor? = containerOrNull?.let { c ->
+        pythonSkillTools(c, checkNotNull(context), snapshot, run.runId, pythonBudget, providerHttp)
+    }
+    private val providerExecutor: ToolExecutor? = listOfNotNull(
+        runExecutor,
+        python?.let { py -> runExecutorFactory?.invoke(py) },
+    ).firstOrNull()
+    private val screenObservation: ToolExecutor? = containerOrNull?.let { c ->
+        ScreenObservationToolExecutor(
+            ScreenObservationRegistry.get(checkNotNull(context)),
+            liveContext = { c.agents.isLiveBinding(snapshot) },
+        )
+    }
+    private val screenActions: ToolExecutor? = containerOrNull?.let { c ->
+        ScreenActionToolExecutor(
+            ScreenObservationRegistry.get(checkNotNull(context)),
+            authority = c.runtimeIntegration::screenActionAuthority,
+            liveContext = { c.agents.isLiveBinding(snapshot) },
+        )
+    }
     private val routeOwners: List<ToolExecutor> = when {
-        providerExecutor != null -> listOf(builtins, trpg, providerExecutor, screenObservation, screenActions)
+        providerExecutor != null -> listOfNotNull(builtins, trpg, providerExecutor, screenObservation, screenActions)
         // A failed/unavailable v2 factory must not silently expose an old
         // privileged workspace/shell executor.  Web/MCP/Python remain the
         // only compatibility routes until the next run can rebuild the seam.
-        else -> listOf(builtins, trpg, python, screenObservation, screenActions) + baseExecutors
+        else -> listOfNotNull(builtins, trpg, python, screenObservation, screenActions) + baseExecutors
     }
     private val routes: Map<String, ToolExecutor> = buildMap {
         for (owner in routeOwners) {
@@ -219,6 +246,7 @@ class RunTools(
             val cached: ToolResult?
             val owner: ToolExecutor
             synchronized(callLock) {
+                callsByModelId[call.callId]?.forEach { it.resultPendingObservation = false }
                 val previous = callsByModelId[call.callId]?.firstOrNull { it.call == call }
                 routed = previous ?: RoutedCall(call, routes[call.name]).also {
                     calls[it.runtimeInvocationId] = it
@@ -284,6 +312,23 @@ class RunTools(
         override suspend fun authorizeReplay(call: ToolCall): Boolean = authorizeResult(call, ResultDisclosure.REPLAY)
 
         override suspend fun authorizeDeferredResult(call: ToolCall): Boolean = authorizeResult(call, ResultDisclosure.DEFERRED)
+
+        override suspend fun precheckDeferredResult(call: ToolCall): Boolean =
+            synchronized(callLock) {
+                callsByModelId[call.callId]?.firstOrNull { it.call == call }
+                    ?.takeIf { it.completed is ToolResult.Value }
+                    ?.takeUnless { it.inFlight }
+                    ?.takeUnless { it.needsApproval }
+            }?.takeIf { synchronized(run) { runActive() } }?.let { routed ->
+                routed.owner?.takeIf { routes[call.name] === it }?.let { owner ->
+                    runCatching { owner.precheckDeferredResult(routed.ownerCall()) }.getOrDefault(false)
+                }
+            } == true
+
+        override suspend fun withholdDeferredResult(call: ToolCall) {
+            val routed = synchronized(callLock) { callsByModelId[call.callId]?.firstOrNull { it.call == call } }
+            routed?.owner?.let { owner -> runCatching { owner.withholdDeferredResult(routed.ownerCall()) } }
+        }
 
         private suspend fun authorizeResult(call: ToolCall, disclosure: ResultDisclosure): Boolean {
             val routed = synchronized(callLock) {
@@ -352,9 +397,12 @@ class RunTools(
 
     /** Runtime-owned request identity paired with an AgentRuntime model call id. */
     fun runtimeInvocationId(modelCallId: String): String? = synchronized(callLock) {
-        callsByModelId[modelCallId]?.let { routes ->
-            routes.firstOrNull { it.needsApproval }?.runtimeInvocationId
-                ?: routes.singleOrNull()?.runtimeInvocationId
+        callsByModelId[modelCallId].orEmpty().let { routes ->
+            listOfNotNull(
+                routes.lastOrNull { it.needsApproval },
+                routes.lastOrNull { it.inFlight },
+                routes.lastOrNull { it.resultPendingObservation }?.also { it.resultPendingObservation = false },
+            ).firstOrNull()?.runtimeInvocationId
         }
     }
 
@@ -415,10 +463,11 @@ class RunTools(
     private data class RoutedCall(
         val call: ToolCall,
         val owner: ToolExecutor?,
-        val runtimeInvocationId: String = InternalRequestIds.new(),
+        val runtimeInvocationId: String = call.callId.takeIf { it.startsWith("rchild.") } ?: InternalRequestIds.new(),
         var needsApproval: Boolean = false,
         var completed: ToolResult? = null,
         var inFlight: Boolean = false,
+        var resultPendingObservation: Boolean = false,
         var processed: Processed? = null,
     )
 
@@ -513,12 +562,15 @@ class RunTools(
     }
 
     /** Resolve either the model correlation id (AgentRuntime compatibility) or runtime id. */
-    private fun routedFor(id: String): RoutedCall? = calls[id] ?: callsByModelId[id]?.let { routes ->
-        // AgentRuntime still supplies the model id for approve(). Select the
-        // pending route when possible; explicit lifecycle calls use the runtime
-        // id and never depend on this compatibility path.
-        routes.firstOrNull { it.needsApproval } ?: routes.singleOrNull()
-    }
+    private fun routedFor(id: String): RoutedCall? = listOfNotNull(
+        calls[id],
+        callsByModelId[id]?.let { routes ->
+            // AgentRuntime still supplies the model id for approve(). Select the
+            // pending route when possible; explicit lifecycle calls use the runtime
+            // id and never depend on this compatibility path.
+            listOfNotNull(routes.lastOrNull { it.needsApproval }, routes.singleOrNull()).firstOrNull()
+        },
+    ).firstOrNull()
 
     /**
      * Re-validate cached-result disclosure *without* re-executing the tool.
@@ -534,7 +586,10 @@ class RunTools(
         if (webRequest &&
             (cached is ToolResult.UnknownOutcome ||
                 cached is ToolResult.Denied && cached.completion == ToolResult.Completion.COMPLETED_WITHHELD)
-        ) return cached
+        ) {
+            synchronized(callLock) { routed.resultPendingObservation = true }
+            return cached
+        }
         fun unavailable(reason: String): ToolResult = if (webRequest && cached is ToolResult.Value) {
             ToolResult.Denied(
                 "Web request was dispatched and completed; charges may apply. Results are withheld. Do not retry automatically.",
@@ -555,6 +610,7 @@ class RunTools(
         if (!allowed) {
             return reject(routed, unavailable("Tool authorization changed; cached tool output is unavailable"))
         }
+        synchronized(callLock) { routed.resultPendingObservation = true }
         return cached
     }
 
@@ -569,6 +625,7 @@ class RunTools(
             routed.needsApproval = false
             routed.completed = result
             routed.inFlight = false
+            routed.resultPendingObservation = true
         }
         return result
     }
@@ -578,6 +635,7 @@ class RunTools(
             routed.needsApproval = false
             routed.completed = result
             routed.inFlight = false
+            routed.resultPendingObservation = true
         }
         return result
     }

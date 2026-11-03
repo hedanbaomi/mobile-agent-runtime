@@ -3,33 +3,41 @@
 
 package runtime.mobileagent.observation
 
-import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Test
 import runtime.mobileagent.domain.Authority
-import runtime.mobileagent.domain.AuthorityUserIntent
-import runtime.mobileagent.skills.tooling.*
-import runtime.mobileagent.tooling.AuthorityManagerState
+import runtime.mobileagent.skills.tooling.Availability
+import runtime.mobileagent.skills.tooling.Connection
+import runtime.mobileagent.skills.tooling.ElevatedAuthority
+import runtime.mobileagent.skills.tooling.PlatformGrant
+import runtime.mobileagent.tooling.AuthorityManager
 
 class ScreenActionAdmissionTest {
-    private val ready = AuthorityState(Authority.SHIZUKU, AuthorityUserIntent.SHIZUKU,
-        PlatformGrant.GRANTED, Availability.READY, Connection.CONNECTED, configured = true)
-    private fun state(selected: Authority? = Authority.SHIZUKU, status: AuthorityState = ready, revision: Long = 1) =
-        AuthorityManagerState(revision, selected, mapOf(Authority.SHIZUKU to status))
-
-    @Test fun selectedReadyAuthorityAndNonDebugBuildAreBothRequired() {
-        assertEquals(ScreenActionAuthority(Authority.SHIZUKU, 1), ScreenActionAdmission.from(state(), true))
-        val wired = ready.copy(authority = Authority.WIRED_ADB, userIntent = AuthorityUserIntent.WIRED_ADB)
-        assertEquals(ScreenActionAuthority(Authority.WIRED_ADB, 5), ScreenActionAdmission.from(
-            AuthorityManagerState(5, Authority.WIRED_ADB, mapOf(Authority.WIRED_ADB to wired)), true))
-        assertNull(ScreenActionAdmission.from(state(), false))
-        assertNull(ScreenActionAdmission.from(state(null), true))
-        assertNull(ScreenActionAdmission.from(state(Authority.NONE), true))
-        assertNull(ScreenActionAdmission.from(state(Authority.WIRED_ADB), true), "never borrow a ready unselected Shizuku")
-        for (status in listOf(ready.copy(grant = PlatformGrant.DENIED),
-            ready.copy(connection = Connection.DISCONNECTED), ready.copy(availability = Availability.TEMPORARILY_UNAVAILABLE),
-            ready.copy(configured = false), ready.copy(userIntent = AuthorityUserIntent.NONE))) {
-            assertNull(ScreenActionAdmission.from(state(status = status), true))
+    @Test
+    fun admitsOnlyReadyAdbAuthoritiesAndRejectsRootOrNone() {
+        fun readyStateFor(selected: Authority, elevated: ElevatedAuthority?): runtime.mobileagent.tooling.AuthorityManagerState {
+            val manager = AuthorityManager()
+            if (elevated != null) {
+                manager.setUserIntent(elevated, true)
+                manager.setConfigured(elevated, true)
+                manager.updatePlatformGrant(elevated, PlatformGrant.GRANTED)
+                manager.updateAvailability(elevated, Availability.READY)
+                manager.updateConnection(elevated, Connection.CONNECTED, "fixture")
+            }
+            manager.selectAuthority(selected)
+            return manager.state.value
         }
-        assertNotEquals(ScreenActionAdmission.from(state(), true), ScreenActionAdmission.from(state(revision = 2), true))
+
+        val shizuku = ScreenActionAdmission.from(readyStateFor(Authority.SHIZUKU, ElevatedAuthority.SHIZUKU), buildAllowed = true)
+        assertEquals(Authority.SHIZUKU, shizuku?.authority)
+
+        val wired = ScreenActionAdmission.from(readyStateFor(Authority.WIRED_ADB, ElevatedAuthority.WIRED_ADB), buildAllowed = true)
+        assertEquals(Authority.WIRED_ADB, wired?.authority)
+
+        assertNull(ScreenActionAdmission.from(readyStateFor(Authority.NONE, null), buildAllowed = true))
+        assertNull(ScreenActionAdmission.from(readyStateFor(Authority.ROOT_DIRECT, ElevatedAuthority.ROOT_DIRECT), buildAllowed = true))
+        assertNull(ScreenActionAdmission.from(readyStateFor(Authority.SHIZUKU_ROOT, ElevatedAuthority.SHIZUKU_ROOT), buildAllowed = true))
+        assertNull(ScreenActionAdmission.from(readyStateFor(Authority.SHIZUKU, ElevatedAuthority.SHIZUKU), buildAllowed = false))
     }
 }

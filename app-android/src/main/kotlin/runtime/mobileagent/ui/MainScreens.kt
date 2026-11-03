@@ -523,6 +523,7 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
                                         launchWorkspaceSaf()
                                     },
                                     onOpenRecent = workspacePickerVm::openRecent,
+                                    onConfirmRootDirectory = workspacePickerVm::confirmRootDirectory,
                                 ),
                                 modifier = Modifier.fillMaxSize(),
                                 showPageTitle = false,
@@ -726,6 +727,7 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
     var browserError by remember { mutableStateOf("") }
     var wiredPathOpen by remember { mutableStateOf(false) }
     var wiredPath by remember { mutableStateOf("") }
+    var rootPathOpen by remember { mutableStateOf(false) }
     var confirmFullDevice by remember { mutableStateOf(false) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         integration.refresh()
@@ -771,11 +773,7 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
         grant.grant.workspaceId == fullDeviceWorkspace.workspaceId && grant.enabled
     }
     val selectedAuthority = authoritySnapshot.selectedAuthority
-    val selectedProvider = when (selectedAuthority) {
-        runtime.mobileagent.domain.Authority.SHIZUKU -> authoritySnapshot.shizuku
-        runtime.mobileagent.domain.Authority.WIRED_ADB -> authoritySnapshot.wiredAdb
-        runtime.mobileagent.domain.Authority.NONE -> null
-    }
+    val selectedProvider = authoritySnapshot.providerFor(selectedAuthority)
     val authorityReady = selectedProvider?.let { provider ->
         provider.configured &&
             provider.platformGrant == runtime.mobileagent.skills.tooling.PlatformGrant.GRANTED &&
@@ -797,9 +795,13 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
         canChooseSaf = !workspaceBusy && !vm.saving.value,
         canBrowsePrivileged = authorityReady && !workspaceBusy && !vm.saving.value,
         fullDeviceFilesEnabled = fullDeviceCurrentGrant || vm.hasPendingFullDeviceFiles(),
-        fullDeviceFilesEligible = authorityReady &&
-            authoritySnapshot.dangerousModeBuildAllowed &&
-            authoritySnapshot.dangerousMode != runtime.mobileagent.domain.DangerousMode.DISABLED && !workspaceBusy,
+        fullDeviceFilesEligible = isFullDeviceFilesEligibleForEditor(
+            selectedAuthority = selectedAuthority,
+            authorityReady = authorityReady,
+            dangerousModeBuildAllowed = authoritySnapshot.dangerousModeBuildAllowed,
+            dangerousMode = authoritySnapshot.dangerousMode,
+            workspaceBusy = workspaceBusy,
+        ),
         status = when {
             vm.saving.value -> if (chinese) "正在保存智能体…" else "Saving agent…"
             workspaceBusy -> if (chinese) "正在更新工作区…" else "Updating workspace…"
@@ -831,11 +833,7 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
             } else {
                 "You can select a phone folder now. Choose and connect an ADB-level channel in Settings for privileged directories."
             }
-            !authorityReady -> if (chinese) {
-                "ADB 级授权保持不变，但当前连接不可用。"
-            } else {
-                "ADB-level authorization is retained, but the current connection is unavailable."
-            }
+            !authorityReady -> offlinePrivilegedAuthoritySummary(selectedAuthority, chinese)
             else -> ""
         },
     )
@@ -950,7 +948,13 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
 
     fun openPrivilegedWorkspace() {
         if (!authorityReady) {
-            workspaceStatus = if (chinese) "请先在设置中连接并选定 ADB 级通道。" else "Connect and select an ADB-level authority in Settings first."
+            workspaceStatus = if (chinese) "请先在设置中连接并选定 ADB 级或 Root 通道。" else "Connect and select a privileged or Root authority in Settings first."
+            return
+        }
+        if (selectedAuthority == runtime.mobileagent.domain.Authority.ROOT_DIRECT ||
+            selectedAuthority == runtime.mobileagent.domain.Authority.SHIZUKU_ROOT
+        ) {
+            rootPathOpen = true
             return
         }
         if (selectedAuthority == runtime.mobileagent.domain.Authority.WIRED_ADB) {
@@ -1187,6 +1191,29 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
                 }
             },
             onClose = { wiredPathOpen = false },
+        )
+    }
+
+    if (rootPathOpen) {
+        RootAgentWorkspaceDialog(
+            enabled = authorityReady && !workspaceBusy && !vm.saving.value,
+            chinese = chinese,
+            onConfirm = { path, writable, metadata, shell ->
+                rootPathOpen = false
+                val target = editorAgentId?.let { WorkspaceTarget(agentId = it) } ?: WorkspaceTarget()
+                launchWorkspaceSelection {
+                    workspaceCoordinator.selectRootDirectory(
+                        intent = WorkspaceIntent.SET_AGENT_DEFAULT,
+                        authority = selectedAuthority,
+                        absolutePath = path,
+                        writable = writable,
+                        metadata = metadata,
+                        shell = shell,
+                        target = target,
+                    )
+                }
+            },
+            onClose = { rootPathOpen = false },
         )
     }
 
@@ -1428,6 +1455,8 @@ private fun workspaceBackendLabel(
     runtime.mobileagent.domain.WorkspaceBackendType.PRIVILEGED -> when (authority) {
         runtime.mobileagent.domain.Authority.SHIZUKU -> if (chinese) "Shizuku（ADB 级）" else "Shizuku (ADB-level)"
         runtime.mobileagent.domain.Authority.WIRED_ADB -> if (chinese) "电脑 ADB" else "Desktop ADB"
+        runtime.mobileagent.domain.Authority.ROOT_DIRECT -> if (chinese) "直接 Root" else "Direct Root"
+        runtime.mobileagent.domain.Authority.SHIZUKU_ROOT -> "Shizuku Root"
         else -> if (chinese) "ADB 级目录" else "ADB-level directory"
     }
     runtime.mobileagent.domain.WorkspaceBackendType.INTERNAL -> if (chinese) "应用私有目录" else "App-private directory"
@@ -1862,6 +1891,8 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
         onAuthorityIntent = vm::setAuthorityIntent,
         onRefreshAuthority = { vm.refreshAuthorities() },
         onRequestShizukuPermission = vm::requestShizukuPermission,
+        onEnableShizukuRoot = vm::enableShizukuRoot,
+        onOpenRootManager = vm::openRootManager,
         onEnableShizuku = vm::enableShizuku,
         onOpenShizuku = { vm.openShizuku() },
         onRequestWiredPairing = vm::requestWiredAdbPairing,
@@ -1875,6 +1906,7 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
         onOpenAgents = { onRoute(AppRoutes.AGENTS) },
         onSetDangerousMode = vm::setDangerousMode,
         onDisableDangerousMode = vm::disableDangerousMode,
+        onSetRootShellConsent = vm::setRootShellConsent,
     )
     if (aboutOnly) {
         runtime.mobileagent.feature.settings.AboutScreen(state, actions, showPageTitle = false)

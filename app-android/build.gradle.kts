@@ -182,6 +182,13 @@ val buildTimeUtc = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'").apply {
 android {
     namespace = "runtime.mobileagent"
     compileSdk = libs.versions.compileSdk.get().toInt()
+    ndkVersion = "27.3.13750724"
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
     defaultConfig {
         applicationId = "runtime.mobileagent"
         minSdk = libs.versions.minSdk.get().toInt()

@@ -40,7 +40,8 @@ data class WorkspacePickerAuthoritySnapshot(
     val ready: Boolean = false,
 ) {
     init {
-        require(selectedAuthority == Authority.NONE || selectedAuthority == Authority.SHIZUKU || selectedAuthority == Authority.WIRED_ADB)
+        require(selectedAuthority in setOf(Authority.NONE, Authority.SHIZUKU, Authority.WIRED_ADB,
+            Authority.ROOT_DIRECT, Authority.SHIZUKU_ROOT))
         require(!ready || status == WorkspacePickerAuthorityStatus.READY)
     }
 }
@@ -84,6 +85,18 @@ data class WorkspacePickerDirectoryAccess(
  */
 interface WorkspacePickerPort {
     fun authoritySnapshot(): WorkspacePickerAuthoritySnapshot
+
+    /** Explicit foreground-only selection. The absolute path must never enter model context. */
+    suspend fun attachRootDirectory(
+        authority: Authority,
+        absolutePath: String,
+        writable: Boolean,
+        metadata: Boolean,
+        shell: Boolean,
+        target: WorkspacePickerTarget,
+    ): WorkspaceAccessResult = WorkspaceAccessResult.Failure(
+        runtime.mobileagent.integration.WorkspaceAccessErrorCode.UNSUPPORTED,
+    )
 
     fun recentWorkspaces(agentId: String? = null): List<WorkspaceAccessItem> = emptyList()
 

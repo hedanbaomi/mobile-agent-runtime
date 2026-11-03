@@ -9,8 +9,26 @@ import runtime.mobileagent.domain.Authority
 import runtime.mobileagent.domain.AuthorityPreferences
 import runtime.mobileagent.skills.tooling.Availability
 import runtime.mobileagent.skills.tooling.Connection
+import runtime.mobileagent.skills.tooling.PlatformGrant
 
 class AuthoritySharedRevisionTest {
+    @Test fun `root configuration markers never become platform grants on restart`() {
+        listOf(Authority.ROOT_DIRECT, Authority.SHIZUKU_ROOT).forEach { root ->
+            val store = InMemoryAuthorityStateStore(AuthorityPersistentState(
+                revision = 1, selectedAuthority = root,
+                preferences = mapOf(root to AuthorityPreferences(root, userIntentEnabled = true, explicitlyConfigured = true)),
+            ))
+            val manager = AuthorityManager(store)
+            assertFalse(manager.setConfigured(root, true))
+            assertFalse(manager.state.value.status(root).configured)
+            assertEquals(PlatformGrant.UNKNOWN, manager.state.value.status(root).grant)
+            assertEquals(Availability.UNSUPPORTED, manager.state.value.status(root).availability)
+            assertFalse(AuthorityManager(store).state.value.selectedIsReady())
+            assertEquals(root, store.load().selectedAuthority)
+            assertTrue(manager.withSelectedBackend(mapOf(Authority.WIRED_ADB to "shell")).isFailure)
+        }
+    }
+
     @Test fun `intent action uses fresh shared revision and preserves other provider setup and live state`() {
         val store = InMemoryAuthorityStateStore()
         val manager = AuthorityManager(store)

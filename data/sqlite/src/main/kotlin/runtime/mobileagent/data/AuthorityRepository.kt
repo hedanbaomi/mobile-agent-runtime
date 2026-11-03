@@ -264,10 +264,13 @@ class WorkspaceRepository(
         // not disappear underneath that durable reference.  Callers may
         // explicitly clear those references first; an ordinary delete is
         // therefore fail-closed and never silently changes thread semantics.
-        val referenced =
-            db.query("SELECT workspace_id FROM privileged_workspace_bindings WHERE workspace_id = ? LIMIT 1", listOf(existing.id)).isNotEmpty() ||
-                db.query("SELECT workspace_id FROM conversation_workspace_bindings WHERE workspace_id = ? LIMIT 1", listOf(existing.id)).isNotEmpty() ||
-                db.query("SELECT workspace_id FROM agent_workspace_defaults WHERE workspace_id = ? LIMIT 1", listOf(existing.id)).isNotEmpty()
+        val referenced = db.query(
+            "SELECT workspace_id FROM privileged_workspace_bindings WHERE workspace_id=? " +
+                "UNION ALL SELECT workspace_id FROM root_workspace_origins WHERE workspace_id=? " +
+                "UNION ALL SELECT workspace_id FROM conversation_workspace_bindings WHERE workspace_id=? " +
+                "UNION ALL SELECT workspace_id FROM agent_workspace_defaults WHERE workspace_id=? LIMIT 1",
+            List(4) { existing.id },
+        ).isNotEmpty()
         if (referenced) return false
         return db.transaction {
             db.execute("DELETE FROM saf_workspace_grants WHERE workspace_id = ?", listOf(existing.id))
@@ -739,6 +742,7 @@ class AgentWorkspaceDefaultRepository(
 
     private fun hasActivePersistentGrant(agentId: String, workspaceId: String): Boolean {
         val now = runCatching { Instant.parse(clock()) }.getOrNull() ?: return false
+        RootGrantRepository(db, clock).hasDurablePersistentDefaultGrant(agentId, workspaceId, now)?.let { return it }
         return db.query(
             "SELECT expires_at FROM capability_grants " +
                 "WHERE agent_id = ? AND workspace_id = ? AND lifetime = 'PERSISTENT' " +

@@ -109,6 +109,8 @@ internal class SqliteRuntimeAuditSink(
                     authority = when (event.authority) {
                         Authority.SHIZUKU -> DiagnosticAuthority.SHIZUKU
                         Authority.WIRED_ADB -> DiagnosticAuthority.WIRED_ADB
+                        Authority.ROOT_DIRECT -> DiagnosticAuthority.ROOT_DIRECT
+                        Authority.SHIZUKU_ROOT -> DiagnosticAuthority.SHIZUKU_ROOT
                         else -> DiagnosticAuthority.NONE
                     },
                     stdoutBytes = event.stdoutBytes.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
@@ -202,13 +204,17 @@ internal fun WorkspaceAuditEvent.toDiagnosticOperationState(): DiagnosticOperati
         "ADB_APP_NOT_INSTALLED", "DANGEROUS_MODE_DISABLED", "SHELL_CAPABILITY_DENIED",
         "SHELL_HIGH_RISK_APPROVAL_REQUIRED", "WORKSPACE_NOT_FOUND", "WORKSPACE_READ_ONLY",
         "PATH_OUT_OF_SCOPE", "SYMLINK_FORBIDDEN", "ROOT_OPERATION_FORBIDDEN", "SNAPSHOT_STALE",
+        "ROOT_AUTHORIZATION_REQUIRED", "ROOT_SHELL_CONSENT_REQUIRED", "ROOT_REQUEST_DENIED",
+        "PRIVILEGE_MISMATCH", "IDENTITY_CHANGED", "SELINUX_DENIED", "HARDLINK_FORBIDDEN",
+        "MOUNT_BOUNDARY_CROSSED", "CONTROL_PLANE_PROTECTED", "DEGRADED_SESSION_REQUIRES_ACK",
             -> DiagnosticOperationState.DENIED
-        "CANCELLED", "CANCELED", "SHELL_CANCELLED", "REQUEST_CANCELLED" -> DiagnosticOperationState.CANCELLED
+        "CANCELLED", "CANCELED", "SHELL_CANCELLED", "REQUEST_CANCELLED", "CANCELLED_BEFORE_ATTEMPT" -> DiagnosticOperationState.CANCELLED
         "UNKNOWN", "UNKNOWN_OUTCOME" -> DiagnosticOperationState.UNKNOWN
         "FAILED", "ERROR", "IO_ERROR", "TIMEOUT", "FILE_TOO_LARGE", "QUOTA_EXCEEDED", "CONFLICT", "WORKSPACE_VERSION_UNSUPPORTED",
         "INVALID_REQUEST", "INVALID_CURSOR", "INVALID_PATH", "INVALID_ARGUMENT", "INVALID_UTF8",
         "INVALID_PATCH", "ENTRY_NOT_FOUND", "ENTRY_UNSUPPORTED", "UNSUPPORTED", "UNSUPPORTED_ENTRY",
-        "OPERATION_UNAVAILABLE", "BRIDGE_PROTOCOL_MISMATCH", "INTERNAL_ERROR",
+        "UNSUPPORTED_OPERATION", "ROOT_SERVICE_UNAVAILABLE", "OPERATION_UNAVAILABLE",
+        "BRIDGE_PROTOCOL_MISMATCH", "INTERNAL_ERROR",
         "AUDIT_UNAVAILABLE", "AUDIT_FUSE_OPEN" -> DiagnosticOperationState.FAILED
         // resultCode is the redacted provider contract for terminal state.
         // Missing or newly introduced values must fail closed to UNKNOWN;
@@ -229,15 +235,18 @@ private fun ApprovalLifecycleTransition.toDiagnosticApprovalState(): DiagnosticA
     ApprovalLifecycleTransition.CONSUMED -> DiagnosticApprovalState.APPROVED
 }
 
-private fun runtime.mobileagent.domain.CapabilityId.toDiagnosticToolCapability(): runtime.mobileagent.diagnostics.DiagnosticToolCapability = when {
+internal fun runtime.mobileagent.domain.CapabilityId.toDiagnosticToolCapability(): runtime.mobileagent.diagnostics.DiagnosticToolCapability = when {
     value == CapabilityId.SHELL_EXECUTE -> runtime.mobileagent.diagnostics.DiagnosticToolCapability.SHELL_EXECUTE
     value == CapabilityId.MEMORY_READ || value == CapabilityId.MEMORY_SEARCH -> runtime.mobileagent.diagnostics.DiagnosticToolCapability.MEMORY_READ
     value == CapabilityId.MEMORY_APPEND || value == CapabilityId.MEMORY_REPLACE -> runtime.mobileagent.diagnostics.DiagnosticToolCapability.MEMORY_WRITE
-    value == CapabilityId.WORKSPACE_ENUMERATE || value == CapabilityId.FILE_LIST || value == CapabilityId.FILE_STAT || value == CapabilityId.FILE_READ_TEXT ->
+    value == CapabilityId.WORKSPACE_ENUMERATE || value == CapabilityId.FILE_LIST || value == CapabilityId.FILE_STAT ||
+        value == CapabilityId.FILE_READ_TEXT || value == CapabilityId.FILE_METADATA_READ ->
         runtime.mobileagent.diagnostics.DiagnosticToolCapability.WORKSPACE_READ
-    value == CapabilityId.FILE_WRITE_TEXT || value == CapabilityId.FILE_CREATE_DIRECTORY || value == CapabilityId.FILE_MOVE || value == CapabilityId.FILE_DELETE ->
+    value == CapabilityId.FILE_WRITE_TEXT || value == CapabilityId.FILE_CREATE_DIRECTORY || value == CapabilityId.FILE_MOVE ||
+        value == CapabilityId.FILE_DELETE || value == CapabilityId.FILE_METADATA_WRITE ->
         runtime.mobileagent.diagnostics.DiagnosticToolCapability.WORKSPACE_WRITE
-    value == "search" -> runtime.mobileagent.diagnostics.DiagnosticToolCapability.SEARCH
+    value == "search" || value == "network.search" || value == "knowledge.search" ->
+        runtime.mobileagent.diagnostics.DiagnosticToolCapability.SEARCH
     else -> runtime.mobileagent.diagnostics.DiagnosticToolCapability.UNKNOWN
 }
 
@@ -245,4 +254,6 @@ private fun Authority.toDiagnosticAuthority(): DiagnosticAuthority = when (this)
     Authority.NONE -> DiagnosticAuthority.NONE
     Authority.SHIZUKU -> DiagnosticAuthority.SHIZUKU
     Authority.WIRED_ADB -> DiagnosticAuthority.WIRED_ADB
+    Authority.ROOT_DIRECT -> DiagnosticAuthority.ROOT_DIRECT
+    Authority.SHIZUKU_ROOT -> DiagnosticAuthority.SHIZUKU_ROOT
 }

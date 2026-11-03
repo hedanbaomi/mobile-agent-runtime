@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import runtime.mobileagent.domain.Authority
 import runtime.mobileagent.domain.AuthorityPreferences
 import runtime.mobileagent.domain.AuthorityUserIntent
+import runtime.mobileagent.domain.isRootAuthority
 import runtime.mobileagent.skills.tooling.Availability
 import runtime.mobileagent.skills.tooling.AuthoritySelection
 import runtime.mobileagent.skills.tooling.AuthorityState
@@ -44,10 +45,15 @@ class AuthorityManager(
     /** Persist an explicit provider selection; null means no elevated provider. */
     fun selectAuthority(authority: ElevatedAuthority?): Boolean = synchronized(lock) {
         val current = normalize(store.load())
-        val next = current.copy(
-            selectedAuthority = authority ?: Authority.NONE,
-        )
-        persistUserChoice(current.revision, next)
+        val target = authority ?: Authority.NONE
+        // Recording the selection the store already holds is not a policy change: skipping the CAS
+        // keeps the policy version stable so a just-confirmed Root consent is not invalidated by
+        // the Settings row selecting the same authority right after enabling it.
+        if (current.selectedAuthority == target) {
+            publish(current.toManagerState(_state.value))
+            return@synchronized true
+        }
+        persistUserChoice(current.revision, current.copy(selectedAuthority = target))
     }
 
     /** Persist user intent only.  This is never inferred from connection state. */
@@ -56,6 +62,10 @@ class AuthorityManager(
         val current = normalize(store.load())
         val preferences = current.preferences.toMutableMap()
         val previous = preferences[authority] ?: AuthorityPreferences(authority = authority)
+        if (previous.userIntentEnabled == enabled) {
+            publish(normalize(current).toManagerState(_state.value))
+            return@synchronized true
+        }
         preferences[authority] = previous.copy(
             authority = authority,
             userIntentEnabled = enabled,
@@ -67,6 +77,9 @@ class AuthorityManager(
     /** Persist provider setup/configuration; this is not a connection probe. */
     fun setConfigured(authority: ElevatedAuthority, configured: Boolean): Boolean = synchronized(lock) {
         require(authority != Authority.NONE) { "NONE cannot be configured" }
+        // Root consent and verified platform identity have their own store/adapter.
+        // This legacy marker may never mint or rehydrate a Root grant.
+        if (authority.isRootAuthority) return@synchronized false
         val current = normalize(store.load())
         val preferences = current.preferences.toMutableMap()
         val previous = preferences[authority] ?: AuthorityPreferences(authority = authority)
@@ -94,6 +107,25 @@ class AuthorityManager(
         identity: String? = null,
     ) = updateRuntime(authority) {
         it.copy(connection = connection, identity = identity)
+    }
+
+    /** Runtime-only Root projection driven by verified RootAuthorityRepository + live UID 0 session. */
+    fun updateRootRuntimeState(
+        authority: ElevatedAuthority,
+        configured: Boolean,
+        grant: PlatformGrant,
+        availability: Availability,
+        connection: Connection,
+        identity: String? = null,
+    ) = updateRuntime(authority) {
+        require(authority.isRootAuthority) { "Expected Root authority: $authority" }
+        it.copy(
+            configured = configured,
+            grant = grant,
+            availability = availability,
+            connection = connection,
+            identity = identity,
+        )
     }
 
     fun onBinderDisconnected() {
@@ -188,7 +220,11 @@ class AuthorityManager(
         val statuses = ElevatedAuthority.entries.associateWith { authority ->
             val old = oldStatuses[authority]
             val preferences = this.preferences[authority]
-            val configured = preferences?.explicitlyConfigured == true
+            val configured = if (authority.isRootAuthority) {
+                old?.configured == true
+            } else {
+                preferences?.explicitlyConfigured == true
+            }
             AuthorityState(
                 authority = authority,
                 userIntent = if (preferences?.userIntentEnabled == true) AuthorityState.intentFor(authority) else AuthorityUserIntent.NONE,

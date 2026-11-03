@@ -30,6 +30,10 @@ value class CapabilityId(val value: String) {
         const val MEMORY_APPEND = "memory.append"
         const val MEMORY_REPLACE = "memory.replace"
         const val SHELL_EXECUTE = "shell.execute"
+        const val FILE_METADATA_READ = "file.metadata.read"
+        const val FILE_METADATA_WRITE = "file.metadata.write"
+        const val DEVICE_PROCESS_READ = "device.process.read"
+        const val DEVICE_PROCESS_SIGNAL = "device.process.signal"
 
         fun parse(value: String): CapabilityId = CapabilityId(value)
         fun isValid(value: String): Boolean =
@@ -41,10 +45,10 @@ value class CapabilityId(val value: String) {
 }
 
 @Serializable
-enum class Authority { NONE, SHIZUKU, WIRED_ADB }
+enum class Authority { NONE, SHIZUKU, WIRED_ADB, ROOT_DIRECT, SHIZUKU_ROOT }
 
 @Serializable
-enum class AuthorityUserIntent { NONE, SHIZUKU, WIRED_ADB }
+enum class AuthorityUserIntent { NONE, SHIZUKU, WIRED_ADB, ROOT_DIRECT, SHIZUKU_ROOT }
 
 @Serializable
 enum class DangerousMode { DISABLED, ENABLED_CONFIRM_HIGH_RISK, ENABLED_AUTONOMOUS }

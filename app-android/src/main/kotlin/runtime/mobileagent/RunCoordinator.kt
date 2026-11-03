@@ -58,7 +58,10 @@ data class PreparedRunFacts(
  * repository, and moving the streaming/tool-loop collectors (they stay in
  * the ViewModel and call into this seam).
  */
-class RunCoordinator(private val runs: RunRepository) {
+class RunCoordinator(
+    private val runs: RunRepository,
+    private val admitNewRun: (RunRecord) -> RunRecord = { runs.save(it) },
+) {
     private val lock = Any()
     /** runId -> owner key.  Process-local; durability lives in the run row. */
     private val owners = linkedMapOf<String, String>()
@@ -69,7 +72,8 @@ class RunCoordinator(private val runs: RunRepository) {
      */
     fun prepare(record: RunRecord, ownerKey: String): RunRecord {
         require(ownerKey.isNotBlank()) { "Run owner must not be blank" }
-        val saved = runs.save(record)
+        val existing = runs.get(record.runId)
+        val saved = if (existing == null) admitNewRun(record) else runs.save(record.copy(manifestJson = existing.manifestJson))
         synchronized(lock) {
             val current = owners[saved.runId]
             require(current == null || current == ownerKey) { "Run ${saved.runId} is already owned" }
@@ -89,7 +93,13 @@ class RunCoordinator(private val runs: RunRepository) {
     fun stampManifest(runId: String, manifest: RunManifest, at: String): RunRecord {
         require(manifest.runId == runId) { "Manifest run identity does not match" }
         val current = runs.get(runId) ?: error("Run $runId does not exist")
-        return runs.save(current.copy(manifestJson = manifest.toJson(), updatedAt = at))
+        // Root admission is a local platform fact frozen at creation. The later prompt
+        // manifest describes tool/provider facts and must not replace that identity.
+        val before = Json.parseToJsonElement(current.manifestJson) as? JsonObject
+        val next = Json.parseToJsonElement(manifest.toJson()) as JsonObject
+        val frozenRoot = before?.get("rootExecutionStamp")
+        val stamped = if (frozenRoot == null) next else JsonObject(next + ("rootExecutionStamp" to frozenRoot))
+        return runs.save(current.copy(manifestJson = stamped.toString(), updatedAt = at))
     }
 
     /**

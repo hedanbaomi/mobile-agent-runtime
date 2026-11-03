@@ -125,9 +125,11 @@ sealed interface RuntimeEvent {
         val event: ProviderModelEvent,
     ) : RuntimeEvent
 
+    /** Display/Inspector projection only; authorization persistence must use the trusted original call. */
     data class ToolApprovalRequested(
         val callId: String,
         val name: String,
+        /** Redacted and not reversible. Never use as an execution or approval binding. */
         val argumentsJson: String,
     ) : RuntimeEvent
 

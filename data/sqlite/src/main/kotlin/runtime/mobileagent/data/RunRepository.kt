@@ -37,14 +37,17 @@ class RunRepository(
         record
     }
 
-    fun save(record: RunRecord): RunRecord {
+    fun save(record: RunRecord): RunRecord = db.transaction {
         validate(record)
         val existing = get(record.runId)
-        return if (existing == null) {
+        if (existing == null) {
             create(record)
         } else {
             if (existing.snapshotId != record.snapshotId || existing.conversationId != record.conversationId) {
                 throw invalid("Run identity cannot be changed")
+            }
+            if (!RootRunManifest.unchanged(existing.manifestJson, record.manifestJson)) {
+                throw invalid("Run Root admission stamp cannot be added, removed or changed")
             }
             if (existing.state == RunStatus.UNKNOWN_OUTCOME && record.state != RunStatus.UNKNOWN_OUTCOME) {
                 throw invalid(
@@ -111,7 +114,7 @@ class RunRepository(
                 ),
             )
             db.execute(
-                "UPDATE tool_invocations SET state=?,error_code=?,updated_at=? WHERE run_id IN (SELECT run_id FROM runs WHERE state=?) AND state NOT IN (?, ?, ?, ?, ?)",
+                "UPDATE tool_invocations SET state=?,error_code=?,updated_at=? WHERE run_id IN (SELECT run_id FROM runs WHERE state=?) AND state NOT IN (?, ?, ?, ?, ?) AND state NOT GLOB 'ROOT_DISPATCH_*' AND invocation_id NOT IN (SELECT invocation_id FROM root_dispatch_receipts)",
                 listOf(
                     "UNKNOWN_OUTCOME", ErrorCode.UNKNOWN_OUTCOME.name, at, RunStatus.UNKNOWN_OUTCOME.name,
                     "SUCCEEDED", "FAILED", "CANCELLED", "COMPLETED_WITHHELD",
@@ -175,18 +178,56 @@ class RunRepository(
 
     fun recordInvocation(invocation: ToolInvocation): ToolInvocation = addInvocation(invocation)
 
-    fun updateInvocation(invocation: ToolInvocation): ToolInvocation {
+    /**
+     * Runtime lifecycle observation. A Root receipt already settled its invocation and remains
+     * the sole writer of terminal facts; the late UI event must neither overwrite it nor fail the
+     * whole Run. Root content is not copied into that row by this generic observation path.
+     */
+    fun observeRuntimeInvocation(invocation: ToolInvocation): ToolInvocation = db.transaction {
+        val rootRun = get(invocation.runId)?.let { RootRunManifest.hasRootStamp(it.manifestJson) } == true
+        val scrubbed = if (rootRun) invocation.copy(resultJson = null) else invocation
+        val existing = db.query("SELECT * FROM tool_invocations WHERE invocation_id=?", listOf(invocation.invocationId))
+            .singleOrNull()?.toInvocation()
+            ?: return@transaction addInvocation(scrubbed)
+        val rootOwned =
+            db.query("SELECT request_id FROM root_dispatch_receipts WHERE invocation_id=?",
+                listOf(invocation.invocationId)).isNotEmpty() ||
+            db.query("SELECT approval_id FROM root_approval_bindings WHERE invocation_id=?",
+                listOf(invocation.invocationId)).isNotEmpty() ||
+            (rootRun && runtime.mobileagent.domain.RootApprovalTools.capability(existing.name) != null)
+        if (!rootOwned) return@transaction updateInvocation(scrubbed.copy(createdAt = existing.createdAt))
+        require(existing.runId == invocation.runId && existing.callId == invocation.callId &&
+            existing.name == invocation.name && existing.argumentsJson == invocation.argumentsJson) {
+            "Runtime observation cannot change a Root invocation identity"
+        }
+        existing
+    }
+
+    fun updateInvocation(invocation: ToolInvocation): ToolInvocation = db.transaction {
         validate(invocation)
         val existing = db.query("SELECT * FROM tool_invocations WHERE invocation_id=?", listOf(invocation.invocationId)).singleOrNull()
             ?: throw invalid("Tool invocation ${invocation.invocationId} does not exist")
         if (existing.string("run_id") != invocation.runId || existing.string("call_id") != invocation.callId) {
             throw invalid("Tool invocation identity cannot be changed")
         }
+        // A receipt owns both the in-flight state and its terminal facts. Generic late
+        // events must never make recovery lose the terminalizer's CAS.
+        if (existing.string("state").startsWith("ROOT_DISPATCH_") ||
+            invocation.state.startsWith("ROOT_DISPATCH_") ||
+            db.query("SELECT request_id FROM root_dispatch_receipts WHERE invocation_id=?",
+                listOf(invocation.invocationId)).isNotEmpty()
+        ) throw invalid("Root receipt owns this tool invocation")
         db.execute(
-            "UPDATE tool_invocations SET name=?,arguments_json=?,permission_decision=?,state=?,result_json=?,error_code=?,updated_at=? WHERE invocation_id=?",
-            listOf(invocation.name, invocation.argumentsJson, invocation.permissionDecision, invocation.state, invocation.resultJson, invocation.errorCode, invocation.updatedAt, invocation.invocationId),
+            "UPDATE tool_invocations SET name=?,arguments_json=?,permission_decision=?,state=?,result_json=?,error_code=?,updated_at=? " +
+                "WHERE invocation_id=? AND state=? AND NOT EXISTS " +
+                "(SELECT 1 FROM root_dispatch_receipts r WHERE r.invocation_id=tool_invocations.invocation_id)",
+            listOf(invocation.name, invocation.argumentsJson, invocation.permissionDecision, invocation.state,
+                invocation.resultJson, invocation.errorCode, invocation.updatedAt, invocation.invocationId, existing.string("state")),
         )
-        return invocation
+        val stored = db.query("SELECT * FROM tool_invocations WHERE invocation_id=?",
+            listOf(invocation.invocationId)).singleOrNull()?.toInvocation()
+        if (stored != invocation) throw invalid("Tool invocation update lost its CAS")
+        invocation
     }
 
     fun invocations(runId: String): List<ToolInvocation> =

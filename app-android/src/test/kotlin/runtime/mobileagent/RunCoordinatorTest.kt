@@ -148,6 +148,33 @@ class RunCoordinatorTest {
     }
 
     @Test
+    fun newRunAdmissionRunsOnceAndLaterManifestPreservesFrozenRootIdentity() {
+        val (_, record, db) = fixture()
+        try {
+            val runs = RunRepository(db)
+            var admissions = 0
+            val coordinator = RunCoordinator(runs) {
+                admissions += 1
+                runs.save(it)
+            }
+            coordinator.prepare(record, "chat:conversation-coord")
+            coordinator.prepare(record, "chat:conversation-coord")
+            assertEquals(1, admissions)
+            // This test controls the local row to focus on the manifest-update seam;
+            // actual platform admission is separately enforced by RootRunAdmission.
+            val reserved = """{"rootExecutionStamp":{"identityEpoch":17}}"""
+            db.execute("UPDATE runs SET manifest_json = ? WHERE run_id = ?", listOf(reserved, record.runId))
+            val stamped = coordinator.stampManifest(record.runId, manifest(), "2026-10-30T12:00:00Z")
+            val json = kotlinx.serialization.json.Json.parseToJsonElement(stamped.manifestJson)
+                as kotlinx.serialization.json.JsonObject
+            assertEquals("""{"identityEpoch":17}""", json["rootExecutionStamp"].toString())
+            assertEquals(record.snapshotId, RunRepository(db).get(record.runId)?.snapshotId)
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
     fun foreignOwnerCannotCancelOrStealTheRun() {
         val (coordinator, record, db) = fixture()
         try {

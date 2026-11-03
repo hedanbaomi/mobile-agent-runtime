@@ -574,6 +574,11 @@ object TransferCodec {
         requireId(run.snapshotId, operationId, "run.snapshotId")
         requireJsonObject(run.budgetJson, operationId, "run.budgetJson")
         rejectSecretKeys(json.parseToJsonElement(run.budgetJson), operationId)
+        val manifest = requireJsonObject(run.manifestJson, operationId, "run.manifestJson")
+        rejectSecretKeys(manifest, operationId)
+        if ("rootExecutionStamp" in manifest) {
+            invalid(operationId, "Run ${run.runId} cannot carry a local rootExecutionStamp in transfers")
+        }
         if (run.modelRounds < 0 || run.toolCalls < 0 || run.inputTokens < 0 || run.outputTokens < 0) {
             invalid(operationId, "Run ${run.runId} counters must not be negative")
         }
@@ -597,6 +602,9 @@ object TransferCodec {
         }
         requireText(invocation.permissionDecision, operationId, "invocation.permissionDecision")
         requireText(invocation.state, operationId, "invocation.state")
+        if (invocation.state.startsWith("ROOT_DISPATCH_")) {
+            invalid(operationId, "Tool invocation ${invocation.invocationId} cannot carry an active Root dispatch state in transfers")
+        }
         requireText(invocation.createdAt, operationId, "invocation.createdAt")
         requireText(invocation.updatedAt, operationId, "invocation.updatedAt")
     }

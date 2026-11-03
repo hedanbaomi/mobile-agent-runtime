@@ -101,4 +101,11 @@
     <string name="trpg_agent_mode_locked" formatted="false">智能体首次保存后模式已锁定，不可切换。</string>
     <string name="trpg_agent_mode_badge" formatted="false">跑团 TRPG</string>
     <string name="trpg_agent_summary_mode">模式：%1$s</string>
+    <string name="root_workspace_title" formatted="false">授权 Root 工作区</string>
+    <string name="root_workspace_notice" formatted="false">仅授权下方目录。设备路径保留在本机；工具使用工作区相对路径。新增权限从新对话生效，每次工具调用仍需批准。</string>
+    <string name="root_workspace_path" formatted="false">设备绝对路径</string>
+    <string name="root_workspace_write" formatted="false">允许写入、创建、移动和删除（仅支持安全写入目录）</string>
+    <string name="root_workspace_metadata" formatted="false">允许读取权限、属主及 SELinux 标签；写入启用后可修改权限和属主</string>
+    <string name="root_workspace_shell" formatted="false">允许此工作区使用 Root Shell（还需本通道 Shell 授权及危险模式）</string>
+    <string name="root_workspace_confirm" formatted="false">确认目录及所选权限</string>
 </resources>

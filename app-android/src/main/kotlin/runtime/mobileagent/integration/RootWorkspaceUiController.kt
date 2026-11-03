@@ -1,0 +1,225 @@
+// SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package runtime.mobileagent.integration
+
+import java.time.Instant
+import runtime.mobileagent.WorkspacePickerTarget
+import runtime.mobileagent.data.*
+import runtime.mobileagent.domain.*
+import runtime.mobileagent.privileged.RootRuntimeCoordinator
+import runtime.mobileagent.skills.tooling.ElevatedAuthority
+import runtime.mobileagent.tooling.WorkspaceRegistry
+
+/** Foreground Root selection and display only. Model dispatch never calls this controller. */
+internal class RootWorkspaceUiController(private val db: SqlConnection, private val coordinator: RootRuntimeCoordinator) {
+    private val workspaces = WorkspaceRepository(db)
+    private val origins = RootWorkspaceRepository(db)
+    private val grants = CapabilityGrantRepository(db)
+    private val rootGrants = RootGrantRepository(db)
+
+    fun isRoot(workspaceId: String): Boolean =
+        origins.getOrigin(workspaceId) != null || workspaces.get(workspaceId)?.rootReference?.startsWith("root:") == true
+
+    fun includeInRecent(workspace: Workspace, hasPrivilegedBinding: Boolean): Boolean =
+        workspace.backendType != WorkspaceBackendType.PRIVILEGED || hasPrivilegedBinding || origins.getOrigin(workspace.id) != null
+
+    fun requireOrdinaryGrantTarget(workspaceId: String?) {
+        if (workspaceId != null && isRoot(workspaceId)) {
+            throw IllegalArgumentException("Root workspace grants require foreground Root admission")
+        }
+    }
+
+    fun requireOrdinarySnapshotBinding(bindingWorkspaceId: String?, grantWorkspaceId: String?, grantId: String) {
+        requireOrdinaryGrantTarget(bindingWorkspaceId)
+        requireOrdinaryGrantTarget(grantWorkspaceId)
+        if (rootGrants.get(grantId) != null) {
+            throw IllegalArgumentException("Root grants can only be bound into sealed Root snapshots")
+        }
+    }
+
+    fun isDiagnosticWorkspaceReady(
+        workspace: Workspace,
+        registered: WorkspaceRegistry.RegisteredWorkspace?,
+    ): Boolean {
+        if (isRoot(workspace.id)) return status(workspace) == WorkspaceAccessStatus.ACTIVE
+        val current = registered ?: return false
+        val descriptor = current.descriptor
+        return descriptor.enabled &&
+            (descriptor.readable || descriptor.writable) &&
+            current.backend.capabilities.isNotEmpty()
+    }
+
+    fun isAuthorityMismatched(
+        workspace: Workspace,
+        workspaceAuthority: Authority?,
+        selected: ElevatedAuthority?,
+    ): Boolean {
+        if (workspace.backendType != WorkspaceBackendType.PRIVILEGED) return false
+        val normalized = workspaceAuthority?.takeIf { it != Authority.NONE }
+        return normalized == null || normalized != selected
+    }
+
+    fun useRecentNullable(
+        workspaceId: String,
+        target: WorkspacePickerTarget?,
+        plan: WorkspaceIntentPlan,
+    ): WorkspaceAccessResult = useRecent(
+        workspaceId = workspaceId,
+        target = target ?: WorkspacePickerTarget(),
+        setAgentDefault = plan.setAgentDefault,
+        bindThread = plan.bindThread,
+        deferred = plan.deferred,
+    )
+
+    fun canSealNewThreadSnapshot(workspaceId: String): Boolean {
+        val origin = origins.getOrigin(workspaceId)
+        if (origin == null) return workspaces.get(workspaceId)?.rootReference?.startsWith("root:") != true
+        val selected = AuthorityPolicyRepository(db).getPolicy().selectedAuthority
+        return selected == origin.authority && coordinator.currentExecutionStamp(origin.authority) != null
+    }
+
+    fun filterDurableWorkspaceGrants(workspace: Workspace, candidates: List<CapabilityGrant>): List<CapabilityGrant> {
+        if (!isRoot(workspace.id)) return candidates
+        val origin = origins.getOrigin(workspace.id) ?: return emptyList()
+        val policy = AuthorityPolicyRepository(db).getPolicy()
+        return candidates.filter { grant -> rootGrants.isDurablyBoundGrant(grant, origin, policy) }
+    }
+
+    fun isDiagnosticReady(workspace: Workspace, registeredReady: Boolean): Boolean =
+        if (isRoot(workspace.id)) status(workspace) == WorkspaceAccessStatus.ACTIVE else registeredReady
+
+    fun status(workspace: Workspace): WorkspaceAccessStatus {
+        if (!workspace.enabled) return WorkspaceAccessStatus.DISABLED
+        val origin = origins.getOrigin(workspace.id) ?: return WorkspaceAccessStatus.UNAVAILABLE
+        val execution = coordinator.currentExecutionStamp(origin.authority) ?: return WorkspaceAccessStatus.UNAVAILABLE
+        return if (origin.matches(execution.identity) &&
+            RootWorkspaceLocatorRepository(db).getCurrent(workspace.id, execution) != null
+        ) WorkspaceAccessStatus.ACTIVE else WorkspaceAccessStatus.UNAVAILABLE
+    }
+
+    fun attach(
+        authority: Authority, path: String, writable: Boolean, metadata: Boolean, shell: Boolean,
+        target: WorkspacePickerTarget,
+    ): WorkspaceAccessResult {
+        if (!validTarget(target)) return failure(WorkspaceAccessErrorCode.CONFLICT)
+        val admitted = coordinator.admitWorkspaceFromForeground(authority, path, writable, metadata, shell, target.agentId)
+            ?: return failure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
+        return commitTarget(
+            admitted.workspace,
+            target,
+            admitted.grants,
+            setAgentDefault = target.agentId != null && target.threadId == null,
+            bindThread = target.threadId != null,
+        )
+    }
+
+    fun attachWithPlan(
+        authority: Authority, path: String, writable: Boolean, metadata: Boolean, shell: Boolean,
+        plan: WorkspaceIntentPlan, target: WorkspaceTarget,
+    ): WorkspaceAccessResult {
+        val pickerTarget = if (plan.deferred) WorkspacePickerTarget() else WorkspacePickerTarget(target.agentId, target.threadId)
+        if (!validTarget(pickerTarget)) return failure(WorkspaceAccessErrorCode.CONFLICT)
+        val admitted = coordinator.admitWorkspaceFromForeground(authority, path, writable, metadata, shell, pickerTarget.agentId)
+            ?: return failure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
+        if (plan.deferred) {
+            return WorkspaceAccessResult.Success(item(admitted.workspace, emptyList()), emptyList())
+        }
+        return commitTarget(admitted.workspace, pickerTarget, admitted.grants, plan.setAgentDefault, plan.bindThread)
+    }
+
+    fun commitDraft(draft: WorkspaceDraft, agentId: String): WorkspaceAccessResult {
+        if (AgentRepository(db).get(agentId) == null) return failure(WorkspaceAccessErrorCode.CONFLICT)
+        val workspace = workspaces.get(draft.workspaceId) ?: return failure(WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND)
+        val origin = origins.getOrigin(workspace.id) ?: return failure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
+        if (status(workspace) != WorkspaceAccessStatus.ACTIVE) return failure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
+        val capabilities = draft.requestedCapabilities
+        if (capabilities.isEmpty()) return failure(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
+        val admittedGrants = coordinator.admitDraftWorkspaceGrants(origin.authority, workspace.id, agentId, capabilities)
+            ?: return failure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
+        return commitTarget(
+            workspace = workspace,
+            target = WorkspacePickerTarget(agentId = agentId),
+            active = admittedGrants,
+            setAgentDefault = draft.setAsAgentDefault,
+            bindThread = false,
+        )
+    }
+
+    fun useRecent(
+        workspaceId: String,
+        target: WorkspacePickerTarget,
+        setAgentDefault: Boolean = target.agentId != null && target.threadId == null,
+        bindThread: Boolean = target.threadId != null,
+        deferred: Boolean = false,
+    ): WorkspaceAccessResult {
+        if (!validTarget(target)) return failure(WorkspaceAccessErrorCode.CONFLICT)
+        val workspace = workspaces.get(workspaceId) ?: return failure(WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND)
+        if (status(workspace) != WorkspaceAccessStatus.ACTIVE) return failure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
+        if (deferred) return failure(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
+        val active = activeGrants(workspace, target.agentId)
+        if (target.agentId != null && active.isEmpty()) return failure(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
+        return commitTarget(workspace, target, active, setAgentDefault = setAgentDefault, bindThread = bindThread)
+    }
+
+    fun confirmNewThread(agentId: String, threadId: String, currentWorkspaceId: String, workspaceId: String): WorkspaceAccessResult {
+        if (!validTarget(WorkspacePickerTarget(agentId, threadId))) return failure(WorkspaceAccessErrorCode.CONFLICT)
+        val current = ConversationWorkspaceBindingRepository(db).get(threadId)?.workspaceId.orEmpty()
+        if (current != currentWorkspaceId) return failure(WorkspaceAccessErrorCode.CONFLICT)
+        val workspace = workspaces.get(workspaceId) ?: return failure(WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND)
+        val active = activeGrants(workspace, agentId)
+        if (status(workspace) != WorkspaceAccessStatus.ACTIVE || active.isEmpty()) return failure(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
+        // The caller creates a fresh conversation and snapshot. The old thread is never rebound.
+        return WorkspaceAccessResult.Success(item(workspace, active), active.map(::summary))
+    }
+
+    private fun commitTarget(
+        workspace: Workspace,
+        target: WorkspacePickerTarget,
+        active: List<CapabilityGrant>,
+        setAgentDefault: Boolean,
+        bindThread: Boolean,
+    ): WorkspaceAccessResult {
+        val item = item(workspace, active)
+        val threadId = target.threadId?.takeIf { bindThread }
+        if (threadId != null) return WorkspaceAccessResult.NewThreadRequired(
+            agentId = requireNotNull(target.agentId), currentThreadId = threadId,
+            currentWorkspaceId = ConversationWorkspaceBindingRepository(db).get(threadId)?.workspaceId.orEmpty(),
+            requestedWorkspaceId = workspace.id, workspace = item, grants = active.map(::summary),
+            authorizationState = NewThreadAuthorizationState.ALREADY_GRANTED,
+        )
+        if (setAgentDefault && target.agentId != null) {
+            val defaults = AgentWorkspaceDefaultRepository(db)
+            defaults.set(target.agentId, workspace.id, defaults.get(target.agentId)?.revision)
+        }
+        return WorkspaceAccessResult.Success(item, active.map(::summary))
+    }
+
+    private fun validTarget(target: WorkspacePickerTarget): Boolean {
+        val agent = target.agentId ?: return target.threadId == null
+        if (AgentRepository(db).get(agent) == null) return false
+        val thread = target.threadId ?: return true
+        return db.query("SELECT s.agent_id FROM conversations c JOIN agent_snapshots s ON s.id=c.agent_snapshot_id WHERE c.id=?",
+            listOf(thread)).singleOrNull()?.string("agent_id") == agent
+    }
+
+    private fun activeGrants(workspace: Workspace, agentId: String?): List<CapabilityGrant> {
+        val origin = origins.getOrigin(workspace.id) ?: return emptyList()
+        val execution = coordinator.currentExecutionStamp(origin.authority) ?: return emptyList()
+        return agentId?.let { grants.forAgent(it, includeRevoked = false) }.orEmpty().filter {
+            it.workspaceId == workspace.id && rootGrants.get(it.grantId)?.matches(it, execution) == true &&
+                it.isActiveFor(Instant.now(), null, null)
+        }
+    }
+
+    private fun item(workspace: Workspace, active: List<CapabilityGrant>) = committedWorkspaceAccessItem(
+        workspace, workspace.displayName, status(workspace), origins.getOrigin(workspace.id)?.authority, active,
+        fullDeviceConfirmationPresent = workspace.scope != WorkspaceScope.FULL_DEVICE_FILES,
+    )
+
+    private fun summary(grant: CapabilityGrant) = WorkspaceAccessGrantSummary(
+        grant.grantId, grant.capability, grant.lifetime, grant.revision,
+    )
+
+    private fun failure(code: WorkspaceAccessErrorCode) = WorkspaceAccessResult.Failure(code)
+}

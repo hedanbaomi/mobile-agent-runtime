@@ -221,6 +221,7 @@ data class WorkspaceDraft(
     val workspaceId: String,
     val displayName: String,
     val setAsAgentDefault: Boolean = true,
+    val requestedCapabilities: Set<CapabilityId> = emptySet(),
 ) {
     init {
         require(isBindingId(workspaceId)) { "Workspace draft id is invalid" }

@@ -85,6 +85,8 @@ data class AuthorityState(
             Authority.NONE -> AuthorityUserIntent.NONE
             Authority.SHIZUKU -> AuthorityUserIntent.SHIZUKU
             Authority.WIRED_ADB -> AuthorityUserIntent.WIRED_ADB
+            Authority.ROOT_DIRECT -> AuthorityUserIntent.ROOT_DIRECT
+            Authority.SHIZUKU_ROOT -> AuthorityUserIntent.SHIZUKU_ROOT
         }
 
         /** A convenient fully configured fixture state. */

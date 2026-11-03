@@ -89,4 +89,14 @@
     <string name="ui_trust_s_ce4bb255">信任：%1$s</string>
     <string name="ui_user_authorized_files_saf_070a3e28" formatted="false">用户授权文件（SAF）</string>
     <string name="ui_version_license_and_source_5256f67e" formatted="false">版本、许可与源码</string>
+    <string name="sett_authority_root_direct" formatted="false">直接 Root (su)</string>
+    <string name="sett_authority_shizuku_root" formatted="false">Shizuku Root (uid=0)</string>
+    <string name="sett_authority_root_enable" formatted="false">启用并选用此通道</string>
+    <string name="sett_authority_root_revoke" formatted="false">停用此通道</string>
+    <string name="sett_root_shell_consent_switch" formatted="false">独立确认 Root Shell</string>
+    <string name="sett_root_shell_confirm_title" formatted="false">确认开启 Root Shell 独立授权</string>
+    <string name="sett_root_shell_confirm_body" formatted="false">Root Shell 将在此通道以 uid=0 权限执行命令。该确认独立于 ADB 级危险模式，且不会自动回退到其他通道。</string>
+    <string name="sett_root_manager_open" formatted="false">打开 Root 管理器</string>
+    <string name="sett_root_manager_open_hint" formatted="false">先在 Root 管理器里授予本应用 Root，再回到这里启用该通道。</string>
+    <string name="sett_shizuku_root_needs_permission" formatted="false">尚未获得 Shizuku 授权。请先在此请求权限，授权后再次点击启用并选用 Root 通道。</string>
 </resources>

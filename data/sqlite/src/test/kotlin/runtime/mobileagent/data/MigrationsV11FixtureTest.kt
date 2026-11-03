@@ -83,7 +83,7 @@ class MigrationsV11FixtureTest {
                 db.query("SELECT revoked_at FROM permission_grants ORDER BY grant_id").map { it.string("revoked_at") },
             )
             assertEquals(1, db.query("SELECT * FROM authority_policy").size)
-            assertEquals(3, db.query("SELECT * FROM authority_preferences").size)
+            assertEquals(5, db.query("SELECT * FROM authority_preferences").size)
             assertNoLegacyMarkersInControlPlane(db)
         }
     }
@@ -194,6 +194,9 @@ class MigrationsV11FixtureTest {
                 "INSERT INTO workspaces(id,display_name,backend_type,root_reference,readable,writable,max_file_bytes,enabled,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 listOf("workspace-v12", "v12 workspace", "INTERNAL", "v12-root", 1, 1, 1024 * 1024, 1, 1, INSTALL_TIME, INSTALL_TIME),
             )
+            // This synthetic v12 fixture cannot retain the current v40 receipt FK.
+            assertTrue(db.query("SELECT * FROM root_dispatch_receipts").isEmpty())
+            db.execute("DROP TABLE root_dispatch_receipts")
             db.execute("DROP VIEW workspace_acl")
             db.execute("DROP TABLE capability_grants")
             db.execute(
@@ -281,6 +284,9 @@ class MigrationsV11FixtureTest {
     fun v12ScopedGrantWithoutOwnerRollsBackAndLeavesLegacyTableUntouched() {
         JdbcSqlConnection().use { db ->
             Migrations.apply(db)
+            // This synthetic v12 fixture cannot retain the current v40 receipt FK.
+            assertTrue(db.query("SELECT * FROM root_dispatch_receipts").isEmpty())
+            db.execute("DROP TABLE root_dispatch_receipts")
             db.execute("DROP VIEW workspace_acl")
             db.execute("DROP TABLE capability_grants")
             db.execute(
@@ -323,7 +329,7 @@ class MigrationsV11FixtureTest {
             },
         )
         assertEquals(
-            listOf("NONE", "SHIZUKU", "WIRED_ADB"),
+            listOf("NONE", "ROOT_DIRECT", "SHIZUKU", "SHIZUKU_ROOT", "WIRED_ADB"),
             db.query("SELECT authority FROM authority_preferences ORDER BY authority").map { it.string("authority") },
         )
         assertTrue(db.query("SELECT * FROM authority_preferences WHERE user_intent_enabled <> 0 OR explicitly_configured <> 0").isEmpty())

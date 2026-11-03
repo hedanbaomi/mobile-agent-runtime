@@ -61,6 +61,17 @@ interface CanonicalWorkspaceSink {
         target: WorkspaceTarget,
     ): WorkspaceAccessResult
 
+    /** Explicit foreground-only Root directory selection. */
+    suspend fun attachRootDirectory(
+        authority: Authority,
+        absolutePath: String,
+        writable: Boolean,
+        metadata: Boolean,
+        shell: Boolean,
+        plan: WorkspaceIntentPlan,
+        target: WorkspaceTarget,
+    ): WorkspaceAccessResult = WorkspaceAccessResult.Failure(WorkspaceAccessErrorCode.UNSUPPORTED)
+
     /**
      * The explicit high-risk full-device scope.  A full-device workspace can
      * never become an Agent default or a Thread binding target.
@@ -159,6 +170,22 @@ class CanonicalWorkspaceCoordinator(private val sink: CanonicalWorkspaceSink) {
         return result.toOutcome(plan)
     }
 
+    suspend fun selectRootDirectory(
+        intent: WorkspaceIntent,
+        authority: Authority,
+        absolutePath: String,
+        writable: Boolean,
+        metadata: Boolean,
+        shell: Boolean,
+        target: WorkspaceTarget,
+    ): WorkspaceSelectionOutcome {
+        val plan = intent.plan(target)
+        val result = sink.attachRootDirectory(authority, absolutePath, writable, metadata, shell, plan, target)
+        val capabilities = runtime.mobileagent.privileged.RootForegroundAdmissionController
+            .explicitCapabilities(writable, metadata, shell)
+        return result.toOutcome(plan, capabilities)
+    }
+
     /**
      * The full-device scope is grant-only by construction: the plan is forced
      * to ADD_TO_LIBRARY semantics regardless of the requested intent, because
@@ -191,7 +218,10 @@ class CanonicalWorkspaceCoordinator(private val sink: CanonicalWorkspaceSink) {
     suspend fun commitDraft(draft: WorkspaceDraft, agentId: String): WorkspaceSelectionOutcome =
         sink.commitDraft(draft, agentId).toOutcome(null)
 
-    private fun WorkspaceAccessResult.toOutcome(plan: WorkspaceIntentPlan?): WorkspaceSelectionOutcome =
+    private fun WorkspaceAccessResult.toOutcome(
+        plan: WorkspaceIntentPlan?,
+        requestedCapabilities: Set<runtime.mobileagent.domain.CapabilityId> = emptySet(),
+    ): WorkspaceSelectionOutcome =
         when (this) {
             is WorkspaceAccessResult.Success ->
                 if (plan != null && plan.deferred) {
@@ -200,6 +230,7 @@ class CanonicalWorkspaceCoordinator(private val sink: CanonicalWorkspaceSink) {
                             workspaceId = workspace.workspaceId,
                             displayName = workspace.displayName,
                             setAsAgentDefault = plan.setAgentDefault,
+                            requestedCapabilities = requestedCapabilities,
                         ),
                     )
                 } else {

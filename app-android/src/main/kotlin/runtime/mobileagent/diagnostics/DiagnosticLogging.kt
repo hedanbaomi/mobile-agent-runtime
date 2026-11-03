@@ -90,6 +90,8 @@ enum class DiagnosticAuthority(val wireName: String) {
     NONE("none"),
     SHIZUKU("shizuku"),
     WIRED_ADB("wired_adb"),
+    ROOT_DIRECT("root_direct"),
+    SHIZUKU_ROOT("shizuku_root"),
 }
 
 enum class DiagnosticAuthorityState(val wireName: String) {
@@ -2825,7 +2827,10 @@ class RollingDiagnosticLogStore(
         "none", "unknown", "workspace_not_found", "permission_denied", "grant_lost",
         "binding_unrecoverable", "authority_unavailable", "conflict", "cancelled", "invalid_request",
         "io", "timeout", "unsupported", "persistence_failed", "grant_missing", "default_unavailable",
-        "stale" -> value.trim().lowercase()
+        "stale", "root_authorization_required", "root_shell_consent_required", "root_request_denied",
+        "root_service_unavailable", "privilege_mismatch", "identity_changed", "unsupported_operation",
+        "selinux_denied", "hardlink_forbidden", "mount_boundary_crossed", "control_plane_protected",
+        "degraded_session_requires_ack" -> value.trim().lowercase()
         else -> "unknown"
     }
 
@@ -2873,6 +2878,8 @@ class RollingDiagnosticLogStore(
         "none" -> DiagnosticAuthority.NONE.wireName
         "shizuku" -> DiagnosticAuthority.SHIZUKU.wireName
         "wired_adb", "wired-adb", "adb" -> DiagnosticAuthority.WIRED_ADB.wireName
+        "root_direct" -> DiagnosticAuthority.ROOT_DIRECT.wireName
+        "shizuku_root" -> DiagnosticAuthority.SHIZUKU_ROOT.wireName
         else -> DiagnosticAuthority.NONE.wireName
     }
 
@@ -3062,7 +3069,11 @@ class RollingDiagnosticLogStore(
         "audit_fuse_open", "entry_unsupported", "unsupported_entry", "operation_unavailable", "invalid_path", "invalid_argument", "invalid_utf8",
         "invalid_patch", "entry_not_found", "read_only", "unsupported",
         "none", "grant_lost", "binding_unrecoverable", "authority_unavailable", "persistence_failed",
-        "grant_missing", "default_unavailable", "stale" ->
+        "grant_missing", "default_unavailable", "stale",
+        "root_authorization_required", "root_shell_consent_required", "root_request_denied",
+        "root_service_unavailable", "privilege_mismatch", "identity_changed", "unsupported_operation",
+        "selinux_denied", "hardlink_forbidden", "mount_boundary_crossed", "control_plane_protected",
+        "degraded_session_requires_ack" ->
             value.trim().lowercase()
         else -> "unknown"
     }

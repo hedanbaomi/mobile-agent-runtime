@@ -90,7 +90,8 @@ jobs:
             app-android/build/reports/provenance/debug.provenance.json
 
       - name: Review-like non-debuggable APK/SBOM/provenance gate
-        run: ./gradlew reviewGate --dependency-verification=strict --no-daemon
+        # R8 and dependency collection share the 4 GiB daemon heap; serialize their workers.
+        run: ./gradlew reviewGate --dependency-verification=strict --no-daemon --max-workers=1
       - name: Upload review security evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

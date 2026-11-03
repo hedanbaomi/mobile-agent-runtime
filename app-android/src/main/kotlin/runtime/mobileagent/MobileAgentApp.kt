@@ -182,7 +182,9 @@ class AppContainer(app: MobileAgentApp) :
      * through this coordinator instead of owning durability themselves, so a
      * page switch never changes a run's owner or its frozen manifest.
      */
-    val runCoordinator = RunCoordinator(runs)
+    val runCoordinator = RunCoordinator(runs) { record ->
+        requireNotNull(runtimeIntegrationRef.get()) { "Runtime not initialized" }.rootCoordinator.admitNewRun(record)
+    }
     val audits = AuditRepository(db)
     val transfer = TransferRepository(db, blobSink = CasBlobSink(File(app.filesDir, "cas")),
         vectorIndexDirectory = File(app.cacheDir, "knowledge-index"))

@@ -93,6 +93,8 @@ class ReadBatchToolExecutor(
      * goes through the strict replay path ([authorizeReplay]).
      */
     private val deferredResultAuthorized: suspend (ToolCall) -> Boolean = replayAuthorized,
+    private val childCallId: (outerCallId: String, index: Int, childCallId: String) -> String = { _, _, child -> child },
+    approvalRequiredTools: Set<String> = emptySet(),
 ) : ToolExecutor, BackgroundWorkSummary {
     private val lock = Any()
 
@@ -110,6 +112,8 @@ class ReadBatchToolExecutor(
             spec != null && !spec.sideEffect && name !in RESERVED_NAMES
         }
         .toSet()
+
+    private val frozenApprovalRequired: Set<String> = approvalRequiredTools intersect frozenEligible
 
     init {
         val unknown = eligibleTools - delegateByName.keys
@@ -159,6 +163,7 @@ class ReadBatchToolExecutor(
                 OuterCall(call).also { calls[call.callId] = it }
             } else {
                 if (found.call != call) return ToolResult.Invalid(CALL_ID_REUSED)
+                if (found.pendingApproval) return ToolResult.NeedsApproval
                 settled = found.result
                 replayDenied = found.replayDenied
                 inFlight = found.running
@@ -175,22 +180,27 @@ class ReadBatchToolExecutor(
         if (replayDenied) return ToolResult.Denied(REPLAY_DENIED_REASON)
         if (inFlight) return ToolResult.UnknownOutcome(ALREADY_RUNNING)
 
+        return executeBatchEntry(entry, batchApproved = false)
+    }
+
+    private suspend fun executeBatchEntry(entry: OuterCall, batchApproved: Boolean): ToolResult {
         synchronized(lock) { entry.running = true }
         val result = try {
-            runBatch(entry)
+            runBatch(entry, batchApproved)
         } catch (cancelled: CancellationException) {
+            withholdDispatchedChildren(entry)
             throw cancelled
         } catch (_: Exception) {
-            // A batch-level failure may have dispatched children already; the
-            // net below settles them as unknown, and the batch itself counts
-            // once so the Run cannot be reported as completed.
             settleOutstandingCalls()
+            withholdDispatchedChildren(entry)
             synchronized(lock) { unknownBatchCount += 1 }
             ToolResult.UnknownOutcome(UNKNOWN_BATCH)
         } finally {
             synchronized(lock) { entry.running = false }
         }
-        synchronized(lock) { if (entry.result == null) entry.result = result }
+        if (result != ToolResult.NeedsApproval) {
+            synchronized(lock) { if (entry.result == null) entry.result = result }
+        }
         return result
     }
 
@@ -214,55 +224,58 @@ class ReadBatchToolExecutor(
         return true
     }
 
-    /**
-     * `read_batch` never asks for approval, so an approval for one of its own
-     * call ids is refused; every other id belongs to the delegate.
-     */
     override suspend fun approve(callId: String): ToolResult {
         val entry = synchronized(lock) { calls[callId] }
-        if (entry != null && entry.call.name == READ_BATCH_TOOL_NAME) {
-            return ToolResult.Invalid("A read batch never requires approval")
-        }
-        return delegate.approve(callId)
+        if (entry == null) return delegate.approve(callId)
+        val canApprove = synchronized(lock) { entry.pendingApproval.also { entry.pendingApproval = false } }
+        if (!canApprove) return ToolResult.Invalid("A read batch never requires approval")
+        return if (closed) settlePendingBatch(entry, ToolResult.Denied(CLOSED_REASON))
+        else executeBatchEntry(entry, batchApproved = true)
     }
 
-    /**
-     * Deferred disclosure of the batch's own envelope.  Calls this wrapper does
-     * not own are proxied to the delegate, so a wrapper never blocks or widens
-     * another owner's deferred channel.
-     */
-    override suspend fun authorizeDeferredResult(call: ToolCall): Boolean {
-        if (call.name != READ_BATCH_TOOL_NAME) return delegate.authorizeDeferredResult(call)
-        // Batches cannot themselves be nested in the managed-job allowlist.
-        return false
+    override suspend fun authorizeDeferredResult(call: ToolCall): Boolean =
+        call.takeIf { it.name != READ_BATCH_TOOL_NAME }?.let { delegate.authorizeDeferredResult(it) } == true
+
+    override suspend fun precheckDeferredResult(call: ToolCall): Boolean =
+        call.takeIf { it.name != READ_BATCH_TOOL_NAME }?.let { delegate.precheckDeferredResult(it) } == true
+
+    override suspend fun withholdDeferredResult(call: ToolCall) {
+        call.takeIf { it.name != READ_BATCH_TOOL_NAME }?.let { delegate.withholdDeferredResult(it) }
     }
 
-    /**
-     * Approval settlement for a name this wrapper owns.  `read_batch` never
-     * asks for approval, so anything else is a pass-through call whose pending
-     * approval still belongs to the delegate.
-     */
-    override suspend fun reject(callId: String): ToolResult = forwardSettlement(callId) { delegate.reject(it) }
+    override suspend fun reject(callId: String): ToolResult =
+        forwardSettlement(callId, ToolErrorCode.APPROVAL_DENIED.name) { delegate.reject(it) }
 
-    override suspend fun expire(callId: String): ToolResult = forwardSettlement(callId) { delegate.expire(it) }
+    override suspend fun expire(callId: String): ToolResult =
+        forwardSettlement(callId, ToolErrorCode.TIMEOUT.name) { delegate.expire(it) }
 
     private suspend fun forwardSettlement(
         callId: String,
+        reason: String,
         fallback: suspend (String) -> ToolResult,
     ): ToolResult {
         val entry = synchronized(lock) { calls[callId] }
-        if (entry != null && entry.call.name == READ_BATCH_TOOL_NAME) {
-            return ToolResult.Invalid("No pending approval for a read batch")
-        }
-        return fallback(callId)
+        if (entry == null) return fallback(callId)
+        val pending = synchronized(lock) { entry.pendingApproval.also { entry.pendingApproval = false } }
+        return if (pending) settlePendingBatch(entry, ToolResult.Denied(reason))
+        else ToolResult.Invalid("No pending approval for a read batch")
+    }
+
+    private fun settlePendingBatch(entry: OuterCall, result: ToolResult): ToolResult {
+        synchronized(lock) { entry.result = result }
+        return result
     }
 
     /** Cancel and join every in-flight batch; nothing survives the Run. */
     override suspend fun close() {
-        synchronized(lock) { closed = true }
+        val entriesSnapshot = synchronized(lock) {
+            closed = true
+            calls.values.toList()
+        }
         val snapshot = synchronized(inFlight) { inFlight.toList() }
         snapshot.forEach { it.cancel() }
         snapshot.forEach { it.join() }
+        entriesSnapshot.forEach { withholdDispatchedChildren(it) }
         synchronized(lock) {
             calls.values.forEach { it.result = null }
             calls.clear()
@@ -287,7 +300,7 @@ class ReadBatchToolExecutor(
 
     // ------------------------------------------------------------------ batching
 
-    private suspend fun runBatch(entry: OuterCall): ToolResult {
+    private suspend fun runBatch(entry: OuterCall, batchApproved: Boolean = false): ToolResult {
         val args = parseObject(entry.call.argumentsJson) ?: return ToolResult.Invalid(ARGS_INCOMPLETE)
         strictKeys(args, READ_BATCH_KEYS)?.let { return ToolResult.Invalid(it) }
         val rawCalls = args["calls"] as? JsonArray
@@ -311,7 +324,13 @@ class ReadBatchToolExecutor(
             if (argumentsJson.toByteArray(StandardCharsets.UTF_8).size > budget.maxArgumentsBytes) {
                 return ToolResult.Invalid("calls[$index].arguments exceed the batch argument budget")
             }
-            requests.add(ChildRequest(index, childCallId, tool, argumentsJson))
+            val runtimeCallId = childCallId(entry.call.callId, index, childCallId)
+            requests.add(ChildRequest(index, childCallId, runtimeCallId, tool, argumentsJson))
+        }
+
+        if (!batchApproved && requests.any { it.tool in frozenApprovalRequired }) {
+            synchronized(lock) { entry.pendingApproval = true }
+            return ToolResult.NeedsApproval
         }
 
         // Unknown, ineligible, side-effectful, and already-used child call ids
@@ -365,7 +384,7 @@ class ReadBatchToolExecutor(
                 break
             }
             val window = dispatch.subList(offset, minOf(offset + budget.maxConcurrency, dispatch.size))
-            val chunk = dispatchChunk(window)
+            val chunk = dispatchChunk(entry, window, batchApproved)
             dispatched += window.size
             chunk.forEach { outcome ->
                 val rendered = renderChild(entry, outcome, remainingOutput)
@@ -381,32 +400,38 @@ class ReadBatchToolExecutor(
         // whole envelope and purges the cached copy.
         val disclosed = synchronized(lock) { entry.contentChildren.toList() }
         if (disclosed.isNotEmpty() && !contentStillAuthorized(disclosed)) {
+            withholdDispatchedChildren(entry)
             purgeAndDenyReplay(entry)
             return ToolResult.Denied(BATCH_WITHHELD_REASON)
         }
+        val unreleased = synchronized(lock) { (entry.dispatchedChildren - disclosed.toSet()).toList() }
+        unreleased.forEach { child -> runCatching { delegate.withholdDeferredResult(child) } }
 
         return ToolResult.Value(envelope(entry, requests, outcomes, dispatched, granted, complete).toString())
     }
 
     /** Live authorization plus the deferred check for every content child. */
-    private suspend fun contentStillAuthorized(children: List<ToolCall>): Boolean {
-        if (!liveAuthorizedSafely()) return false
-        for (child in children) {
-            if (!deferredResultAuthorizedSafely(child)) return false
-        }
-        return true
-    }
+    private suspend fun contentStillAuthorized(children: List<ToolCall>): Boolean =
+        liveAuthorizedSafely()
+            .takeIf { it }
+            ?.let { children.all { child -> precheckDeferredResultSafely(child) } }
+            ?.takeIf { it }
+            ?.let { children.all { child -> deferredResultAuthorizedSafely(child) } } == true
 
     /**
      * Runs one window concurrently.  A cancellation cancels the siblings that
      * already started and propagates, so later windows are never begun.
      */
-    private suspend fun dispatchChunk(window: List<ChildRequest>): List<ChildOutcome> =
+    private suspend fun dispatchChunk(
+        entry: OuterCall,
+        window: List<ChildRequest>,
+        batchApproved: Boolean,
+    ): List<ChildOutcome> =
         coroutineScope {
             val self = coroutineContext.job
             inFlight.add(self)
             try {
-                window.map { request -> async { runChild(request) } }.awaitAll()
+                window.map { request -> async { runChild(entry, request, batchApproved) } }.awaitAll()
             } finally {
                 // Covers cancellation, an ordinary failure, and an Error escaping
                 // a child: any dispatched child that never reported is unknown,
@@ -417,14 +442,16 @@ class ReadBatchToolExecutor(
             }
         }
 
-    private suspend fun runChild(request: ChildRequest): ChildOutcome {
-        val childCall = ToolCall(request.childCallId, request.tool, request.argumentsJson)
+    private suspend fun runChild(entry: OuterCall, request: ChildRequest, batchApproved: Boolean): ChildOutcome {
+        val childCall = ToolCall(request.runtimeCallId, request.tool, request.argumentsJson)
         synchronized(lock) {
+            entry.dispatchedChildren.add(childCall)
             dispatchedCalls += 1
             outstandingCalls += 1
         }
         val result = try {
-            delegate.invoke(childCall)
+            val first = delegate.invoke(childCall)
+            if (batchApproved && first == ToolResult.NeedsApproval) delegate.approve(childCall.callId) else first
         } catch (cancelled: CancellationException) {
             // Batch children are side-effect-free reads, so a cancelled child
             // changed nothing: it is a definite stop, not an unknown outcome.
@@ -509,7 +536,7 @@ class ReadBatchToolExecutor(
     /** Records a child that actually produced content, for later replay checks. */
     private fun recordContentChild(entry: OuterCall, request: ChildRequest) {
         synchronized(lock) {
-            entry.contentChildren.add(ToolCall(request.childCallId, request.tool, request.argumentsJson))
+            entry.contentChildren.add(ToolCall(request.runtimeCallId, request.tool, request.argumentsJson))
         }
     }
 
@@ -564,28 +591,27 @@ class ReadBatchToolExecutor(
         }
     }
 
-    private suspend fun liveAuthorizedSafely(): Boolean = try {
-        liveAuthorized()
+    private suspend fun guardBoolean(block: suspend () -> Boolean): Boolean = try {
+        block()
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (_: Exception) {
         false
     }
 
-    private suspend fun replayAuthorizedSafely(call: ToolCall): Boolean = try {
-        replayAuthorized(call)
-    } catch (cancelled: CancellationException) {
-        throw cancelled
-    } catch (_: Exception) {
-        false
-    }
+    private suspend fun liveAuthorizedSafely(): Boolean = guardBoolean { liveAuthorized() }
 
-    private suspend fun deferredResultAuthorizedSafely(call: ToolCall): Boolean = try {
-        deferredResultAuthorized(call)
-    } catch (cancelled: CancellationException) {
-        throw cancelled
-    } catch (_: Exception) {
-        false
+    private suspend fun replayAuthorizedSafely(call: ToolCall): Boolean = guardBoolean { replayAuthorized(call) }
+
+    private suspend fun deferredResultAuthorizedSafely(call: ToolCall): Boolean =
+        guardBoolean { deferredResultAuthorized(call) }
+
+    private suspend fun precheckDeferredResultSafely(call: ToolCall): Boolean =
+        guardBoolean { delegate.precheckDeferredResult(call) }
+
+    private suspend fun withholdDispatchedChildren(entry: OuterCall) {
+        val children = synchronized(lock) { entry.dispatchedChildren.toList() }
+        children.forEach { child -> runCatching { delegate.withholdDeferredResult(child) } }
     }
 
     private fun purgeAndDenyReplay(entry: OuterCall): Boolean {
@@ -650,6 +676,7 @@ class ReadBatchToolExecutor(
     private class ChildRequest(
         val index: Int,
         val childCallId: String,
+        val runtimeCallId: String,
         val tool: String,
         val argumentsJson: String,
     )
@@ -664,10 +691,12 @@ class ReadBatchToolExecutor(
 
     private class OuterCall(
         val call: ToolCall,
+        var pendingApproval: Boolean = false,
         var result: ToolResult? = null,
         var replayDenied: Boolean = false,
         var running: Boolean = false,
         val contentChildren: MutableList<ToolCall> = mutableListOf(),
+        val dispatchedChildren: MutableList<ToolCall> = mutableListOf(),
     )
 
     private companion object {

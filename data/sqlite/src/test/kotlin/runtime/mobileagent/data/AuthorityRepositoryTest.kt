@@ -67,7 +67,9 @@ class AuthorityRepositoryTest {
             assertEquals(Authority.NONE, repo.getPolicy().selectedAuthority)
             assertEquals(DangerousMode.DISABLED, repo.getPolicy().dangerousMode)
             assertTrue(repo.getPreference(Authority.SHIZUKU).userIntentEnabled)
-            assertEquals(3, repo.listPreferences().size)
+            assertEquals(Authority.entries.toSet(), repo.listPreferences().map { it.authority }.toSet())
+            assertFalse(repo.getPreference(Authority.ROOT_DIRECT).userIntentEnabled)
+            assertFalse(repo.getPreference(Authority.SHIZUKU_ROOT).userIntentEnabled)
             assertTrue(db.query("PRAGMA table_info(authority_preferences)").none { it.string("name") == "selected_authority" })
             assertTrue(db.query("PRAGMA table_info(authority_preferences)").none { it.string("name") == "dangerous_mode" })
         }

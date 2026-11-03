@@ -55,6 +55,12 @@ interface ToolExecutor {
      */
     suspend fun authorizeDeferredResult(call: ToolCall): Boolean = authorizeReplay(call)
 
+    /** Non-consuming preflight check before releasing a multi-child deferred envelope. */
+    suspend fun precheckDeferredResult(call: ToolCall): Boolean = true
+
+    /** Explicitly withhold a deferred result that will not be disclosed to the model. */
+    suspend fun withholdDeferredResult(call: ToolCall) {}
+
     /**
      * Optional lifecycle hook for executors that own background work.
      *

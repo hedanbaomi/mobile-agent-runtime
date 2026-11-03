@@ -133,4 +133,87 @@ class AgentWorkspaceGrantPresetTest {
         assertEquals(setOf(2L), renewed.map { it.policyVersion }.toSet())
         assertEquals(setOf("workspace-one"), renewed.map { it.workspaceId }.toSet())
     }
+
+    @Test
+    fun rootBackedWorkspaceRejectsPresetDraftAndStaleReauthWithoutRevokingExistingGrants() {
+        var revokeCalls = 0
+        var saveCalls = 0
+        val port = object : AgentGrantPort {
+            override val available = true
+            override fun currentPolicyVersion() = 3L
+            override fun isRootWorkspace(workspaceId: String) = workspaceId == "root-ws"
+            override fun revokeGrant(grantId: String, expectedRevision: Long): CapabilityGrant {
+                revokeCalls++
+                error("must not revoke before rejecting Root preset")
+            }
+            override fun saveGrant(grant: CapabilityGrant): CapabilityGrant {
+                saveCalls++
+                return grant
+            }
+        }
+        val rootWs = AgentWorkspaceUi(
+            id = "root-ws",
+            displayName = "Root Workspace",
+            backendType = WorkspaceBackendType.PRIVILEGED,
+            readable = true,
+            writable = true,
+            quotaBytes = null,
+            maxFileBytes = 1024,
+            enabled = true,
+            revision = 1,
+        )
+        val presetEditor = AgentEditorUi(
+            workspaces = listOf(rootWs),
+            workspaceGrantPreset = AgentWorkspaceGrantPresetUi("root-ws", AgentWorkspaceAccessPreset.READ_ONLY),
+        )
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException::class.java) {
+            saveAgentWorkspaceGrantPreset(presetEditor, "agent-one", port)
+        }
+        assertEquals(0, revokeCalls)
+        assertEquals(0, saveCalls)
+
+        val draftEditor = AgentEditorUi(
+            workspaces = listOf(rootWs),
+            grantDraft = runtime.mobileagent.feature.agents.AgentGrantDraftUi(
+                capability = CapabilityId(CapabilityId.FILE_READ_TEXT),
+                workspaceId = "root-ws",
+                lifetime = GrantLifetime.PERSISTENT,
+            ),
+        )
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException::class.java) {
+            saveAgentGrantDraft(draftEditor, "agent-one", port)
+        }
+        val staleRootGrant = AgentGrantUi(
+            grant = CapabilityGrant(
+                grantId = "root-stale-1",
+                agentId = "agent-one",
+                capability = CapabilityId(CapabilityId.FILE_READ_TEXT),
+                workspaceId = "root-ws",
+                lifetime = GrantLifetime.PERSISTENT,
+                policyVersion = 1,
+                createdAt = "2026-10-01T00:00:00Z",
+            ),
+            policyStale = true,
+            enabled = true,
+            skillTrusted = true,
+        )
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException::class.java) {
+            reauthorizeStaleAgentGrant(staleRootGrant, "agent-one", port)
+        }
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException::class.java) {
+            RootAgentGrantGuards.preflightEditorGrantMutations(presetEditor, port)
+        }
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException::class.java) {
+            RootAgentGrantGuards.preflightEditorGrantMutations(AgentEditorUi(grants = listOf(staleRootGrant)), port)
+        }
+        org.junit.jupiter.api.Assertions.assertNull(
+            RootAgentGrantGuards.defaultOrdinaryPresetWorkspaceId(listOf(rootWs.copy(isRoot = true))),
+        )
+        val safWs = rootWs.copy(id = "saf-ws", backendType = WorkspaceBackendType.SAF_TREE, isRoot = false)
+        assertEquals(
+            "saf-ws",
+            RootAgentGrantGuards.defaultOrdinaryPresetWorkspaceId(listOf(rootWs.copy(isRoot = true), safWs)),
+        )
+        assertEquals(0, saveCalls)
+    }
 }

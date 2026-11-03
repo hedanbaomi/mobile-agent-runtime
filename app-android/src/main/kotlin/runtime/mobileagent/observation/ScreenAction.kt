@@ -15,7 +15,9 @@ internal object ScreenActionAdmission {
     fun from(state: AuthorityManagerState,
         buildAllowed: Boolean = !BuildConfig.DEBUG && BuildConfig.HIGH_PRIVILEGE_CONTROL_PLANE_ENABLED): ScreenActionAuthority? {
         if (!buildAllowed) return null
-        val selected = state.selectedAuthority?.takeIf { it != Authority.NONE } ?: return null
+        val selected = state.selectedAuthority?.takeIf {
+            it == Authority.SHIZUKU || it == Authority.WIRED_ADB
+        } ?: return null
         if (state.statuses[selected]?.isReady != true) return null
         return ScreenActionAuthority(selected, state.persistenceRevision)
     }

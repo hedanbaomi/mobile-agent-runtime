@@ -968,7 +968,7 @@ class ShizukuAuthorityBridge(
             .getOrNull()
             ?.takeIf { it >= 0 }
         val permissionGranted = runCatching {
-            Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+            runtime.mobileagent.integration.RootPermissionEntry.checkLiveSelfPermission()
         }.getOrNull() ?: return unavailable(
             installedHint,
             PERMISSION_CHECK_FAILED,

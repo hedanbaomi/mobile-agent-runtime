@@ -261,6 +261,32 @@ private class CompositeToolExecutor(
         return ComposedInvocation(canonicalCall, typed, selected)
     }
 
+    /**
+     * The pre-composition legacy executor answered an unexposed name with
+     * `Invalid("Unknown tool")`. A built-in workspace call that explicitly names a frozen Root
+     * id must not be flattened when authoritative evidence says the Root side is offline; a
+     * live Root whose grant is missing keeps its AUTHORITY_NOT_GRANTED answer, and a non-typed
+     * legacy stub invents neither state. This only selects a result: no dispatch, no provider
+     * fallback, and no change to the exposed tool set.
+     */
+    override fun legacyUnknownTool(call: ToolCall): ToolResult {
+        if (call.name !in FROZEN_WORKSPACE_TOOLS) return ToolResult.Invalid("Unknown tool")
+        val id = (ModelToolArguments.workspaceIdSelection(call.argumentsJson)
+            as? WorkspaceIdSelection.Present)?.id ?: return ToolResult.Invalid("Unknown tool")
+        if (id !in rootWorkspaceIds) return ToolResult.Invalid("Unknown tool")
+        return when {
+            root == null -> unavailableRootWorkspace()
+            // A non-typed legacy stub has no live/offline evidence; keep the legacy boundary.
+            rootRouter == null -> ToolResult.Invalid("Unknown tool")
+            id !in rootLiveIds -> unavailableRootWorkspace()
+            call.name !in rootExposedTools -> rootCapabilityNotGranted()
+            else -> ToolResult.Invalid("Unknown tool")
+        }
+    }
+
+    override fun legacyNoPendingApproval(callId: String): ToolResult =
+        ToolResult.Invalid("No pending approval")
+
     override fun normalizationFailure(call: ToolCall): ToolResult {
         if (call.name == WorkspaceDiscovery.NAME) return ToolResult.Invalid("INVALID_REQUEST")
         val candidates = owners[call.name] ?: return ToolResult.Invalid("INVALID_REQUEST")
@@ -276,10 +302,7 @@ private class CompositeToolExecutor(
                 // answer for itself instead of inventing an offline state.
                 rootRouter == null -> ToolResult.Failure(ToolError(ToolErrorCode.OPERATION_UNAVAILABLE))
                 id !in rootLiveIds -> unavailableRootWorkspace()
-                call.name !in rootExposedTools -> ToolResult.Failure(ToolError(
-                    ToolErrorCode.AUTHORITY_NOT_GRANTED,
-                    message = "Root capability is not granted for this workspace",
-                ))
+                call.name !in rootExposedTools -> rootCapabilityNotGranted()
                 // The frozen Root executor rejected an otherwise valid request.
                 else -> ToolResult.Invalid("Invalid Root tool arguments")
             }
@@ -415,6 +438,11 @@ private class CompositeToolExecutor(
         ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE,
         message = "Root workspace is temporarily unavailable",
         retryable = true,
+    ))
+
+    private fun rootCapabilityNotGranted(): ToolResult = ToolResult.Failure(ToolError(
+        ToolErrorCode.AUTHORITY_NOT_GRANTED,
+        message = "Root capability is not granted for this workspace",
     ))
 
     private companion object {

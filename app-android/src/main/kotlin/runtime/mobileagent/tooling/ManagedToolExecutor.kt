@@ -55,6 +55,19 @@ abstract class ManagedToolExecutor<I : ManagedToolInvocation>(specifications: Li
     // ---- Legacy ToolExecutor boundary -------------------------------------------------
 
     /**
+     * Legacy-boundary result for a tool name this frozen snapshot never exposed. The default
+     * keeps the historical Managed/Root refusal; composition layers that own a different legacy
+     * contract override this hook.
+     */
+    protected open fun legacyUnknownTool(call: ToolCall): ToolResult = unavailable()
+
+    /**
+     * Legacy-boundary result when no exact pending approval is owned by this executor. The
+     * default keeps the historical Managed/Root wording; the composite restores its own contract.
+     */
+    protected open fun legacyNoPendingApproval(callId: String): ToolResult = INVALID_APPROVAL
+
+    /**
      * `call.callId` is the runtime invocation id by RunTools contract.  This
      * boundary has no model id, so `modelCallId` stays null; a broker must read
      * the original model id from the DB by runtime id.
@@ -62,7 +75,7 @@ abstract class ManagedToolExecutor<I : ManagedToolInvocation>(specifications: Li
     override suspend fun invoke(call: ToolCall): ToolResult {
         if (call.callId.isBlank()) return INVALID_CALL
         if (synchronized(lock) { closed }) return unavailable()
-        if (call.name !in exposedToolNames) return unavailable()
+        if (call.name !in exposedToolNames) return legacyUnknownTool(call)
         val invocation = normalize(call, null) ?: return normalizationFailure(call)
         return dispatch(invocation)
     }
@@ -230,10 +243,10 @@ abstract class ManagedToolExecutor<I : ManagedToolInvocation>(specifications: Li
         callId: String,
         operation: suspend (invocation: I) -> ToolResult,
     ): ToolResult {
-        val bound = resolve(callId) ?: return INVALID_APPROVAL
+        val bound = resolve(callId) ?: return legacyNoPendingApproval(callId)
         synchronized(lock) {
             if (closed || bound.result != null || !bound.approvalPending || bound.inFlight || bound.cancelled) {
-                return INVALID_APPROVAL
+                return legacyNoPendingApproval(callId)
             }
             bound.approvalPending = false
             bound.inFlight = true

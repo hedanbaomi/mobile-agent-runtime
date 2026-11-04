@@ -1087,15 +1087,15 @@ class ToolingOrchestrationTest {
     }
 
     @Test
-    fun concurrentDuplicateWorkspaceModelCallDispatchesExactlyOnce() = runBlocking {
+    fun concurrentDuplicateWorkspaceRequestDispatchesExactlyOnce() = runBlocking {
         val descriptor = WorkspaceDescriptor(
             id = "workspace-duplicate-call",
             displayName = "Duplicate call workspace",
             backendType = WorkspaceBackendType.INTERNAL,
         )
         val dispatched = AtomicInteger(0)
-        val backendStarted = CompletableDeferred<Unit>()
-        val releaseBackend = CompletableDeferred<Unit>()
+        var backendStarted = CompletableDeferred<Unit>()
+        var releaseBackend = CompletableDeferred<Unit>()
         val backend = object : WorkspaceBackend {
             override val descriptor: WorkspaceDescriptor = descriptor
             override val capabilities: Set<CapabilityId> = setOf(CapabilityId(CapabilityId.FILE_READ_TEXT))
@@ -1141,28 +1141,62 @@ class ToolingOrchestrationTest {
                 }
             },
         )
-        val calls = List(2) {
-            ToolInvocation.fromRuntime(
-                callId = "model-duplicate-call",
-                snapshotId = context.snapshotId,
-                agentId = context.agentId,
-                name = UnifiedWorkspaceToolExecutor.FILE_READ_TEXT,
-                argumentsJson = "{\"workspaceId\":\"${descriptor.id}\",\"relativePath\":\"shared.txt\"}",
-            )
-        }
+        val invocation = ToolInvocation.fromRuntime(
+            callId = "model-duplicate-call",
+            snapshotId = context.snapshotId,
+            agentId = context.agentId,
+            name = UnifiedWorkspaceToolExecutor.FILE_READ_TEXT,
+            argumentsJson = "{\"workspaceId\":\"${descriptor.id}\",\"relativePath\":\"shared.txt\"}",
+        )
+        val calls = List(2) { invocation }
         barrierArmed.set(true)
         val executions = calls.map { invocation ->
             async(Dispatchers.Default) { executor.invoke(invocation, context) }
         }
-        withTimeout(1_000) { backendStarted.await() }
+        withTimeout(5_000) {
+            backendStarted.await()
+            while (executions.none { it.isCompleted }) delay(5L)
+        }
         releaseBackend.complete(Unit)
-        val results = executions.map { deferred -> withTimeout(1_000) { deferred.await() } }
+        val results = executions.map { deferred -> withTimeout(5_000) { deferred.await() } }
 
         assertEquals(1, dispatched.get())
         assertEquals(1, results.count { it is ToolExecution.Value })
         assertEquals(1, results.count { it is ToolExecution.Unknown && it.error.code == ToolErrorCode.CALL_ID_REPLAY })
         assertEquals(1, auditStarted.get())
         assertEquals(1, auditTerminal.get())
+
+        // Legacy call IDs remain execution keys at that boundary.
+        backendStarted = CompletableDeferred()
+        releaseBackend = CompletableDeferred()
+        val legacyCall = ToolCall(invocation.callId, invocation.name, invocation.argumentsJson)
+        val legacyExecutions = List(2) {
+            async(Dispatchers.Default) { executor.invoke(legacyCall, context) }
+        }
+        withTimeout(5_000) {
+            backendStarted.await()
+            while (legacyExecutions.none { it.isCompleted }) delay(5L)
+        }
+        releaseBackend.complete(Unit)
+        val legacyResults = legacyExecutions.map { withTimeout(5_000) { it.await() } }
+        assertEquals(2, dispatched.get())
+        assertEquals(1, legacyResults.count { it is ToolResult.Value })
+        assertEquals(1, legacyResults.count {
+            it == ToolResult.UnknownOutcome(ToolErrorCode.CALL_ID_REPLAY.name)
+        })
+        assertEquals(2, auditStarted.get())
+        assertEquals(2, auditTerminal.get())
+
+        // Reusing correlation metadata with a new runtime request is a distinct execution.
+        val distinct = ToolInvocation.fromRuntime(
+            callId = invocation.callId, snapshotId = context.snapshotId, agentId = context.agentId,
+            name = invocation.name, argumentsJson = invocation.argumentsJson,
+        )
+        assertTrue(distinct.requestId != invocation.requestId)
+        assertTrue(executor.invoke(distinct, context) is ToolExecution.Value)
+        assertEquals(3, dispatched.get())
+        assertEquals(3, auditStarted.get())
+        assertEquals(3, auditTerminal.get())
     }
 
     @Test
@@ -2152,7 +2186,7 @@ class ToolingOrchestrationTest {
         ) as ToolExecution.Value
         assertEquals(41L, patchRequest?.expectedVersion)
         assertEquals(WorkspacePatchFormat.REPLACE, patchRequest?.format)
-        assertTrue(patched.json.contains("\"version\":42"))
+        assertTrue(patched.json, patched.json.contains("\"version\":\"42\""))
 
         val conflictingAliases = executor.invoke(
             invocation(

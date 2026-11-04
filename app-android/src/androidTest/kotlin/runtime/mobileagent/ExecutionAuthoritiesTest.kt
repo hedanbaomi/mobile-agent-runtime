@@ -216,12 +216,28 @@ class ExecutionAuthoritiesTest {
         val fake = FakeSettingsAuthorityPort()
         registerSettingsAuthorityPortProvider(app, SettingsAuthorityPortProvider { fake })
         try {
-            val viewModel = SettingsViewModel(app)
-            viewModel.enableShizuku()
-
-            assertEquals(listOf("intent:true", "select:SHIZUKU", "request"), fake.shizukuCalls)
-            assertEquals(Authority.SHIZUKU.name, viewModel.uiState(0).selectedAuthority)
-            assertTrue(viewModel.uiState(0).shizukuAuthority.userIntentEnabled)
+            val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+            lateinit var viewModel: SettingsViewModel
+            instrumentation.runOnMainSync {
+                viewModel = SettingsViewModel(app)
+                viewModel.enableShizuku()
+            }
+            val deadline = android.os.SystemClock.elapsedRealtime() + 5_000L
+            var finished = false
+            while (!finished && android.os.SystemClock.elapsedRealtime() < deadline) {
+                instrumentation.runOnMainSync {
+                    finished = fake.shizukuCalls.size == 3 &&
+                        viewModel.uiState(0).selectedAuthority == Authority.SHIZUKU.name &&
+                        viewModel.uiState(0).shizukuAuthority.userIntentEnabled
+                }
+                if (!finished) Thread.sleep(20L)
+            }
+            assertTrue("Asynchronous Shizuku enable must finish", finished)
+            instrumentation.runOnMainSync {
+                assertEquals(listOf("intent:true", "select:SHIZUKU", "request"), fake.shizukuCalls.toList())
+                assertEquals(Authority.SHIZUKU.name, viewModel.uiState(0).selectedAuthority)
+                assertTrue(viewModel.uiState(0).shizukuAuthority.userIntentEnabled)
+            }
         } finally {
             registerSettingsAuthorityPortProvider(app, app.container)
         }
@@ -233,7 +249,7 @@ private class FakeSettingsAuthorityPort : SettingsAuthorityPort {
     val token = "0123456789abcdef".repeat(4)
     var requestReplaceExistingTrust = false
     var cancelCalls = 0
-    val shizukuCalls = mutableListOf<String>()
+    val shizukuCalls = java.util.concurrent.CopyOnWriteArrayList<String>()
     val wiredCalls = mutableListOf<String>()
     var failWiredSelection = false
     private var failRevoke = false

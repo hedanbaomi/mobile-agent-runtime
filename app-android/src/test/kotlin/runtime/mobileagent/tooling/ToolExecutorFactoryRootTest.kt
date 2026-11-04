@@ -21,6 +21,11 @@ import runtime.mobileagent.domain.CapabilityId
 import runtime.mobileagent.domain.DangerousMode
 import runtime.mobileagent.domain.SnapshotGrantBinding
 import runtime.mobileagent.privileged.RootToolArguments
+import runtime.mobileagent.privileged.RootToolBackend
+import runtime.mobileagent.privileged.RootToolExecutor
+import runtime.mobileagent.privileged.RootToolExposure
+import runtime.mobileagent.privileged.RootToolInvocation
+import runtime.mobileagent.skills.ResultDisclosure
 import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolExecutor
 import runtime.mobileagent.skills.ToolResult
@@ -169,6 +174,135 @@ class ToolExecutorFactoryRootTest {
         assertTrue(result is ToolResult.Failure, result.toString())
         assertEquals(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE, (result as ToolResult.Failure).error.code)
         assertEquals(0, other.calls)
+    }
+
+    @Test
+    fun compositeRestoresUnknownToolAndMissingApprovalLegacyContracts() = runBlocking {
+        val web = FakeWebToolExecutor("web_search")
+        val factory = ToolExecutorFactory(web = web)
+        assertEquals(
+            ToolResult.Invalid("Unknown tool"),
+            factory.invoke(ToolCall("unknown-tool", "not_a_tool", "{}")),
+        )
+        assertEquals(0, web.calls, "an unknown tool must not reach any provider")
+        assertEquals(
+            ToolResult.Invalid("No pending approval"),
+            factory.approve("missing-approval"),
+        )
+        assertEquals(
+            ToolResult.Invalid("No pending approval"),
+            factory.reject("missing-approval"),
+        )
+        assertEquals(0, web.calls)
+
+        // A settled, non-pending bound call takes the same legacy contract on the second
+        // settlePending branch and must not dispatch again.
+        val settled = ToolCall("settled-call", "web_search", "{}")
+        assertTrue(factory.invoke(settled) is ToolResult.Value)
+        assertEquals(
+            ToolResult.Invalid("No pending approval"),
+            factory.approve("settled-call"),
+        )
+        assertEquals(1, web.calls)
+    }
+
+    @Test
+    fun unrelatedWebToolDoesNotHideTheFrozenOfflineRoot() = runBlocking {
+        val root = RootToolExecutor(emptyList(), EmptyRootToolBackend())
+        val emptyFactory = ToolExecutorFactory(root = root, rootWorkspaceIds = setOf("root-ws"))
+        assertTrue(emptyFactory.toolingSpecs.isEmpty())
+        val emptyOffline = emptyFactory.invoke(ToolCall(
+            "offline-no-other-tools", "file_read_text", """{"workspace_id":"root-ws","relative_path":"a"}""",
+        ))
+        assertTrue(emptyOffline is ToolResult.Failure, emptyOffline.toString())
+        assertEquals(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE, (emptyOffline as ToolResult.Failure).error.code)
+        val web = FakeWebToolExecutor("web_search")
+        val factory = ToolExecutorFactory(web = web, root = root, rootWorkspaceIds = setOf("root-ws"))
+        assertTrue(root.specs.isEmpty(), "the Root fixture must expose no tools")
+        assertEquals(listOf("web_search"), factory.toolingSpecs.map { it.name })
+        val offline = factory.invoke(ToolCall(
+            "offline-empty-exposure",
+            "file_read_text",
+            """{"workspace_id":"root-ws","relative_path":"a"}""",
+        ))
+        assertTrue(offline is ToolResult.Failure, offline.toString())
+        val error = (offline as ToolResult.Failure).error
+        assertEquals(ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE, error.code)
+        assertTrue(error.retryable)
+        assertEquals("Root workspace is temporarily unavailable", error.message)
+        assertEquals(0, web.calls, "the offline Root answer must not fall back to the unrelated web provider")
+
+        assertEquals(
+            ToolResult.Invalid("Unknown tool"),
+            factory.invoke(ToolCall("offline-other-workspace", "file_read_text", """{"workspace_id":"other-ws"}""")),
+        )
+        assertEquals(
+            ToolResult.Invalid("Unknown tool"),
+            factory.invoke(ToolCall("offline-not-workspace-tool", "not_a_tool", """{"workspace_id":"root-ws"}""")),
+        )
+        assertEquals(
+            ToolResult.Invalid("Unknown tool"),
+            factory.invoke(ToolCall("offline-no-workspace-id", "file_read_text", """{"relative_path":"a"}""")),
+        )
+        assertEquals(0, web.calls)
+    }
+
+    @Test
+    fun liveRootWithFrozenIdButMissingGrantIsNotReportedOffline() = runBlocking {
+        val root = RootToolExecutor(emptyList(), LiveFrozenRootToolBackend())
+        val web = FakeWebToolExecutor("web_search")
+        val factory = ToolExecutorFactory(web = web, root = root, rootWorkspaceIds = setOf("root-ws"))
+        assertTrue("root-ws" in root.workspaceIds, "the live Root exposure must keep the frozen id live")
+        val result = factory.invoke(ToolCall(
+            "live-root-missing-grant",
+            "file_read_text",
+            """{"workspace_id":"root-ws","relative_path":"a"}""",
+        ))
+        assertTrue(result is ToolResult.Failure, result.toString())
+        val error = (result as ToolResult.Failure).error
+        assertEquals(ToolErrorCode.AUTHORITY_NOT_GRANTED, error.code)
+        assertFalse(error.retryable)
+        assertEquals("Root capability is not granted for this workspace", error.message)
+        assertEquals(0, web.calls)
+    }
+
+    @Test
+    fun nonTypedRootStubDoesNotFabricateLiveOrOfflineFacts() = runBlocking {
+        val stub = EmptySpecToolExecutor()
+        val factory = ToolExecutorFactory(root = stub, rootWorkspaceIds = setOf("root-ws"))
+        assertEquals(
+            ToolResult.Invalid("Unknown tool"),
+            factory.invoke(ToolCall("stub-root", "file_read_text", """{"workspace_id":"root-ws"}""")),
+        )
+        assertEquals(0, stub.calls)
+    }
+
+    @Test
+    fun rootExecutorKeepsItsOwnUnknownToolAndMissingApprovalDefaults() = runBlocking {
+        val root = RootToolExecutor(emptyList(), EmptyRootToolBackend())
+        assertTrue(root.specs.isEmpty())
+        val unknown = root.invoke(ToolCall(
+            "root-default-unknown",
+            "file_read_text",
+            """{"workspace_id":"root-ws"}""",
+        ))
+        assertTrue(unknown is ToolResult.Failure, unknown.toString())
+        assertEquals(ToolErrorCode.OPERATION_UNAVAILABLE, (unknown as ToolResult.Failure).error.code)
+        assertEquals(
+            ToolResult.Invalid("No pending tool approval"),
+            root.approve("missing-root-approval"),
+        )
+        // The typed entry keeps its own unavailable result; the legacy contract hooks must not
+        // leak into it.
+        val typed = root.invoke(ToolInvocation.fromRuntime(
+            callId = "root-default-typed",
+            snapshotId = "snapshot",
+            agentId = "agent",
+            name = "file_read_text",
+            argumentsJson = """{"workspace_id":"root-ws"}""",
+        ))
+        assertTrue(typed is ToolExecution.Failed, typed.toString())
+        assertEquals(ToolErrorCode.OPERATION_UNAVAILABLE, (typed as ToolExecution.Failed).error.code)
     }
 
     @Test
@@ -487,4 +621,64 @@ private class FakeWebToolExecutor(private val name: String) : ToolExecutor {
     }
 
     override suspend fun approve(callId: String): ToolResult = ToolResult.Invalid("not supported")
+}
+
+/** A non-typed provider with no schema; the composite must not invent Root facts from it. */
+private class EmptySpecToolExecutor : ToolExecutor {
+    var calls: Int = 0
+    override val specs: List<LegacyToolSpec> = emptyList()
+
+    override suspend fun invoke(call: ToolCall): ToolResult {
+        calls += 1
+        return ToolResult.Value("""{"unexpected":true}""")
+    }
+
+    override suspend fun approve(callId: String): ToolResult = ToolResult.Invalid("not supported")
+}
+
+/** The Root executor's default legacy behavior is tested through a real, empty exposure. */
+private class EmptyRootToolBackend : RootToolBackend {
+    override fun exposedTools(): List<RootToolExposure> = emptyList()
+
+    override suspend fun invoke(invocation: RootToolInvocation): ToolResult = error("unused")
+
+    override suspend fun approve(runtimeInvocationId: String): ToolResult = error("unused")
+
+    override suspend fun reject(runtimeInvocationId: String): ToolResult = error("unused")
+
+    override suspend fun expire(runtimeInvocationId: String): ToolResult = error("unused")
+
+    override suspend fun authorizeDisclosure(
+        invocation: RootToolInvocation,
+        disclosure: ResultDisclosure,
+    ): Boolean = false
+
+    override suspend fun cancel(runtimeInvocationId: String): Boolean = false
+}
+
+/** A real Root exposure keeps the frozen id live while exposing no `file_read_text` grant. */
+private class LiveFrozenRootToolBackend : RootToolBackend {
+    override fun exposedTools(): List<RootToolExposure> = listOf(
+        RootToolExposure(
+            toolName = "file_stat",
+            capability = CapabilityId(CapabilityId.FILE_STAT),
+            workspaceId = "root-ws",
+            grantId = "grant-1",
+        ),
+    )
+
+    override suspend fun invoke(invocation: RootToolInvocation): ToolResult = error("unused")
+
+    override suspend fun approve(runtimeInvocationId: String): ToolResult = error("unused")
+
+    override suspend fun reject(runtimeInvocationId: String): ToolResult = error("unused")
+
+    override suspend fun expire(runtimeInvocationId: String): ToolResult = error("unused")
+
+    override suspend fun authorizeDisclosure(
+        invocation: RootToolInvocation,
+        disclosure: ResultDisclosure,
+    ): Boolean = false
+
+    override suspend fun cancel(runtimeInvocationId: String): Boolean = false
 }

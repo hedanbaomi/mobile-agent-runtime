@@ -585,13 +585,14 @@ private fun AuthoritySettingsCard(
         else -> null
     }
     val isRootSelected = state.selectedAuthority == "ROOT_DIRECT" || state.selectedAuthority == "SHIZUKU_ROOT"
-    // Root Shell is gated by its own channel consent plus the live platform/service facts; the
-    // ADB-level Dangerous Mode is a separate control and must not decide this status.
+    // Root Shell has independent channel consent. ADB-level channels still require Dangerous
+    // Mode, in addition to the same live platform/service facts used by their tool exposure.
     val shellAvailable = selectedProvider?.let {
         it.platformGrant == "GRANTED" &&
             it.availability == "READY" &&
             it.connection == "CONNECTED" &&
-            (!isRootSelected || it.rootShellConsentEnabled)
+            (if (isRootSelected) it.rootShellConsentEnabled
+             else displayedDangerousMode != DangerousMode.DISABLED.name)
     } == true
     val safConfigured = state.safWorkspace.configured || state.safWorkspace.status == "GRANT_LOST"
 
@@ -912,13 +913,14 @@ private fun AuthoritySettingsCard(
                         modifier = Modifier.testTag("settings.dangerous_mode.durable_fail_closed"),
                     )
                 }
-                // Shell status is independent of Dangerous Mode: it reports the selected channel's
-                // own grant/consent/connection facts, so it stays visible and truthful either way.
+                val shellState = stringResource(
+                    if (shellAvailable) R.string.sett_root_shell_state_available
+                    else R.string.sett_root_shell_state_unavailable,
+                )
                 Text(
-                    stringResource(
-                        if (shellAvailable) R.string.sett_root_shell_state_available
-                        else R.string.sett_root_shell_state_unavailable,
-                    ),
+                    if (displayedDangerousMode != DangerousMode.DISABLED.name) {
+                        stringResource(R.string.sett_dangerous_mode_enabled_shell_state, shellState)
+                    } else shellState,
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.testTag("settings.dangerous_mode.shell_state"),
                 )

@@ -85,7 +85,9 @@ class RootNextAgentAcceptanceTest {
         val db = app.container.db
         val port = runtime.mobileagent.settingsAuthorityPort(app)
         val coordinator = app.container.runtimeIntegration.rootCoordinator
-        val vm = SettingsViewModel(app)
+        lateinit var vm: SettingsViewModel
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.runOnMainSync { vm = SettingsViewModel(app) }
 
         val initialFacts = waitForShizukuBinder(timeoutMs = 15_000L)
         assertNotNull("Shizuku UID 0 binder must be reachable", initialFacts)
@@ -106,7 +108,7 @@ class RootNextAgentAcceptanceTest {
         assertFalse(coordinator.isAuthorityReadyForDispatch(Authority.SHIZUKU_ROOT))
 
         // Step 1 click: fresh unauthorized app clicks "Enable & Select" on SHIZUKU_ROOT.
-        vm.enableShizukuRoot()
+        instrumentation.runOnMainSync { vm.enableShizukuRoot() }
         assertNull("First foreground click must request platform permission even before its UID can be read", vm.error.value)
         val afterStep1Snap = port.snapshot()
         assertEquals(
@@ -182,8 +184,20 @@ class RootNextAgentAcceptanceTest {
         }
 
         // Step 2 explicit click: user clicks "Enable & Select" after permission is granted.
-        vm.enableShizukuRoot()
-        val afterStep2Snap = port.snapshot()
+        instrumentation.runOnMainSync { vm.enableShizukuRoot() }
+        // The UI action returns before the blocking Root handshake completes on IO.
+        // Keep the original policy/readiness assertions after bounded observable completion.
+        val readyDeadline = android.os.SystemClock.elapsedRealtime() + 15_000L
+        var afterStep2Snap = port.snapshot()
+        while (android.os.SystemClock.elapsedRealtime() < readyDeadline &&
+            (afterStep2Snap.selectedAuthority != Authority.SHIZUKU_ROOT ||
+                !afterStep2Snap.shizukuRoot.configured ||
+                afterStep2Snap.shizukuRoot.availability != Availability.READY ||
+                afterStep2Snap.shizukuRoot.connection != Connection.CONNECTED)
+        ) {
+            Thread.sleep(50L)
+            afterStep2Snap = port.snapshot()
+        }
         assertEquals(Authority.SHIZUKU_ROOT, afterStep2Snap.selectedAuthority)
         assertEquals(AuthorityUserIntent.SHIZUKU_ROOT, afterStep2Snap.shizukuRoot.userIntent)
         assertTrue(afterStep2Snap.shizukuRoot.configured)

@@ -141,8 +141,13 @@ enum class RootBridgeErrorCode(val wireErrorCode: ToolErrorCode) {
                     normalized == "invalid_glob_pattern" ||
                     normalized == "invalid_grep_query" ||
                     normalized == "utf8_window_too_small" -> ToolErrorCode.INVALID_REQUEST
-                normalized == RootFileOperationReason.PATCH_RESULT_EXCEEDS_BUDGET ||
+                // A conditional contract the selected backend cannot honour is an explicit
+                // unsupported-version capability, never a size error or a silent drop.
+                normalized == RootFileOperationReason.WRITE_DOMAIN_VERSION_UNSUPPORTED ||
                     normalized == RootFileOperationReason.CONTENT_VERSION_UNOBSERVABLE ||
+                    normalized == "unsupported_expected_version_condition" ||
+                    normalized == "unsupported_patch_format" -> ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED
+                normalized == RootFileOperationReason.PATCH_RESULT_EXCEEDS_BUDGET ||
                     normalized == "result_exceeds_budget" -> ToolErrorCode.FILE_TOO_LARGE
                 normalized == "non_utf8_text" ||
                     normalized.startsWith(RootFileOperationReason.UNSUPPORTED_WRITE_DOMAIN) ->

@@ -16,10 +16,9 @@ import runtime.mobileagent.domain.PrivilegeTier
 import runtime.mobileagent.domain.PrivilegedSessionIdentity
 import runtime.mobileagent.domain.RootCallerObservation
 import runtime.mobileagent.domain.RootControlPlaneBoundary
-import runtime.mobileagent.domain.RootServiceTerminalOutcome
+import runtime.mobileagent.domain.RootKernelBootIdentity
+import runtime.mobileagent.domain.isRootAuthority
 import runtime.mobileagent.shizuku.ShizukuAuthorityState
-import runtime.mobileagent.skills.tooling.ShellExecRequest
-import runtime.mobileagent.skills.tooling.ShellExecutionStatus
 
 data class RootAcquiredSession(
     val identity: PrivilegedSessionIdentity,
@@ -28,9 +27,30 @@ data class RootAcquiredSession(
     val controlPlane: RootControlPlaneBoundary? = null,
     /** Token of the acquisition attempt that produced this session (see [isAcquisitionCurrent]). */
     val attemptToken: Long = 0L,
+    /** Accepted only from the identity-verified service response, never from caller settings. */
+    val kernelBootId: String? = null,
+    val kernelElapsedRealtimeMs: Long? = null,
 )
 
+/** A completed, already-closed foreground probe; it conveys no dispatchable transport. */
+class RootBootObservation internal constructor(
+    val identity: PrivilegedSessionIdentity,
+    val kernelBootId: String,
+) {
+    init {
+        require(identity.authority.isRootAuthority && identity.serviceUid == 0 && identity.privilegeTier == PrivilegeTier.ROOT)
+        require(RootKernelBootIdentity.isValid(kernelBootId))
+    }
+}
+
 interface RootSessionConnector {
+    /** Explicit recovery-only observation; unsupported/old connectors provide no boot proof. */
+    fun probeBootIdentity(
+        authority: Authority,
+        identityEpoch: Long,
+        appInstanceId: String,
+        shizukuState: ShizukuAuthorityState?,
+    ): RootBootObservation? = null
     /**
      * True while the acquisition identified by [attemptToken] is still current (not cancelled and
      * not superseded). The coordinator checks this immediately before it publishes the session, so
@@ -56,42 +76,6 @@ interface RootSessionConnector {
         appInstanceId: String,
         shizukuState: ShizukuAuthorityState?,
     ): RootAcquiredSession?
-}
-
-data class RootShellRunOutcome(
-    val status: ShellExecutionStatus,
-    val exitCode: Int? = null,
-    val stdout: String = "",
-    val stderr: String = "",
-    val stdoutTruncated: Boolean = false,
-    val stderrTruncated: Boolean = false,
-    val timedOut: Boolean = false,
-    val cancelled: Boolean = false,
-    val terminalOutcome: RootServiceTerminalOutcome,
-    val requiresDegradedEpoch: Boolean = false,
-) {
-    override fun toString(): String =
-        "RootShellRunOutcome(status=$status,exitCode=$exitCode,terminalOutcome=$terminalOutcome,redacted=true)"
-}
-
-interface RootShellCommandRunner {
-    fun runCommand(
-        authority: Authority,
-        request: ShellExecRequest,
-    ): RootShellRunOutcome
-
-    fun cancel(requestId: String): Boolean
-
-    /**
-     * Terminates every in-flight process group and returns the request ids whose whole group
-     * (and observed escapees) were confirmed gone within the budget. Unconfirmed ids stay
-     * unconfirmed so the forced shutdown reports `UNKNOWN_OUTCOME`/`DEGRADED`.
-     */
-    fun terminateAll(deadlineMs: Long): Set<String> = emptySet()
-
-    fun activeRequestIds(): Set<String> = emptySet()
-
-    fun unconfirmedRequestIds(): Set<String> = emptySet()
 }
 
 /**
@@ -128,7 +112,8 @@ class AndroidRootSessionConnector(
      * Every "is this attempt still current" decision runs under [stateLock]; RPC calls and
      * transport closes never run inside that lock.
      */
-    private class AcquireAttempt(val generation: Long) {
+    private class AcquireAttempt(val generation: Long, val probeOnly: Boolean) {
+        val transportClosed = java.util.concurrent.atomic.AtomicBoolean(false)
         @Volatile
         var cancelled: Boolean = false
 
@@ -158,32 +143,70 @@ class AndroidRootSessionConnector(
         identityEpoch: Long,
         appInstanceId: String,
         shizukuState: ShizukuAuthorityState?,
+    ): RootAcquiredSession? = acquireSession(authority, identityEpoch, appInstanceId, shizukuState, probeOnly = false)
+
+    override fun probeBootIdentity(
+        authority: Authority,
+        identityEpoch: Long,
+        appInstanceId: String,
+        shizukuState: ShizukuAuthorityState?,
+    ): RootBootObservation? {
+        val acquired = acquireSession(authority, identityEpoch, appInstanceId, shizukuState, probeOnly = true) ?: return null
+        val bootId = acquired.kernelBootId ?: return null
+        return RootBootObservation(acquired.identity, bootId)
+    }
+
+    private fun acquireSession(
+        authority: Authority,
+        identityEpoch: Long,
+        appInstanceId: String,
+        shizukuState: ShizukuAuthorityState?,
+        probeOnly: Boolean,
     ): RootAcquiredSession? {
         if (connectorClosed.get()) return null
-        val attempt = AcquireAttempt(attemptCounter.incrementAndGet())
+        val attempt = AcquireAttempt(attemptCounter.incrementAndGet(), probeOnly)
         val superseded = synchronized(stateLock) {
             if (connectorClosed.get()) return null
             activeAttempts.put(authority, attempt)
         }
         superseded?.let { stale ->
             stale.cancelled = true
-            runCatching { stale.transport?.close() }
+            closeAttemptTransport(stale)
         }
-        lastAcquireFailureReason = null
-        // Explicit foreground authorization gates this call (coordinator.requestSessionFromForeground);
-        // factories are test seams only. Identity failures still reject below.
-        val bootstrap = observeVerifiedHostBootstrap(authority, identityEpoch, appInstanceId)
-            ?: return null.also {
-                if (lastAcquireFailureReason == null) noteFailure(authority, attempt, "bootstrap_null")
+        var runtime: ChannelRuntime? = null
+        var retained = false
+        try {
+            lastAcquireFailureReason = null
+            // Only explicit foreground acquisition/recovery invokes this path.
+            val bootstrap = observeVerifiedHostBootstrap(authority, identityEpoch, appInstanceId)
+                ?: return null.also {
+                    if (lastAcquireFailureReason == null) noteFailure(authority, attempt, "bootstrap_null")
+                }
+            // A probe cannot replace/publish a normal channel or invalidate its Binder guard.
+            val channelRuntime = if (probeOnly) ChannelRuntime() else channel(authority)
+            runtime = channelRuntime
+            val acquired = when (authority) {
+                Authority.ROOT_DIRECT -> connectRootDirectService(authority, bootstrap, channelRuntime, attempt)
+                Authority.SHIZUKU_ROOT -> connectShizukuRootService(authority, bootstrap, shizukuState, channelRuntime, attempt)
+                else -> null
+            } ?: return null
+            // Normal ownership remains with the attempt until the coordinator takes it over.
+            if (!stillOwned(authority, attempt)) return null
+            retained = !probeOnly
+            return acquired.copy(attemptToken = attempt.generation)
+        } finally {
+            if (!retained) {
+                runCatching { abortAcquisition(authority, attempt.generation) }
+                // A newer attempt may already have removed this attempt from the map.
+                closeAttemptTransport(attempt)
+                if (probeOnly) runCatching { runtime?.bindGuard?.unbindAndInvalidate() }
             }
-        val runtime = channel(authority)
-        val acquired = when (authority) {
-            Authority.ROOT_DIRECT -> connectRootDirectService(authority, bootstrap, runtime, attempt)
-            Authority.SHIZUKU_ROOT -> connectShizukuRootService(authority, bootstrap, shizukuState, runtime, attempt)
-            else -> null
-        } ?: return null
-        // Ownership stays with `attempt` until the coordinator completes or aborts it.
-        return acquired.copy(attemptToken = attempt.generation)
+        }
+    }
+
+    private fun closeAttemptTransport(attempt: AcquireAttempt) {
+        val transport = attempt.transport ?: return
+        if (attempt.transportClosed.compareAndSet(false, true)) runCatching { transport.close() }
     }
 
     /** Records a failure only for the attempt that still owns this authority. */
@@ -226,7 +249,7 @@ class AndroidRootSessionConnector(
             current.cancelled = true
             current
         }
-        runCatching { attempt.transport?.close() }
+        closeAttemptTransport(attempt)
     }
 
     internal fun observeVerifiedHostCaller(
@@ -249,7 +272,7 @@ class AndroidRootSessionConnector(
             lastAcquireFailureReason = ACQUISITION_CANCELLED
             current
         }
-        runCatching { attempt.transport?.close() }
+        closeAttemptTransport(attempt)
         return true
     }
 
@@ -262,10 +285,10 @@ class AndroidRootSessionConnector(
             current.cancelled = true
             current
         }
-        attempt?.let { runCatching { it.transport?.close() } }
+        attempt?.let(::closeAttemptTransport)
         val runtime = channels.remove(authority) ?: return
         runtime.bindGuard.unbindAndInvalidate()
-        runtime.transport?.let { runCatching { it.close() } }
+        runtime.transport?.takeUnless { it === attempt?.transport }?.let { runCatching { it.close() } }
     }
 
     fun close() {
@@ -361,22 +384,17 @@ class AndroidRootSessionConnector(
         attempt: AcquireAttempt,
     ): RootAcquiredSession? {
         val req = bootstrap.handshakeRequest
-        val launch = RootServiceLaunchIdentity(
-            appUid = req.appUid,
-            androidUserId = req.androidUserId,
-            packageName = req.packageName,
-            identityEpoch = req.identityEpoch,
-        )
-        // Foreground acquisition binds the provider first: the pinned `su` path must identify
-        // itself as a supported MagiskSU, otherwise no service is launched at all.
+        // Provider metadata only selects optional observation; UID0 is verified by handshake.
         val provider = if (directTransportFactory == null) {
             RootDirectProviderProbe.resolve(isCancelled = { !stillOwned(Authority.ROOT_DIRECT, attempt) })
                 ?: return null.also {
-                    noteFailure(Authority.ROOT_DIRECT, attempt, "unsupported_root_provider")
+                    noteFailure(Authority.ROOT_DIRECT, attempt, "su_not_found")
                 }
         } else {
             null
         }
+        val launch = RootServiceLaunchIdentity(req.appUid, req.androidUserId, req.packageName,
+            req.identityEpoch, observeMagiskPolicy = provider?.observeMagiskPolicy == true)
         // A cancellation that landed while probing must not launch `su` afterwards.
         if (!stillOwned(Authority.ROOT_DIRECT, attempt)) return null
         val transport = (directTransportFactory?.invoke(bootstrap.apkPath, bootstrap.caller.callingUid)
@@ -385,7 +403,7 @@ class AndroidRootSessionConnector(
         attempt.transport = transport
         // A cancellation that landed before the transport existed must win here, before any RPC.
         if (!stillOwned(authority, attempt)) {
-            runCatching { transport.close() }
+            closeAttemptTransport(attempt)
             return null
         }
         return completeTransportHandshake(authority, bootstrap, transport, runtime, attempt)
@@ -417,15 +435,10 @@ class AndroidRootSessionConnector(
             ?: return null.also { noteFailure(Authority.SHIZUKU_ROOT, attempt, "shizuku_bind_null") }
         attempt.transport = transport
         if (!stillOwned(Authority.SHIZUKU_ROOT, attempt)) {
-            runCatching { transport.close() }
+            closeAttemptTransport(attempt)
             return null
         }
         return completeTransportHandshake(Authority.SHIZUKU_ROOT, bootstrap, transport, runtime, attempt)
-    }
-
-    /** A caller-initiated cancellation is the authoritative reason; a later rejection must not mask it. */
-    private fun noteFailure(reason: String) {
-        if (lastAcquireFailureReason != ACQUISITION_CANCELLED) lastAcquireFailureReason = reason
     }
 
     private fun completeTransportHandshake(
@@ -440,7 +453,7 @@ class AndroidRootSessionConnector(
         if (response == null && transport is SuRootDaemonTransport && transport.lastCallTimedOut) {
             val elapsedMs = (System.nanoTime() - startedNanos) / 1_000_000L
             noteFailure(authority, attempt, "handshake_timeout:${elapsedMs}ms")
-            runCatching { transport.close() }
+            closeAttemptTransport(attempt)
             return null
         }
         val identity = response?.identity
@@ -448,27 +461,35 @@ class AndroidRootSessionConnector(
             RootShizukuBridgePolicy.evaluateRootHandshake(bootstrap.expectation, identity) is RootBridgeGateDecision.Allowed
         if (!valid) {
             noteFailure(authority, attempt, "handshake_rejected:accepted=${response?.accepted}:reason=${response?.errorReason}:hasIdentity=${identity != null}")
-            runCatching { transport.close() }
+            closeAttemptTransport(attempt)
             return null
         }
         // Atomic publish with cancel/close: the decision and the channel assignment happen under
         // one short lock; the transport is closed outside it when the attempt already lost.
+        var replaced: RootChannelTransport? = null
         val published = synchronized(stateLock) {
             if (attempt.cancelled || connectorClosed.get() || activeAttempts[authority] !== attempt) {
                 false
             } else {
-                runtime.transport = transport
+                if (!attempt.probeOnly) {
+                    replaced = runtime.transport?.takeUnless { it === transport }
+                    runtime.transport = transport
+                }
                 true
             }
         }
+        // Never block cancellation/generation publication on the old transport's shutdown.
+        runCatching { replaced?.close() }
         if (!published) {
-            runCatching { transport.close() }
+            closeAttemptTransport(attempt)
             return null
         }
         return RootAcquiredSession(
             identity = identity,
             caller = bootstrap.caller,
             transport = transport,
+            kernelBootId = response?.kernelBootId?.takeIf(RootKernelBootIdentity::isValid),
+            kernelElapsedRealtimeMs = response?.kernelElapsedRealtimeMs?.takeIf { it > 0L },
         )
     }
 
@@ -477,96 +498,4 @@ class AndroidRootSessionConnector(
             MessageDigest.getInstance("SHA-256").digest(bytes)
                 .joinToString("") { "%02x".format(Locale.ROOT, it.toInt() and 0xff) }
     }
-}
-
-/**
- * Direct `UID 0` service shell entry backed by [RootSupervisedShellRunner] (`PR_SET_CHILD_SUBREAPER`
- * + `PR_SET_PDEATHSIG` + `setsid` + `waitpid(-1)` until `ECHILD`).
- *
- * When constructed with only an unproven sampled [RootShellGroupRunner] or when the kernel/runtime
- * cannot prove subreaper support prior to spawn, [runCommand] fails closed before spawning any
- * process (`status = FAILED`, `requiresDegradedEpoch = false`).
- */
-class Uid0ProcessGroupShellRunner internal constructor(
-    private val groupRunner: RootShellGroupRunner,
-    private val supervisedRunner: RootSupervisedShellRunner? = null,
-) : RootShellCommandRunner {
-    constructor() : this(
-        groupRunner = RootShellGroupRunner(),
-        supervisedRunner = RootSupervisedShellRunner(),
-    )
-
-    internal constructor(supervisedRunner: RootSupervisedShellRunner) : this(
-        groupRunner = RootShellGroupRunner(),
-        supervisedRunner = supervisedRunner,
-    )
-
-    override fun runCommand(
-        authority: Authority,
-        request: ShellExecRequest,
-    ): RootShellRunOutcome {
-        if (authority != Authority.ROOT_DIRECT && authority != Authority.SHIZUKU_ROOT) {
-            return RootShellRunOutcome(
-                status = ShellExecutionStatus.FAILED,
-                terminalOutcome = RootServiceTerminalOutcome.FAILED,
-                requiresDegradedEpoch = false,
-            )
-        }
-        val supervisor = supervisedRunner ?: return RootShellRunOutcome(
-            status = ShellExecutionStatus.FAILED,
-            terminalOutcome = RootServiceTerminalOutcome.FAILED,
-            requiresDegradedEpoch = false,
-        )
-        return supervisor.execute(request)
-    }
-
-    override fun cancel(requestId: String): Boolean =
-        supervisedRunner?.cancel(requestId) ?: groupRunner.cancel(requestId)
-
-    override fun terminateAll(deadlineMs: Long): Set<String> =
-        supervisedRunner?.terminateAll(deadlineMs) ?: groupRunner.terminateAll(deadlineMs)
-
-    override fun activeRequestIds(): Set<String> =
-        supervisedRunner?.activeRequestIds() ?: groupRunner.activeRequestIds()
-
-    override fun unconfirmedRequestIds(): Set<String> =
-        supervisedRunner?.unconfirmedRequestIds() ?: groupRunner.unconfirmedRequestIds()
-}
-
-/**
- * [Authority.ROOT_DIRECT]-only `su` process-group shell runner.
- * Rejects any non-[Authority.ROOT_DIRECT] authority without starting `su`.
- */
-class SuProcessGroupShellRunner internal constructor(
-    private val groupRunner: RootShellGroupRunner,
-) : RootShellCommandRunner {
-    constructor() : this(RootShellGroupRunner())
-
-    override fun runCommand(
-        authority: Authority,
-        request: ShellExecRequest,
-    ): RootShellRunOutcome {
-        if (authority != Authority.ROOT_DIRECT) {
-            return RootShellRunOutcome(
-                status = ShellExecutionStatus.FAILED,
-                terminalOutcome = RootServiceTerminalOutcome.FAILED,
-            )
-        }
-        val builder = ProcessBuilder(
-            "su",
-            "-c",
-            "exec setsid sh -c \"\$1\"",
-            "sh",
-            request.command,
-        )
-        return groupRunner.execute(builder, request)
-    }
-
-    override fun cancel(requestId: String): Boolean = groupRunner.cancel(requestId)
-
-    override fun terminateAll(deadlineMs: Long): Set<String> = groupRunner.terminateAll(deadlineMs)
-
-    override fun activeRequestIds(): Set<String> = groupRunner.activeRequestIds()
-
-    override fun unconfirmedRequestIds(): Set<String> = groupRunner.unconfirmedRequestIds()
 }

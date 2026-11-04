@@ -13,6 +13,71 @@ import runtime.mobileagent.domain.*
  * This is not an OS authentication or snapshot-admission API.
  */
 class RootGrantRepository(private val db: SqlConnection, private val clock: () -> String = { Utc.nowIso() }) {
+    /**
+     * Selection and ADB mode edits fence old runs, but do not revoke an existing Root grant.
+     * Only currently valid persistent permissions move with the policy CAS; frozen snapshots
+     * and approvals are never rewritten. Explicit Root/grant revocation uses its own revisions.
+     */
+    internal fun carryForwardPolicyEdit(previous: AuthorityPolicy, nextPolicy: AuthorityPolicy) {
+        require(nextPolicy.policyVersion == Math.addExact(previous.policyVersion, 1L))
+        require(AuthorityPolicyRepository(db, clock).getPolicy() == nextPolicy)
+        for (authority in listOf(Authority.ROOT_DIRECT, Authority.SHIZUKU_ROOT)) {
+            carryAuthorityPolicy(authority, previous, nextPolicy.policyVersion)
+        }
+    }
+
+    private fun carryAuthorityPolicy(authority: Authority, previous: AuthorityPolicy, nextPolicyVersion: Long) {
+        val roots = RootAuthorityRepository(db, clock)
+        val state = roots.get(authority)
+        if (!state.consent.enabled || state.consent.policyVersion != previous.policyVersion) return
+        val now = Instant.parse(clock())
+        val canonical = CapabilityGrantRepository(db, clock)
+        val candidates = db.query(
+            "SELECT g.grant_id FROM capability_grants g JOIN root_grant_bindings r ON r.grant_id=g.grant_id " +
+                "WHERE r.authority=? AND r.policy_version=? AND g.policy_version=? AND g.lifetime='PERSISTENT' " +
+                "AND g.revoked_at IS NULL AND g.consumed_at IS NULL",
+            listOf(authority.name,previous.policyVersion,previous.policyVersion),
+        )
+        val eligible = candidates.mapNotNull { row ->
+            val grant = canonical.get(row.string("grant_id")) ?: return@mapNotNull null
+            if (grant.lifetime != GrantLifetime.PERSISTENT || !grant.isActiveFor(now, null, null) ||
+                !RootApprovalTools.isSupportedCapability(grant.capability)
+            ) return@mapNotNull null
+            val workspaceId = grant.workspaceId ?: return@mapNotNull null
+            val origin = RootWorkspaceRepository(db).getOrigin(workspaceId) ?: return@mapNotNull null
+            // A paused Shell keeps its durable grants eligible for policy bookkeeping. This only
+            // advances policy_version; it neither re-enables Shell nor makes the grant usable.
+            if (origin.authority != authority ||
+                !isDurablyBound(grant, origin, previous, requireShellConsent = false)
+            ) return@mapNotNull null
+            val workspace = WorkspaceRepository(db, clock).get(workspaceId) ?: return@mapNotNull null
+            if (!workspace.enabled || !workspace.readable || workspace.backendType != WorkspaceBackendType.PRIVILEGED ||
+                workspace.rootReference != "root:${origin.generationId}" ||
+                PrivilegedWorkspaceBindingRepository(db).get(workspaceId) != null ||
+                (RootApprovalTools.requiresWritableWorkspace(grant.capability) && !workspace.writable)
+            ) return@mapNotNull null
+            grant to requireNotNull(get(grant.grantId))
+        }
+        eligible.forEach { (grant, binding) ->
+            val next = grant.copy(policyVersion = nextPolicyVersion, revision = Math.addExact(grant.revision, 1L))
+            check(canonical.compareAndSet(grant.revision, next)) { "Root durable policy carry lost its grant CAS" }
+            db.execute(
+                "UPDATE root_grant_bindings SET policy_version=?,grant_revision=? WHERE grant_id=? AND policy_version=? AND grant_revision=? AND generation_id=?",
+                listOf(nextPolicyVersion,next.revision,grant.grantId,previous.policyVersion,grant.revision,binding.generationId),
+            )
+            check(get(grant.grantId) == binding.copy(policyVersion = nextPolicyVersion, grantRevision = next.revision)) {
+                "Root durable policy carry lost its binding CAS"
+            }
+        }
+        db.execute(
+            "UPDATE root_authority_state SET policy_version=?,revision=?,updated_at=? WHERE authority=? AND policy_version=? AND revision=? AND enabled=1",
+            listOf(nextPolicyVersion,Math.addExact(state.revision,1L),clock(),authority.name,previous.policyVersion,state.revision),
+        )
+        check(roots.get(authority) == state.copy(
+            consent = state.consent.copy(policyVersion = nextPolicyVersion), revision = Math.addExact(state.revision,1L),
+        )) { "Root durable policy carry lost its consent CAS" }
+    }
+
     fun create(grant: CapabilityGrant, execution: RootExecutionStamp): RootGrantBinding = db.transaction {
         val identity = execution.identity
         val authority = identity.authority
@@ -22,9 +87,8 @@ class RootGrantRepository(private val db: SqlConnection, private val clock: () -
             require(
                 root.consent.shellEnabled &&
                     execution.shellConsentRevision > 0 &&
-                    root.consent.shellRevision == execution.shellConsentRevision &&
-                    AuthorityPolicyRepository(db).getPolicy().dangerousMode != DangerousMode.DISABLED,
-            ) { "Root shell grant requires shell consent and active DangerousMode" }
+                    root.consent.shellRevision == execution.shellConsentRevision,
+            ) { "Root shell grant requires the channel's shell consent" }
         }
         require(grant.workspaceId != null && grant.skillInstallId == null && grant.packageHash == null)
         require(grant.revision == 1L && grant.policyVersion == execution.policyVersion)
@@ -73,7 +137,21 @@ class RootGrantRepository(private val db: SqlConnection, private val clock: () -
      * Deliberately checks RootGrantBinding, workspace generation, consent revision and policy version,
      * while NOT comparing identityEpoch so valid persistent Root grants remain reusable across sessions.
      */
-    fun isDurablyBoundGrant(grant: CapabilityGrant, origin: RootWorkspaceOrigin, policy: AuthorityPolicy): Boolean {
+    fun isDurablyBoundGrant(grant: CapabilityGrant, origin: RootWorkspaceOrigin, policy: AuthorityPolicy): Boolean =
+        isDurablyBound(grant, origin, policy, requireShellConsent = true)
+
+    /**
+     * [requireShellConsent] is false only for the policy-version carry while Root Shell is
+     * paused. That bookkeeping keeps an already-valid persistent grant from being stranded at an
+     * old policy version, but it never makes the grant usable: authorization and display paths
+     * keep the default and still require the live Shell consent.
+     */
+    private fun isDurablyBound(
+        grant: CapabilityGrant,
+        origin: RootWorkspaceOrigin,
+        policy: AuthorityPolicy,
+        requireShellConsent: Boolean,
+    ): Boolean {
         if (grant.workspaceId != origin.workspaceId || grant.skillInstallId != null || grant.packageHash != null) {
             return false
         }
@@ -99,8 +177,8 @@ class RootGrantRepository(private val db: SqlConnection, private val clock: () -
         ) {
             return false
         }
-        if (grant.capability.value == CapabilityId.SHELL_EXECUTE) {
-            return state.consent.shellEnabled && policy.dangerousMode != DangerousMode.DISABLED
+        if (grant.capability.value == CapabilityId.SHELL_EXECUTE && requireShellConsent) {
+            return state.consent.shellEnabled
         }
         return true
     }

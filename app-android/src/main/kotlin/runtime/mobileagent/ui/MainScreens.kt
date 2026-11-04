@@ -68,9 +68,13 @@ import runtime.mobileagent.WorkspacePickerTarget
 import runtime.mobileagent.WorkspacePickerViewModel
 import runtime.mobileagent.domain.WorkspaceIntent
 import runtime.mobileagent.domain.WorkspaceTarget
+import runtime.mobileagent.domain.isRootAuthority
+import androidx.compose.ui.res.stringResource
 import runtime.mobileagent.feature.agents.WorkspacePickerActions
 import runtime.mobileagent.feature.agents.WorkspacePickerAttachPhaseUi
 import runtime.mobileagent.feature.agents.WorkspacePickerScreen
+import runtime.mobileagent.feature.settings.R as SettingsR
+import runtime.mobileagent.integration.RootWorkspaceUiPort
 import runtime.mobileagent.workspace.CanonicalWorkspaceCoordinator
 import runtime.mobileagent.workspace.WorkspaceSelectionOutcome
 import kotlinx.coroutines.Dispatchers
@@ -125,6 +129,28 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
         factory = workspacePickerFactory,
     )
     val workspacePickerState by workspacePickerVm.state.collectAsState()
+    // The chat picker owns the same foreground browser state holder as the Agent editor. It is
+    // deliberately not stored in WorkspacePickerViewModel: the host emits only display-safe pages
+    // and a late page must not resurrect a picker that was already closed.
+    val pickerScope = rememberCoroutineScope()
+    val pickerRootUiPort = remember(app.container.runtimeIntegration) {
+        app.container.runtimeIntegration as? RootWorkspaceUiPort
+    }
+    val pickerRootDialogs = remember(pickerRootUiPort) {
+        RootWorkspaceDialogState(pickerScope, pickerRootUiPort) { 0L }
+    }
+    val pickerAuthoritySnapshot = remember(workspacePickerOpen, settingsRevision) {
+        runCatching { app.container.runtimeIntegration.snapshot() }.getOrNull()
+    }
+    val pickerRootAuthority =
+        pickerAuthoritySnapshot?.selectedAuthority ?: runtime.mobileagent.domain.Authority.NONE
+    val pickerRootShellConsentEnabled =
+        pickerAuthoritySnapshot?.providerFor(pickerRootAuthority)?.rootShellConsentEnabled == true
+    val rootBrowseFailedMessage =
+        stringResource(runtime.mobileagent.feature.agents.R.string.agents_root_browse_failed)
+    val rootShellSettingsHint =
+        stringResource(runtime.mobileagent.feature.agents.R.string.agents_root_shell_settings_hint)
+    val rootSettingsLabel = stringResource(SettingsR.string.sett_title)
 
     val workspaceSafLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -150,6 +176,7 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
     }
 
     fun closeWorkspacePicker() {
+        pickerRootDialogs.invalidate()
         workspacePickerOpen = false
         workspacePickerVm.clearResult()
     }
@@ -272,8 +299,9 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
         runtime.mobileagent.domain.ThemePreference.SYSTEM -> AppThemeMode.SYSTEM
     }
 
-    LaunchedEffect(workspacePickerOpen, workspacePickerAgentId, workspacePickerThreadId, workspacePickerLabel) {
+    LaunchedEffect(workspacePickerOpen, workspacePickerAgentId, workspacePickerThreadId, workspacePickerLabel, pickerRootAuthority) {
         if (workspacePickerOpen) {
+            pickerRootDialogs.invalidate()
             workspacePickerVm.setTarget(
                 WorkspacePickerTarget(
                     agentId = workspacePickerAgentId,
@@ -528,6 +556,26 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
                                 modifier = Modifier.fillMaxSize(),
                                 showPageTitle = false,
                                 chinese = chinese,
+                                rootBrowse = pickerRootDialogs.browse,
+                                onBrowseRootDirectory = { path ->
+                                    pickerRootDialogs.openPath(pickerRootAuthority, path, rootBrowseFailedMessage)
+                                },
+                                onBrowseRootEntry = { path ->
+                                    pickerRootDialogs.openPath(pickerRootAuthority, path, rootBrowseFailedMessage)
+                                },
+                                onBrowseRootParent = {
+                                    pickerRootDialogs.browseParent(pickerRootAuthority, rootBrowseFailedMessage)
+                                },
+                                onBrowseRootMore = {
+                                    pickerRootDialogs.browseMore(pickerRootAuthority, rootBrowseFailedMessage)
+                                },
+                                rootShellConsentEnabled = pickerRootShellConsentEnabled,
+                                rootShellSettingsHint = rootShellSettingsHint,
+                                rootShellSettingsLabel = rootSettingsLabel,
+                                onOpenRootShellSettings = {
+                                    closeWorkspacePicker()
+                                    navigate(AppRoutes.SETTINGS)
+                                },
                             )
                         }
                     }
@@ -727,7 +775,19 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
     var browserError by remember { mutableStateOf("") }
     var wiredPathOpen by remember { mutableStateOf(false) }
     var wiredPath by remember { mutableStateOf("") }
-    var rootPathOpen by remember { mutableStateOf(false) }
+    // U7 foreground browsing and in-place permission editing are optional host ports. Without a
+    // wired port the manual absolute-path flow below stays exactly as before. Both Root dialogs
+    // share one state holder, which also owns their request generations and the editor owner token.
+    val rootUiPort = remember(integration) { integration as? RootWorkspaceUiPort }
+    val rootDialogs = remember(rootUiPort) {
+        RootWorkspaceDialogState(coroutineScope, rootUiPort, vm::editorSessionToken)
+    }
+    val rootBrowseFailedMessage = stringResource(runtime.mobileagent.feature.agents.R.string.agents_root_browse_failed)
+    val rootPermissionsFailedMessage =
+        stringResource(runtime.mobileagent.feature.agents.R.string.agents_root_permissions_failed)
+    val rootShellSettingsHint =
+        stringResource(runtime.mobileagent.feature.agents.R.string.agents_root_shell_settings_hint)
+    val rootSettingsLabel = stringResource(SettingsR.string.sett_title)
     var confirmFullDevice by remember { mutableStateOf(false) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         integration.refresh()
@@ -773,6 +833,9 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
         grant.grant.workspaceId == fullDeviceWorkspace.workspaceId && grant.enabled
     }
     val selectedAuthority = authoritySnapshot.selectedAuthority
+    val rootShellConsentEnabled =
+        authoritySnapshot.providerFor(selectedAuthority)?.rootShellConsentEnabled == true
+    LaunchedEffect(editorAgentId, selectedAuthority) { rootDialogs.invalidate() }
     val selectedProvider = authoritySnapshot.providerFor(selectedAuthority)
     val authorityReady = selectedProvider?.let { provider ->
         provider.configured &&
@@ -794,6 +857,9 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
         },
         canChooseSaf = !workspaceBusy && !vm.saving.value,
         canBrowsePrivileged = authorityReady && !workspaceBusy && !vm.saving.value,
+        // A Root channel opens the absolute-path attach flow, not a directory browser; the entry
+        // card must name what it really does.
+        privilegedEntryIsRoot = selectedAuthority.isRootAuthority,
         fullDeviceFilesEnabled = fullDeviceCurrentGrant || vm.hasPendingFullDeviceFiles(),
         fullDeviceFilesEligible = isFullDeviceFilesEligibleForEditor(
             selectedAuthority = selectedAuthority,
@@ -801,6 +867,12 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
             dangerousModeBuildAllowed = authoritySnapshot.dangerousModeBuildAllowed,
             dangerousMode = authoritySnapshot.dangerousMode,
             workspaceBusy = workspaceBusy,
+        ),
+        // The edit entry exists only for an attached Root directory; the dialog re-reads the live
+        // permission intent before it is applied.
+        rootPermissions = rootDialogs.entry(
+            selectedWorkspace?.workspaceId,
+            baseState.editor?.workspaces.orEmpty(),
         ),
         status = when {
             vm.saving.value -> if (chinese) "正在保存智能体…" else "Saving agent…"
@@ -951,10 +1023,9 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
             workspaceStatus = if (chinese) "请先在设置中连接并选定 ADB 级或 Root 通道。" else "Connect and select a privileged or Root authority in Settings first."
             return
         }
-        if (selectedAuthority == runtime.mobileagent.domain.Authority.ROOT_DIRECT ||
-            selectedAuthority == runtime.mobileagent.domain.Authority.SHIZUKU_ROOT
-        ) {
-            rootPathOpen = true
+        if (selectedAuthority.isRootAuthority) {
+            workspaceStatus = ""
+            rootDialogs.open(selectedAuthority, rootBrowseFailedMessage)
             return
         }
         if (selectedAuthority == runtime.mobileagent.domain.Authority.WIRED_ADB) {
@@ -1039,6 +1110,15 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
         },
         onChooseSafWorkspace = { safLauncher.launch(null) },
         onBrowsePrivilegedWorkspace = ::openPrivilegedWorkspace,
+        onEditRootWorkspacePermissions = {
+            rootDialogs.editPermissions(
+                authority = selectedAuthority,
+                workspaceId = selectedWorkspace?.workspaceId,
+                workspaces = baseState.editor?.workspaces.orEmpty(),
+                agentId = editorAgentId,
+                failureMessage = rootPermissionsFailedMessage,
+            )
+        },
         onToggleFullDeviceFiles = { enabled ->
             if (enabled) {
                 confirmFullDevice = true
@@ -1194,14 +1274,16 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
         )
     }
 
-    if (rootPathOpen) {
+    if (rootDialogs.browseOpen) {
         RootAgentWorkspaceDialog(
             enabled = authorityReady && !workspaceBusy && !vm.saving.value,
             chinese = chinese,
+            message = workspaceStatus,
             onConfirm = { path, writable, metadata, shell ->
-                rootPathOpen = false
                 val target = editorAgentId?.let { WorkspaceTarget(agentId = it) } ?: WorkspaceTarget()
-                launchWorkspaceSelection {
+                // Keep the dialog (and therefore the typed path) until the attach really succeeded;
+                // the status line still carries the reason of a failed one.
+                launchWorkspaceSelection(onCompleted = { outcome -> rootDialogs.attachFinished(outcome); null }) {
                     workspaceCoordinator.selectRootDirectory(
                         intent = WorkspaceIntent.SET_AGENT_DEFAULT,
                         authority = selectedAuthority,
@@ -1213,8 +1295,55 @@ private fun AgentsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (St
                     )
                 }
             },
-            onClose = { rootPathOpen = false },
+            onClose = { rootDialogs.closeBrowse() },
+            browse = rootDialogs.browse,
+            onBrowse = { path -> rootDialogs.openPath(selectedAuthority, path, rootBrowseFailedMessage) },
+            onBrowseEntry = { path -> rootDialogs.openPath(selectedAuthority, path, rootBrowseFailedMessage) },
+            onBrowseParent = { rootDialogs.browseParent(selectedAuthority, rootBrowseFailedMessage) },
+            onBrowseMore = { rootDialogs.browseMore(selectedAuthority, rootBrowseFailedMessage) },
+            shellConsentEnabled = rootShellConsentEnabled,
+            shellSettingsHint = rootShellSettingsHint,
+            shellSettingsLabel = rootSettingsLabel,
+            onOpenShellSettings = {
+                rootDialogs.closeBrowse()
+                onRoute(AppRoutes.SETTINGS)
+            },
         )
+    }
+
+    if (rootDialogs.permissionsOpen) {
+        rootDialogs.permissions?.let { permissions ->
+            RootWorkspacePermissionDialog(
+                state = permissions,
+                chinese = chinese,
+                onChange = rootDialogs::toggle,
+                onApply = {
+                    rootDialogs.apply(
+                        authority = selectedAuthority,
+                        agentId = editorAgentId,
+                        failureMessage = rootPermissionsFailedMessage,
+                        successMessage = if (chinese) {
+                            "Root 目录权限已更新；仅对新会话生效。"
+                        } else {
+                            "Root directory permissions updated; they apply to new conversations only."
+                        },
+                        onUpdated = { message ->
+                            workspaceStatus = message
+                            workspaceRevision++
+                            vm.refreshWorkspaceConfiguration()
+                        },
+                    )
+                },
+                onClose = { rootDialogs.closePermissions() },
+                shellConsentEnabled = rootShellConsentEnabled,
+                shellSettingsHint = rootShellSettingsHint,
+                shellSettingsLabel = rootSettingsLabel,
+                onOpenShellSettings = {
+                    rootDialogs.closePermissions()
+                    onRoute(AppRoutes.SETTINGS)
+                },
+            )
+        }
     }
 
     if (confirmFullDevice) {
@@ -1907,6 +2036,7 @@ private fun SettingsRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (
         onSetDangerousMode = vm::setDangerousMode,
         onDisableDangerousMode = vm::disableDangerousMode,
         onSetRootShellConsent = vm::setRootShellConsent,
+        onAcknowledgeRootRecovery = vm::acknowledgeRootRecovery,
     )
     if (aboutOnly) {
         runtime.mobileagent.feature.settings.AboutScreen(state, actions, showPageTitle = false)

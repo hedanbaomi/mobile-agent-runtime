@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+
+<!--
+  Root-channel copy for the settings screen. A dedicated file keeps the shared strings.xml files
+  untouched, so other work packages never conflict with these keys.
+-->
+<resources>
+    <string name="sett_root_shell_state_available" formatted="false">Shell：可用</string>
+    <string name="sett_root_shell_state_unavailable" formatted="false">Shell：当前不可用</string>
+    <string name="sett_root_shell_independent_hint" formatted="false">Root Shell 与 ADB 级危险模式互相独立：开启其一不会自动开启另一个。</string>
+    <string name="sett_root_recovery_required" formatted="false">需要确认 Root 恢复</string>
+    <string name="sett_root_recovery_hint" formatted="false">该通道记录了无法确认的 Root 结果。派发前请显式确认恢复；不会重放任何调用。</string>
+    <string name="sett_root_recovery_action" formatted="false">确认恢复</string>
+</resources>

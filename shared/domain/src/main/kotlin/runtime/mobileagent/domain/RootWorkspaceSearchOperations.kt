@@ -324,6 +324,10 @@ class RootWorkspaceSearchOperations(
                 offsetBytes = offsetBytes,
                 maxBytes = maxBytes,
             ),
+            // Search returns matches, never a conditional-write token. Bound its I/O to the
+            // requested windows instead of hashing the entire file twice for every 64 KiB.
+            // Kernel identity/metadata changes still invalidate the scan's observed version.
+            includeContentVersion = false,
         )
         val raw = (readRes as? RootFileOperationResult.Succeeded)?.value ?: return null
         if (raw.content.isEmpty()) return DecodedWindow("", 0, raw.truncated, raw.version)

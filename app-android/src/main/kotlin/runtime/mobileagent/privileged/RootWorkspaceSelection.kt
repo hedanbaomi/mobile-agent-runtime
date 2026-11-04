@@ -16,6 +16,7 @@ import runtime.mobileagent.domain.RootFdConfinementPolicy
 import runtime.mobileagent.domain.RootFdNodeIdentity
 import runtime.mobileagent.domain.RootRecoveryLocatorCodec
 import runtime.mobileagent.domain.RootServiceSession
+import runtime.mobileagent.domain.RootTrustedMountRoots
 import runtime.mobileagent.domain.RootWorkspaceAttachResult
 import runtime.mobileagent.domain.RootWorkspaceFileExecutor
 import runtime.mobileagent.domain.RootWorkspaceOrigin
@@ -40,11 +41,39 @@ internal data class RootServiceWorkspaceSelectionRequest(
     val workspaceId: String = "",
     val workspaceGenerationId: String = "",
     val stagedToken: String = "",
+    val cursor: String? = null,
     @Serializable(with = RootWorkspaceOriginWireSerializer::class)
     val origin: RootWorkspaceOrigin? = null,
 ) {
     override fun toString(): String =
         "RootServiceWorkspaceSelectionRequest(phase=$phase,workspaceId=$workspaceId,redacted=true)"
+}
+
+/** Foreground picker data only; never returned by model-facing workspace discovery. */
+@Serializable
+data class RootDirectoryBrowseEntry(
+    val name: String,
+    val path: String,
+    val directory: Boolean,
+    /** Observed target of a directory alias; display-only, never used for typed path resolution. */
+    val targetPath: String? = null,
+)
+@Serializable
+data class RootDirectoryBrowsePage(
+    val path: String, val entries: List<RootDirectoryBrowseEntry>, val nextCursor: String? = null,
+)
+
+/**
+ * Safe, distinguishable, model-facing name for a newly attached Root workspace.
+ *
+ * The absolute device path is deliberately not part of the name: the model may read the workspace
+ * list, and a full path leaks device layout. The relative tail of the path still distinguishes two
+ * Common roots such as `data/local/tmp` and `storage/emulated/0`.
+ */
+internal fun rootWorkspaceDisplayName(rootPath: String): String {
+    val segments = rootPath.trim().split('/').filter { it.isNotBlank() }
+    val label = if (segments.isEmpty()) "device" else segments.takeLast(3).joinToString("/")
+    return "Root · $label".take(200)
 }
 
 /**
@@ -59,11 +88,14 @@ internal class RootServiceWorkspaceSelection(
     private val fdOps: PosixFdOperations,
     private val workspaceExecutors: ConcurrentHashMap<String, BoundWorkspaceExecutor>,
     private val json: Json = RootPrivilegedServiceEngine.json,
+    private val mountPolicyProvider: (RootControlPlaneBoundary) -> runtime.mobileagent.domain.RootTrustedMountRoots? = RootMountBoundary::read,
+    private val selectionPathResolver: (String) -> java.nio.file.Path = { java.io.File(it).canonicalFile.toPath() },
 ) {
     private data class ObservedRoot(
         val rootPath: String,
         val rootKind: RootWorkspaceRootKind,
         val identity: RootFdNodeIdentity,
+        val mountPolicy: runtime.mobileagent.domain.RootTrustedMountRoots,
         val onCloseFd: () -> Unit = {},
     )
 
@@ -95,6 +127,7 @@ internal class RootServiceWorkspaceSelection(
             return rejected(phase, "identity_mismatch")
         }
         return when (phase) {
+            "BROWSE" -> browse(req, boundary)
             PHASE_PROPOSE -> propose(req, session, caller, boundary)
             PHASE_STAGE -> stage(req, session, caller)
             PHASE_CONFIRM -> confirm(req, session, caller, boundary)
@@ -114,13 +147,131 @@ internal class RootServiceWorkspaceSelection(
         activeCloseCallbacks.clear()
     }
 
+    private fun browse(
+        req: RootServiceWorkspaceSelectionRequest, boundary: RootControlPlaneBoundary,
+    ): RootServiceBindWorkspaceResponse = runCatching {
+        val path = selectionPathResolver(req.workspaceRootPath)
+        val absolute = AndroidRootPosixFileDriver.toPosixAbsolutePath(path)
+        if (!RootRecoveryLocatorCodec.isValidAbsoluteRootPath(absolute)) return rejected("BROWSE", "workspace_root_invalid")
+        val rootFd = fdOps.openDirectoryAbsoluteNoFollow(absolute)
+            ?: return rejected("BROWSE", "workspace_root_unavailable")
+        rootFd.use { directoryFd ->
+            val identity = fdOps.fstatIdentity(directoryFd) ?: return rejected("BROWSE", "workspace_root_unavailable")
+            val mounts = mountPolicyProvider(boundary) ?: return rejected("BROWSE", "mountinfo_unavailable")
+            if (identity.mountId !in mounts.mountIds) return rejected("BROWSE", "control_plane_protected")
+            val rejection = runtime.mobileagent.domain.RootOperationBoundary.verifyWorkspaceRootIdentity(identity, boundary)
+            if (rejection != null) return rejected("BROWSE", rejection.name)
+            // Foreground browsing lists directories only. Aliases are resolved with their already
+            // open target FD solely to display the real target; typed operations keep their
+            // O_NOFOLLOW path walk and are not granted the ability to follow aliases.
+            val (entries, nextCursor) = browseDirectories(directoryFd, absolute, req.cursor, boundary, mounts)
+            RootServiceBindWorkspaceResponse(
+                accepted = true,
+                phase = "BROWSE",
+                directoryPage = RootDirectoryBrowsePage(absolute, entries, nextCursor),
+            )
+        }
+    }.getOrElse { rejected("BROWSE", "directory_unavailable") }
+
+    private fun browseDirectories(
+        parentFd: PosixRetainedFd,
+        absolute: String,
+        cursor: String?,
+        boundary: RootControlPlaneBoundary,
+        mounts: RootTrustedMountRoots,
+    ): Pair<List<RootDirectoryBrowseEntry>, String?> {
+        val names = runCatching { fdOps.listChildNames(parentFd) }.getOrNull()
+            ?.filter(PosixDirectoryNames::isValidEntryName)
+            ?.sorted()
+            ?.filter { cursor == null || it > cursor }
+            ?: return emptyList<RootDirectoryBrowseEntry>() to null
+        val entries = ArrayList<RootDirectoryBrowseEntry>()
+        var nextCursor: String? = null
+        for ((index, name) in names.withIndex()) {
+            if (entries.size >= BROWSE_PAGE_SIZE) {
+                // The cursor is the last name already consumed on this page, so the next request
+                // resumes exactly there. Files and unresolved links are skipped without stalling
+                // pagination.
+                nextCursor = names.getOrNull(index - 1)
+                break
+            }
+            val identity = runCatching { fdOps.statAtNoFollow(parentFd, name) }.getOrNull() ?: continue
+            if (identity.isSymlink) {
+                val target = resolveAliasDirectory(parentFd, name, boundary, mounts) ?: continue
+                entries += RootDirectoryBrowseEntry(
+                    name = name,
+                    path = target,
+                    directory = true,
+                    targetPath = target,
+                )
+            } else if (identity.isDirectory) {
+                val childPath = childRelativeToAbsolute(absolute, name)
+                val childIdentity = openEnterableDirectory(parentFd, name) ?: continue
+                if (childIdentity.mountId !in mounts.mountIds) continue
+                val rejection = RootFdConfinementPolicy.verifyWorkspaceRoot(
+                    childPath, RootWorkspaceRootKind.DIRECTORY, childIdentity, boundary,
+                )
+                if (rejection != null) continue
+                entries += RootDirectoryBrowseEntry(
+                    name = name,
+                    path = childPath,
+                    directory = true,
+                )
+            }
+        }
+        return entries to nextCursor
+    }
+
+    /** A row is useful only when the directory can actually be opened now. */
+    private fun openEnterableDirectory(parentFd: PosixRetainedFd, name: String): RootFdNodeIdentity? {
+        val childFd = runCatching {
+            fdOps.openChildDirectoryAtNoFollow(parentFd, name)
+        }.getOrNull() ?: return null
+        return childFd.use {
+            val identity = runCatching { fdOps.fstatIdentity(childFd) }.getOrNull() ?: return@use null
+            identity.takeIf { it.isDirectory && !it.isSymlink }
+        }
+    }
+
+    /**
+     * Opens an entry's symlink target only to verify that it is an enterable directory and to read
+     * the path the kernel resolved. No ID, locator or typed grant is derived from this display-only
+     * walk. The resolved target must pass the same root confinement and mount policy as a typed
+     * workspace root, so a host-private bind alias is never shown as a selectable directory.
+     */
+    private fun resolveAliasDirectory(
+        parentFd: PosixRetainedFd,
+        name: String,
+        boundary: RootControlPlaneBoundary,
+        mounts: RootTrustedMountRoots,
+    ): String? {
+        val targetFd = runCatching {
+            fdOps.openTargetAt(parentFd, name, followSymlink = true, writable = false)
+        }.getOrNull() ?: return null
+        return targetFd.use {
+            val identity = runCatching { fdOps.fstatIdentity(targetFd) }.getOrNull() ?: return@use null
+            if (!identity.isDirectory || identity.isSymlink) return@use null
+            val resolvedPath = runCatching { fdOps.readFdResolvedPath(targetFd) }.getOrNull()
+                ?: return@use null
+            val rejection = RootFdConfinementPolicy.verifyWorkspaceRoot(
+                resolvedPath, RootWorkspaceRootKind.DIRECTORY, identity, boundary,
+            )
+            if (rejection != null) return@use null
+            if (identity.mountId !in mounts.mountIds) return@use null
+            resolvedPath
+        }
+    }
+
+    private fun childRelativeToAbsolute(parentAbsolute: String, name: String): String =
+        parentAbsolute.trimEnd('/') + "/" + name
+
     private fun propose(
         req: RootServiceWorkspaceSelectionRequest,
         session: RootServiceSession,
         caller: RootCallerObservation,
         boundary: RootControlPlaneBoundary,
     ): RootServiceBindWorkspaceResponse {
-        val path = runCatching { Paths.get(req.workspaceRootPath) }.getOrNull()
+        val path = runCatching { selectionPathResolver(req.workspaceRootPath) }.getOrNull()
             ?: return rejected(PHASE_PROPOSE, "workspace_root_invalid")
         val rootPath = AndroidRootPosixFileDriver.toPosixAbsolutePath(path)
         if (!RootRecoveryLocatorCodec.isValidAbsoluteRootPath(rootPath)) {
@@ -135,6 +286,11 @@ internal class RootServiceWorkspaceSelection(
         if (identity == null || !identity.isDirectory || identity.isSymlink) {
             runCatching { rootFd.close() }
             return rejected(PHASE_PROPOSE, "workspace_root_invalid")
+        }
+        val mounts = mountPolicyProvider(boundary)
+        if (mounts == null || identity.mountId !in mounts.mountIds) {
+            rootFd.close()
+            return rejected(PHASE_PROPOSE, "mount_source_unavailable_or_protected")
         }
         val rejection = RootFdConfinementPolicy.verifyWorkspaceRoot(rootPath, rootKind, identity, boundary)
         if (rejection != null) {
@@ -154,8 +310,8 @@ internal class RootServiceWorkspaceSelection(
             onCloseFd = { runCatching { rootFd.close() } },
         )
         if (stageRejection != null) return rejected(PHASE_PROPOSE, stageRejection.name)
-        provisionalRoots[handle] = ObservedRoot(rootPath, rootKind, identity) { runCatching { rootFd.close() } }
-        return accepted(PHASE_PROPOSE, identity, rootKind).copy(provisionalHandle = handle)
+        provisionalRoots[handle] = ObservedRoot(rootPath, rootKind, identity, mounts) { runCatching { rootFd.close() } }
+        return accepted(PHASE_PROPOSE, identity, rootKind).copy(provisionalHandle = handle, resolvedRootPath = rootPath)
     }
 
     private fun stage(
@@ -235,6 +391,7 @@ internal class RootServiceWorkspaceSelection(
             controlPlane = boundary,
             driver = driver,
             confirmedMountIds = emptySet(),
+                trustedMountRoots = observed.mountPolicy,
         )
         workspaceExecutors[req.workspaceId] = BoundWorkspaceExecutor(observed.rootPath, driver, executor)
         return accepted(PHASE_CONFIRM, current, observed.rootKind).copy(
@@ -344,7 +501,7 @@ internal class RootServiceWorkspaceSelection(
         if (closed || session == null || caller == null || boundary == null) {
             return rejected(PHASE_REATTACH, "session_inactive")
         }
-        return RootServiceWorkspaceBindings.bind(req, session, caller, boundary, fdOps, workspaceExecutors)
+        return RootServiceWorkspaceBindings.bind(req, session, caller, boundary, fdOps, workspaceExecutors, mountPolicyProvider)
             .copy(phase = PHASE_REATTACH)
     }
 
@@ -392,6 +549,8 @@ internal class RootServiceWorkspaceSelection(
         const val PHASE_CONFIRM: String = "CONFIRM"
         const val PHASE_CHECK: String = "CHECK"
         const val PHASE_RELEASE: String = "RELEASE"
+
+        private const val BROWSE_PAGE_SIZE = 128
 
         private val RANDOM = SecureRandom()
     }

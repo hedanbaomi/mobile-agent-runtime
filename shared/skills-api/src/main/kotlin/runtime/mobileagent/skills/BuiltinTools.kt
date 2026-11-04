@@ -42,6 +42,7 @@ data class ToolSpec(
     val parametersJson: String,
     val capability: String,
     val sideEffect: Boolean,
+    val schemaVersion: Int = 1,
 )
 
 data class ToolCall(

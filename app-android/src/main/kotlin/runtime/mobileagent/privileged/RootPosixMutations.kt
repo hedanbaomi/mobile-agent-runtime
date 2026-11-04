@@ -160,6 +160,10 @@ internal class RootPosixMutations(
             val writer = streamWriter?.let { fn ->
                 { sink: (ByteArray, Int, Int) -> Unit -> fn(entry.targetFd, sink) }
             }
+            if (fdOps.usesEmulatedStoragePermissions(entry.targetFd)) {
+                return RootPosixEmulatedStorageIo(fdOps, lifecycle, fileIo)
+                    .replace(entry, target, utf8Bytes, hasConditionalWriter = streamWriter != null)
+            }
             // A directory the target app itself can rewrite gives no trusted commit source.
             val deferred = !target.writeDomain.isUid0Exclusive
             if (deferred) {
@@ -236,6 +240,9 @@ internal class RootPosixMutations(
                 )
             }
             val cur = parent.parentIdentityCurrent
+            if (fdOps.usesEmulatedStoragePermissions(entry.parentFd)) {
+                return RootPosixEmulatedStorageIo(fdOps, lifecycle, fileIo).create(entry, parent, utf8Bytes)
+            }
             val deferred = !parent.writeDomain.isUid0Exclusive
             if (deferred) {
                 return createThroughProtectedStage(
@@ -290,6 +297,9 @@ internal class RootPosixMutations(
                 return DriverMutationStatus.UnsupportedMutationDomain(
                     parent.writeDomain.unprovenReasons.joinToString("+"),
                 )
+            }
+            if (fdOps.usesEmulatedStoragePermissions(entry.parentFd)) {
+                return RootPosixEmulatedStorageIo(fdOps, lifecycle, fileIo).createDirectory(entry, parent, leafName)
             }
             var created = false
             try {
@@ -392,61 +402,41 @@ internal class RootPosixMutations(
                     )
                 }
                 val existing = fdOps.statAtNoFollow(destinationEntry.parentFd, destinationLeafName)
-                if (existing != null) {
-                    if (!replaceExisting ||
-                        source.targetIdentityCurrent.isDirectory ||
-                        existing.isSymlink ||
-                        !existing.isRegularFile ||
-                        existing.hardlinkCount != 1L ||
-                        !existing.hasValidKernelIdentity
-                    ) {
-                        return DriverMutationStatus.RaceOrDisappeared
-                    }
-                }
+                val destinationPolicy = RootPosixMoveCommit.destinationRejection(
+                    existing = existing,
+                    replaceExisting = replaceExisting,
+                    sourceIsDirectory = source.targetIdentityCurrent.isDirectory,
+                )
+                if (destinationPolicy != null) return destinationPolicy
                 var destinationMutated = false
                 try {
-                    if (source.targetIdentityCurrent.isDirectory) {
-                        lifecycle.mutateWhileActive {
+                    // Namespace capability, not a claim of target-type CAS:
+                    //  - every no-replace move and every directory move (even with
+                    //    `replace_existing`) commits with renameat2(RENAME_NOREPLACE): an entry that
+                    //    appears inside the syscall makes it fail instead of being destroyed;
+                    //  - a requested regular-file replace uses rename(2), which atomically replaces
+                    //    the destination *directory entry* without following a symlink and lets the
+                    //    kernel refuse a directory that appeared instead (EISDIR/ENOTEMPTY).
+                    // Nothing here unlinks anything: the source name disappears only as part of the
+                    // rename itself, so a swapped source can never be deleted by this request.
+                    val replaceEntry = replaceExisting && !source.targetIdentityCurrent.isDirectory
+                    lifecycle.mutateWhileActive {
+                        if (replaceEntry) {
                             fdOps.renameAt(
                                 sourceEntry.parentFd,
                                 sourceEntry.leafName,
                                 destinationEntry.parentFd,
                                 destinationLeafName,
                             )
-                            destinationMutated = true
-                        }
-                    } else if (replaceExisting) {
-                        lifecycle.mutateWhileActive {
-                            fdOps.renameAt(
+                        } else {
+                            fdOps.renameAtNoReplace(
                                 sourceEntry.parentFd,
                                 sourceEntry.leafName,
                                 destinationEntry.parentFd,
                                 destinationLeafName,
                             )
-                            destinationMutated = true
                         }
-                    } else {
-                        lifecycle.mutateWhileActive {
-                            fdOps.linkAtNoReplace(
-                                sourceEntry.parentFd,
-                                sourceEntry.leafName,
-                                destinationEntry.parentFd,
-                                destinationLeafName,
-                            )
-                            destinationMutated = true
-                        }
-                        val linked = fdOps.statAtNoFollow(destinationEntry.parentFd, destinationLeafName)
-                        if (linked == null || !linked.sameKernelObjectAs(source.targetIdentityCurrent)) {
-                            runCatching { fdOps.unlinkAt(destinationEntry.parentFd, destinationLeafName) }
-                            return DriverMutationStatus.PostMutationObservationOrPartialFailure(
-                                "move_link_identity_mismatch",
-                            )
-                        }
-                        if (!fdOps.unlinkAt(sourceEntry.parentFd, sourceEntry.leafName)) {
-                            return DriverMutationStatus.PostMutationObservationOrPartialFailure(
-                                "move_source_unlink_unconfirmed",
-                            )
-                        }
+                        destinationMutated = true
                     }
                 } catch (err: PosixOpException) {
                     return if (destinationMutated) {
@@ -454,7 +444,7 @@ internal class RootPosixMutations(
                             "move_partial_mutation_failed:${err.errnoName}",
                         )
                     } else {
-                        DriverMutationStatus.Denied(err.errnoName, err.selinuxConfirmed)
+                        RootPosixMoveCommit.refusal(err)
                     }
                 }
                 val movedFd = lifecycle.openTracked {
@@ -476,7 +466,10 @@ internal class RootPosixMutations(
                     if (!observed.targetIdentityCurrent.sameKernelObjectAs(source.targetIdentityCurrent)) {
                         return DriverMutationStatus.PostMutationObservationOrPartialFailure("move_target_identity_mismatch")
                     }
-                    if (fdOps.statAtNoFollow(sourceEntry.parentFd, sourceEntry.leafName) != null) {
+                    // The rename removes the source name atomically. A name that reappeared belongs
+                    // to another writer unless it still resolves to the object we just moved.
+                    val sourceLeft = fdOps.statAtNoFollow(sourceEntry.parentFd, sourceEntry.leafName)
+                    if (sourceLeft != null && sourceLeft.sameKernelObjectAs(observed.targetIdentityCurrent)) {
                         return DriverMutationStatus.PostMutationObservationOrPartialFailure("move_source_still_linked")
                     }
                     DriverMutationStatus.Moved(observed)

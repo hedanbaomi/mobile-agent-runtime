@@ -83,6 +83,10 @@ class RootWorkspaceSelectionServiceTest {
 
     private fun engine(): RootPrivilegedServiceEngine {
         val engine = RootPrivilegedServiceEngine(
+            selectionPathResolver = { java.nio.file.Paths.get(it) },
+            mountPolicyProvider = { b -> runtime.mobileagent.domain.RootTrustedMountRoots.directoryTree(
+                setOf(b.credentialEncryptedIdentity.mountId, b.deviceProtectedIdentity.mountId)) },
+
             managerAuthorizationOverride = { RootManagerAuthorization.GRANTED },
             fdOps = fdOps(),
             shellRunner = object : RootShellCommandRunner {

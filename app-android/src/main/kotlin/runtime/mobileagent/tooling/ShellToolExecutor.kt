@@ -148,7 +148,7 @@ class ShellToolExecutor(
 
     val toolingSpecs: List<ToolSpec> = Collections.unmodifiableList(if (exposure.exposed) listOf(SHELL_SPEC) else emptyList())
     override val specs: List<LegacyToolSpec> = Collections.unmodifiableList(toolingSpecs.map { spec ->
-        LegacyToolSpec(spec.name, spec.description, spec.inputSchema, spec.capability?.value.orEmpty(), spec.sideEffect)
+        LegacyToolSpec(spec.name, spec.description, spec.inputSchema, spec.capability?.value.orEmpty(), spec.sideEffect, spec.schemaVersion)
     })
 
     override suspend fun invoke(call: ToolCall): ToolResult = invoke(call, contextProvider())
@@ -581,7 +581,7 @@ class ShellToolExecutor(
 
     private fun parse(call: ToolCall): ParsedShellCall? = runCatching {
         if (call.callId.isBlank() || call.name != SHELL_EXEC) return null
-        val root = Json.parseToJsonElement(call.argumentsJson) as? JsonObject ?: return null
+        val root = ModelToolArguments.objectOrNull(call.argumentsJson) ?: return null
         val allowed = setOf("command", "cwd", "timeout_ms", "max_output_bytes")
         if (root.keys.any { it !in allowed }) return null
         val command = (root["command"] as? JsonPrimitive)?.takeIf { it.isString }?.content

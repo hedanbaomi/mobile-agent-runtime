@@ -470,6 +470,7 @@ class RootDispatchRepositoryTest {
                 val repository = RootDispatchRepository(db, clock = { fixture.now })
                 claimedRequestId = repository.claim(binding.approval.approvalId, request).requestId
             }
+            db.execute("UPDATE schema_version SET version=40")
             assertDoesNotThrow(
                 { Migrations.apply(db) },
                 "Reopening the supported draft-v40 schema must preserve rows referenced by Root receipts and triggers",

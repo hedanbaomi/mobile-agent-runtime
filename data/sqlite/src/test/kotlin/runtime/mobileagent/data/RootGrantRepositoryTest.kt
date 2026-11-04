@@ -107,7 +107,53 @@ class RootGrantRepositoryTest {
         }
     }
 
-    @Test fun readOnlyWorkspaceUnsupportedCapabilityAndShellWithoutFiveWayGateAreRejected() {
+    @Test fun pausedShellCarriesOnlyLivePersistentGrantsWithoutAuthorizingOrRevivingThem() {
+        JdbcSqlConnection().use { db ->
+            setup(db)
+            val repo = RootGrantRepository(db) { now }
+            val roots = RootAuthorityRepository(db)
+            val shell = roots.setShellConsent(Authority.ROOT_DIRECT, roots.get(Authority.ROOT_DIRECT).revision, true, 1)!!
+            val shellStamp = execution().copy(
+                consentRevision = shell.consent.revision,
+                shellConsentRevision = shell.consent.shellRevision,
+                policyVersion = 1,
+            )
+            fun shellGrant(id: String) = grant(id).copy(capability = CapabilityId(CapabilityId.SHELL_EXECUTE))
+            val persistent = repo.create(shellGrant("paused-shell-ok"), shellStamp)
+            val revoked = repo.create(shellGrant("paused-shell-revoked"), shellStamp)
+            val expired = repo.create(shellGrant("paused-shell-expired"), shellStamp)
+            val once = repo.create(shellGrant("paused-shell-once").copy(lifetime = GrantLifetime.ONCE), shellStamp)
+            val canonical = CapabilityGrantRepository(db) { now }
+            assertTrue(canonical.revoke(revoked.grantId))
+            val expiredGrant = requireNotNull(canonical.get(expired.grantId))
+            canonical.save(expiredGrant.copy(expiresAt = "2026-10-28T00:00:00Z", revision = expiredGrant.revision + 1))
+            roots.setShellConsent(Authority.ROOT_DIRECT, shell.revision, false, 1)
+
+            val nextPolicy = AuthorityPolicyRepository(db).updatePolicy(1, Authority.SHIZUKU_ROOT, DangerousMode.DISABLED)
+            assertEquals(2L, nextPolicy.policyVersion)
+            val carried = requireNotNull(repo.get(persistent.grantId))
+            assertEquals(2L, carried.policyVersion, "Pausing Shell must not strand an already-valid persistent grant")
+            assertEquals(persistent.grantRevision + 1, carried.grantRevision)
+            val origin = requireNotNull(RootWorkspaceRepository(db).getOrigin("root-workspace"))
+            assertFalse(
+                repo.isDurablyBoundGrant(requireNotNull(canonical.get(persistent.grantId)), origin, nextPolicy),
+                "Policy bookkeeping must not turn a paused Shell into an authorization",
+            )
+            listOf(revoked, expired, once).forEach { binding ->
+                assertEquals(1L, requireNotNull(repo.get(binding.grantId)).policyVersion, "Only live persistent grants move")
+            }
+
+            roots.setShellConsent(Authority.ROOT_DIRECT, roots.get(Authority.ROOT_DIRECT).revision, true, 2)
+            val reenabled = AuthorityPolicyRepository(db).getPolicy()
+            assertTrue(repo.isDurablyBoundGrant(requireNotNull(canonical.get(persistent.grantId)), origin, reenabled))
+            listOf(revoked, expired, once).forEach { binding ->
+                assertFalse(repo.isDurablyBoundGrant(requireNotNull(canonical.get(binding.grantId)), origin, reenabled))
+            }
+            assertTrue(db.query("PRAGMA foreign_key_check").isEmpty())
+        }
+    }
+
+    @Test fun readOnlyWorkspaceUnsupportedCapabilityAndShellWithoutConsentAreRejected() {
         JdbcSqlConnection().use { db ->
             setup(db)
             val repo = RootGrantRepository(db) { now }
@@ -138,14 +184,16 @@ class RootGrantRepositoryTest {
             val current = roots.get(Authority.ROOT_DIRECT)
             val withShell = roots.setShellConsent(Authority.ROOT_DIRECT, current.revision, true, 1)!!
             val shellStamp = execution().copy(shellConsentRevision = withShell.consent.shellRevision)
-            assertThrows(IllegalArgumentException::class.java) {
+            assertDoesNotThrow {
                 repo.create(
                     grant("shell-dangerous-disabled").copy(capability = CapabilityId(CapabilityId.SHELL_EXECUTE)),
                     shellStamp,
                 )
             }
             AuthorityPolicyRepository(db).updatePolicy(1, Authority.ROOT_DIRECT, DangerousMode.ENABLED_CONFIRM_HIGH_RISK)
-            val consent2 = roots.confirmRoot(Authority.ROOT_DIRECT, withShell.revision, 2)!!
+            // The mode-only carry advances the record CAS while retaining explicit consent.
+            val afterPolicyEdit = roots.get(Authority.ROOT_DIRECT)
+            val consent2 = roots.confirmRoot(Authority.ROOT_DIRECT, afterPolicyEdit.revision, 2)!!
             val withShell2 = roots.setShellConsent(Authority.ROOT_DIRECT, consent2.revision, true, 2)!!
             roots.advanceIdentityEpoch(Authority.ROOT_DIRECT, withShell2.revision)
             val readyShellStamp = execution().copy(

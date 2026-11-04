@@ -141,7 +141,7 @@ class RootDirectSuProductionAcceptanceTest {
     /**
      * Product-level revocation: a live coordinator session must be retired once the manager stops
      * authorizing the app. The harness flips the Magisk policy to deny while this test is waiting,
-     * then the coordinator's authorization watchdog must detach + degrade.
+     * then the coordinator's authorization watchdog must detach. Idle work does not need recovery.
      */
     private fun runCoordinatorRevokeCase(context: Context, started: Long, runToken: String) {
         val app = context as MobileAgentApp
@@ -183,10 +183,13 @@ class RootDirectSuProductionAcceptanceTest {
                 "a live direct session must stop dispatching after manager revocation",
                 coordinator.isAuthorityReadyForDispatch(Authority.ROOT_DIRECT),
             )
-            assertTrue(
-                "revocation must degrade the authority",
+            assertFalse(
+                "idle revocation must not create an unproven remote-work obligation",
                 runtime.mobileagent.data.RootAuthorityRepository(db).get(Authority.ROOT_DIRECT).degraded,
             )
+            assertNull(coordinator.currentExecutionStamp(Authority.ROOT_DIRECT))
+            assertFalse("the revoked manager must reject a fresh foreground acquisition",
+                coordinator.requestSessionFromForeground(Authority.ROOT_DIRECT, null))
             // The retirement must be caused by an explicit REVOKED observation of the live session.
             val revokedObservation = coordinator.lastManagerObservation.orEmpty()
             assertTrue(

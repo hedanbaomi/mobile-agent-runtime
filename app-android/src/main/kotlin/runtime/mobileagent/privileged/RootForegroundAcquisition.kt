@@ -25,7 +25,6 @@ internal class RootForegroundAcquisition(
     private val currentGeneration: () -> Long?,
     private val isClosed: () -> Boolean,
     private val completeAndAttach: (Long, RootAcquiredSession) -> Boolean,
-    private val abort: (RootAcquiredSession) -> Unit,
     private val verifyAuthorization: () -> Boolean,
 ) {
     fun request(
@@ -46,7 +45,7 @@ internal class RootForegroundAcquisition(
             appInstanceId = appInstanceId,
             shizukuState = shizukuState,
         ) ?: return false
-        val attached = publish(authority, generation, acquired)
+        val attached = runCatching { publish(generation, acquired) }.getOrDefault(false)
         if (!attached) {
             runCatching { connector.abortAcquisition(authority, acquired.attemptToken) }
             runCatching { acquired.transport?.close() }
@@ -61,7 +60,6 @@ internal class RootForegroundAcquisition(
     }
 
     private fun publish(
-        authority: Authority,
         generation: Long,
         acquired: RootAcquiredSession,
     ): Boolean {
@@ -73,3 +71,9 @@ internal class RootForegroundAcquisition(
         return completeAndAttach(generation, acquired)
     }
 }
+
+/** The recovery proof must come from the exact newly acquired, still-live Root session. */
+internal fun RootAcquiredSession.matchesRecoveryCandidate(
+    authority: Authority, nextEpoch: Long, appInstanceId: String,
+): Boolean = RootCoordinatorReadiness.matchesRootCaller(authority, identity, caller) &&
+    identity.identityEpoch == nextEpoch && identity.appInstanceId == appInstanceId && transport?.isAlive() == true

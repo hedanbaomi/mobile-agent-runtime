@@ -185,7 +185,7 @@ interface RootPosixFileDriver {
         preserveOwnerUid: Int,
         preserveOwnerGid: Int,
         preserveSelinuxLabel: String?,
-    ): RootDriverPatchOutcome? = null
+    ): RootDriverPatchOutcome = RootDriverPatchOutcome.PatchRejected("patch_streaming_unsupported")
 }
 
 sealed interface RootDriverPatchOutcome {
@@ -238,7 +238,11 @@ sealed interface DriverMutationStatus {
 }
 
 sealed interface DriverWriteStatus {
-    data class Replaced(val updatedTarget: RootOpenedFileTarget) : DriverWriteStatus
+    data class Replaced(
+        val updatedTarget: RootOpenedFileTarget,
+        val inPlace: Boolean = false,
+        val createdWithFilesystemDefaults: Boolean = false,
+    ) : DriverWriteStatus
     data class PostCommitFailure(val reason: String) : DriverWriteStatus
     data class AttributePreservationUnsupported(val attribute: String, val tempFileCleanedUp: Boolean) : DriverWriteStatus
     data class UnsupportedMutationDomain(val reasons: String) : DriverWriteStatus
@@ -285,8 +289,6 @@ class RootWorkspaceFileExecutor @JvmOverloads constructor(
         driver = driver,
         trustedMountRoots = trustedMountRoots,
         workspaceRootRejection = workspaceRootRejection,
-        readOperations = readOperations,
-        writeAtomic = ::executeAtomicWriteText,
         settlePatchedWrite = ::settlePatchedWriteStatus,
     )
 
@@ -668,16 +670,17 @@ class RootWorkspaceFileExecutor @JvmOverloads constructor(
             val parentAndPathValid = expectedParent.sameKernelObjectAs(status.updatedTarget.parentIdentityCurrent) &&
                 status.updatedTarget.resolvedAbsolutePath == expectedResolvedPath
             val expectedMode = if (requireModeMatch) expectedAttributeSource.modeOctal else 0b110_000_000
-            val attributesPreserved = updated.ownerUid == expectedAttributeSource.ownerUid &&
+            val attributesPreserved = (!requireModeMatch && status.createdWithFilesystemDefaults) ||
+                (updated.ownerUid == expectedAttributeSource.ownerUid &&
                 updated.ownerGid == expectedAttributeSource.ownerGid &&
                 updated.modeOctal == expectedMode &&
-                updated.selinuxLabel == expectedAttributeSource.selinuxLabel
+                updated.selinuxLabel == expectedAttributeSource.selinuxLabel)
             val contentBound = expectedContentSha256 == null ||
                 status.updatedTarget.contentSha256 == null ||
                 status.updatedTarget.contentSha256 == expectedContentSha256
             val sizeAndVersionValid = status.updatedTarget.sizeBytes == utf8ByteLength &&
                 status.updatedTarget.version.isNotBlank() &&
-                status.updatedTarget.version != previousVersion
+                (status.inPlace || status.updatedTarget.version != previousVersion)
             when {
                 postRejection != null ->
                     RootFileOperationResult.PostMutationFailure("post_replace_confinement_failed", postRejection)

@@ -70,10 +70,16 @@ internal class RootDispatchGuard(private val db: SqlConnection, private val cloc
     }
 
     fun validateReleasedReceipt(permit: RootDispatchPermit, receipt: RootDispatchReceipt): Boolean {
+        val outcome = receipt.outcome ?: return false
         if (!receipt.closed || receipt.disclosure != RootDisclosureState.RELEASED ||
-            receipt.stage != RootDispatchStage.TERMINAL || receipt.outcome != RootDispatchOutcome.SUCCEEDED
+            receipt.stage != RootDispatchStage.TERMINAL ||
+            (outcome != RootDispatchOutcome.SUCCEEDED && outcome != RootDispatchOutcome.FAILED)
         ) return false
-        return runCatching { validate(permit, receipt, "SUCCEEDED", allowReleased = true) }.isSuccess
+        // A released FAILED receipt is revalidated against the state the terminalizer wrote for
+        // that disclosure. WITHHELD receipts never reach this path because disclosure is checked
+        // above, so cancellation/revocation cannot be turned back into a release here.
+        val invocationState = RootDispatchTerminalizer.invocationState(outcome, disclosed = true)
+        return runCatching { validate(permit, receipt, invocationState, allowReleased = true) }.isSuccess
     }
 
     fun requireConsumedApproval(claim: RootDispatchClaim) {

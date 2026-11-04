@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+
+<!--
+  Root workspace browsing and in-place permission editing copy. A dedicated file keeps the shared
+  strings.xml files untouched, so other work packages never conflict with these keys.
+-->
+<resources>
+    <string name="agents_root_shell_settings_hint" formatted="false">Root Shell is disabled for this channel. Open Settings and enable Independent Root Shell confirmation.</string>
+    <string name="agents_root_read_skip_label" formatted="false">Skip confirmation for Root read-only tools</string>
+    <string name="agents_root_read_skip_hint" formatted="false">New conversations only: reads through a Root workspace skip the per-call prompt. Root writes and Shell still ask, and existing conversations keep their frozen setting.</string>
+    <string name="agents_root_browse_title" formatted="false">Browse device directories</string>
+    <string name="agents_root_browse_start" formatted="false">Browse</string>
+    <string name="agents_root_browse_parent" formatted="false">Parent directory</string>
+    <string name="agents_root_browse_more" formatted="false">Load more</string>
+    <string name="agents_root_browse_empty" formatted="false">This directory has no sub-directory you may attach here.</string>
+    <string name="agents_root_browse_loading" formatted="false">Reading directory…</string>
+    <string name="agents_root_browse_failed" formatted="false">Could not read that directory. Check the path and the Root channel, then retry.</string>
+    <string name="agents_root_browse_manual_hint" formatted="false">You can still type an absolute path below.</string>
+    <string name="agents_root_permissions_title" formatted="false">Edit attached Root directory</string>
+    <string name="agents_root_permissions_write" formatted="false">Write, create, move and delete</string>
+    <string name="agents_root_permissions_metadata" formatted="false">Read permissions, ownership and SELinux labels (independent of write); changing them requires write</string>
+    <string name="agents_root_permissions_shell" formatted="false">Allow Root Shell for this workspace</string>
+    <string name="agents_root_permissions_loading" formatted="false">Reading current permissions…</string>
+    <string name="agents_root_permissions_apply" formatted="false">Update permissions</string>
+    <string name="agents_root_permissions_new_chat_only" formatted="false">Changes apply to new conversations; existing conversations keep their frozen grants.</string>
+    <string name="agents_root_permissions_failed" formatted="false">The permission update was refused. Nothing changed; reconnect the Root channel and retry.</string>
+</resources>

@@ -187,7 +187,7 @@ class RootCrossModuleIsolationTest {
         assertThrows(IllegalArgumentException::class.java) {
             RootSnapshotFactory(h.db, h.coordinator).withWorkspace("agent", rootWorkspaceId, "snap-root-offline-explicit", Utc.nowIso())
         }
-        assertThrows(IllegalArgumentException::class.java) {
+        assertThrows(runtime.mobileagent.domain.AppException::class.java) {
             h.coordinator.admitNewRun(RunRecord("run-root-dead", rootSnapshot.id, "conv-root", createdAt = Utc.nowIso()))
         }
         val deadRootCtx = ToolExecutionContext(
@@ -214,7 +214,7 @@ class RootCrossModuleIsolationTest {
         // Switching global authority to SHIZUKU also rejects Root run admission without switching channels.
         val policy = AuthorityPolicyRepository(h.db).getPolicy()
         AuthorityPolicyRepository(h.db).updatePolicy(policy.policyVersion, Authority.SHIZUKU, DangerousMode.DISABLED)
-        assertThrows(IllegalArgumentException::class.java) {
+        assertThrows(runtime.mobileagent.domain.AppException::class.java) {
             h.coordinator.admitNewRun(RunRecord("run-root-wrong-channel", rootSnapshot.id, "conv-root", createdAt = Utc.nowIso()))
         }
     }
@@ -479,6 +479,10 @@ class RootCrossModuleIsolationTest {
                     ): RootAcquiredSession? {
                         if (!allowSessionConnect) return null
                         val freshEngine = RootPrivilegedServiceEngine(
+            selectionPathResolver = { java.nio.file.Paths.get(it) },
+            mountPolicyProvider = { b -> runtime.mobileagent.domain.RootTrustedMountRoots.directoryTree(
+                setOf(b.credentialEncryptedIdentity.mountId, b.deviceProtectedIdentity.mountId)) },
+
                             managerAuthorizationOverride = { RootManagerAuthorization.GRANTED },
                             fdOps = fd,
                             serviceUidProvider = { 0 },

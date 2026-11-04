@@ -21,6 +21,9 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
@@ -477,6 +480,104 @@ class AgentsGrantUiTest {
             composeRule.onAllNodesWithText("content://", useUnmergedTree = true)
                 .fetchSemanticsNodes().isEmpty(),
         )
+    }
+
+    @Test
+    fun rootOnlyWorkspaceBindingDoesNotReportAMissingOrdinaryWorkspace() {
+        val editor = fixtureEditor().copy(
+            workspaces = listOf(
+                AgentWorkspaceUi(
+                    id = "workspace.root",
+                    displayName = "/data/local/tmp",
+                    backendType = WorkspaceBackendType.PRIVILEGED,
+                    readable = true,
+                    writable = false,
+                    quotaBytes = null,
+                    maxFileBytes = 1024,
+                    enabled = true,
+                    revision = 1,
+                    isRoot = true,
+                ),
+            ),
+        )
+        composeRule.setContent {
+            MaterialTheme {
+                AgentsScreen(
+                    state = AgentsUiState(
+                        selectedAgentId = "agent.one",
+                        summary = editor,
+                        editor = editor,
+                        editorOpen = true,
+                    ),
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag(AgentTestTags.WORKSPACE_PRESET, useUnmergedTree = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+        assertTrue(
+            "A Root-only Agent must not be reported as having no workspace at all",
+            composeRule.onAllNodesWithText(
+                composeRule.activity.getString(AgentsR.string.ui_no_workspace_is_available_choose_a_67498e4c),
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isEmpty(),
+        )
+        composeRule.onNodeWithText(
+            composeRule.activity.getString(AgentsR.string.root_workspace_only, "/data/local/tmp"),
+            useUnmergedTree = true,
+        )
+            .performScrollTo()
+            .assertIsDisplayed()
+    }
+
+    @Test
+    fun privilegedEntryNamesRootDirectoryAttachWhenARootChannelIsSelected() {
+        val editor = fixtureEditor().copy(
+            workspaceAccess = AgentWorkspaceAccessUi(
+                canChooseSaf = true,
+                canBrowsePrivileged = true,
+                privilegedEntryIsRoot = true,
+            ),
+        )
+        composeRule.setContent {
+            MaterialTheme {
+                AgentsScreen(
+                    state = AgentsUiState(
+                        selectedAgentId = "agent.one",
+                        summary = editor,
+                        editor = editor,
+                        editorOpen = true,
+                    ),
+                )
+            }
+        }
+
+        composeRule.onNodeWithText(composeRule.activity.getString(AgentsR.string.root_workspace_attach), useUnmergedTree = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+    }
+
+    @Test
+    fun failedRootDirectoryAttachKeepsTheDraftUntilSuccessfulAttachment() {
+        var enabled by mutableStateOf(true)
+        var resetKey by mutableStateOf<String?>(null)
+        var submitted = ""
+        composeRule.setContent {
+            MaterialTheme {
+                runtime.mobileagent.feature.agents.RootDirectorySelectionCard(
+                    enabled = enabled, chinese = false, draftResetKey = resetKey,
+                    onConfirm = { path, _, _, _ -> submitted = path; enabled = false },
+                )
+            }
+        }
+        val path = "/data/user/0/example"
+        composeRule.onNode(hasSetTextAction()).performTextInput(path)
+        composeRule.onNodeWithText(composeRule.activity.getString(AgentsR.string.root_workspace_confirm)).performClick()
+        composeRule.runOnIdle { assertEquals(path, submitted); enabled = true }
+        composeRule.onNode(hasSetTextAction()).assertTextContains(path)
+        composeRule.runOnIdle { resetKey = "attached-workspace" }
+        assertTrue(composeRule.onAllNodesWithText(path).fetchSemanticsNodes().isEmpty())
     }
 
     @Test

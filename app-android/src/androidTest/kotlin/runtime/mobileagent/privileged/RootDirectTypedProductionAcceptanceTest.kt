@@ -21,6 +21,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -65,6 +66,7 @@ import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.tooling.AuthorityManager
 import runtime.mobileagent.tooling.InMemoryAuthorityStateStore
 import runtime.mobileagent.tooling.ToolExecutionContext
+import runtime.mobileagent.tooling.ToolExecutorFactory
 
 /**
  * W7 targeted acceptance draft: the real App process, the real default `su` connector, and the
@@ -100,10 +102,11 @@ import runtime.mobileagent.tooling.ToolExecutionContext
 class RootDirectTypedProductionAcceptanceTest {
     @Test
     fun defaultConnectorRunsTypedFileAndConditionalOpsOnUid0ExclusiveFixture() {
-        withinBudget(OVERALL_BUDGET_MS) { runAcceptance() }
+        val shellOnly = InstrumentationRegistry.getArguments().getString("rootShellResultsOnly") == "true"
+        withinBudget(OVERALL_BUDGET_MS) { runAcceptance(shellOnly) }
     }
 
-    private fun runAcceptance() {
+    private fun runAcceptance(shellOnly: Boolean) {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val app = context as MobileAgentApp
         app.ensureHostInitialized()
@@ -204,6 +207,7 @@ class RootDirectTypedProductionAcceptanceTest {
                 observation.startsWith("GRANTED:"),
             )
 
+            if (shellOnly) coordinator.setRootShellConsent(Authority.ROOT_DIRECT, true, true, manager)
             val execution = requireNotNull(
                 coordinator.currentExecutionStamp(Authority.ROOT_DIRECT, requireShellConsent = false),
             ) { "A ready direct session must produce a non-shell execution stamp" }
@@ -220,12 +224,13 @@ class RootDirectTypedProductionAcceptanceTest {
 
             // Root Shell consent is deliberately not requested: typed file capabilities must not
             // depend on it, and shell_exec must remain absent from the frozen surface.
-            assertNull(
+            if (!shellOnly) assertNull(
                 "Root Shell consent must stay off for this acceptance",
                 coordinator.currentExecutionStamp(Authority.ROOT_DIRECT, requireShellConsent = true),
             )
-            assertFalse(
-                "The channel record must not have Root Shell consent enabled",
+            assertEquals(
+                "The channel record must match the explicit Root Shell consent",
+                shellOnly,
                 RootAuthorityRepository(db).get(Authority.ROOT_DIRECT).consent.shellEnabled,
             )
 
@@ -269,7 +274,7 @@ class RootDirectTypedProductionAcceptanceTest {
                 path = fixtureDir,
                 writable = true,
                 metadata = true,
-                shell = false,
+                shell = shellOnly,
                 target = WorkspacePickerTarget(agentId),
             )
             assertTrue("Foreground Root attach failed: $attached", attached is WorkspaceAccessResult.Success)
@@ -288,8 +293,9 @@ class RootDirectTypedProductionAcceptanceTest {
                     grants.any { it.capability == CapabilityId(capability) },
                 )
             }
-            assertFalse(
-                "Root Shell must not be granted by a shell=false attach",
+            assertEquals(
+                "Root Shell grant must match the explicit attach consent",
+                shellOnly,
                 grants.any { it.capability == CapabilityId(CapabilityId.SHELL_EXECUTE) },
             )
 
@@ -333,6 +339,11 @@ class RootDirectTypedProductionAcceptanceTest {
             ) { "Production Root tool admission refused the stamped Run" }
             executor = productionExecutor
 
+            if (shellOnly) {
+                verifyShellResults(productionExecutor, db, runs, runId, workspaceId, coordinator)
+                return
+            }
+
             val exposed = productionExecutor.exposedToolNames
             setOf(
                 "file_get_metadata",
@@ -346,9 +357,82 @@ class RootDirectTypedProductionAcceptanceTest {
                 "shell_exec must remain withheld because Root Shell consent is off",
                 "shell_exec" in exposed,
             )
-            assertFalse(
-                "The production Root catalog does not contain workspace_list",
+            // 0. Discovery case. A model cannot know the random workspace UUID, so the only
+            //    admissible path is: production factory -> workspace_list -> use the returned id.
+            //    Nothing below pre-fills the fixture id into a call to fake discoverability.
+            assertTrue(
+                "A live grant must expose workspace_list on the production Root surface",
                 "workspace_list" in exposed,
+            )
+            val factory = ToolExecutorFactory(root = productionExecutor)
+            assertEquals(
+                "The factory must freeze exactly one workspace_list registration",
+                1,
+                factory.toolingSpecs.count { it.name == "workspace_list" },
+            )
+            val discoveryCall = ToolCall("root-discovery-${sequence++}", "workspace_list", "{}")
+            val discovery = runBlocking { factory.invoke(discoveryCall) }
+            assertTrue(
+                "workspace_list must succeed through the production factory, got $discovery",
+                discovery is ToolResult.Value,
+            )
+            val discoveryJson = (discovery as ToolResult.Value).json
+            val discoveredWorkspaces = Json.parseToJsonElement(discoveryJson).jsonObject
+                .getValue("workspaces").jsonArray.map { it.jsonObject }
+            assertEquals(
+                "The foreground attach must produce exactly one discoverable workspace",
+                1,
+                discoveredWorkspaces.size,
+            )
+            val discoveredWorkspaceId = discoveredWorkspaces.single()
+                .getValue("workspace_id").jsonPrimitive.content
+            assertEquals(
+                "workspace_list must report the workspace the foreground attach really created",
+                workspace.id,
+                discoveredWorkspaceId,
+            )
+            assertTrue(
+                "The discovered workspace id must be the opaque UUID, not a path or fixture label",
+                discoveredWorkspaceId.matches(UUID_V4),
+            )
+            assertFalse(
+                "The discovered UUID must not be baked into any model-facing schema or description",
+                factory.toolingSpecs.any { spec ->
+                    spec.inputSchema.contains(discoveredWorkspaceId) ||
+                        spec.description.contains(discoveredWorkspaceId)
+                },
+            )
+            assertFalse(
+                "workspace_list must not echo the device path or any grant id",
+                discoveryJson.contains(fixtureDir) || grants.any { discoveryJson.contains(it.grantId) },
+            )
+
+            // The typed call is built from the value the model just learned. A workspace id that
+            // was never discovered must be refused instead of silently mapped to this fixture.
+            val discoveredReadArgs = buildJsonObject {
+                put("workspace_id", discoveredWorkspaceId)
+                put("relative_path", seedName)
+                put("max_bytes", 4096)
+            }.toString()
+            assertEquals(
+                "A read built from the discovered id must return the real seed bytes",
+                expectedSeed,
+                readText(productionExecutor, db, runs, runId, discoveredReadArgs, "discovered-read"),
+            )
+            val unknownWorkspaceId = UUID.randomUUID().toString()
+            val unknownCall = ToolCall(
+                "root-discovery-miss-${sequence++}",
+                "file_read_text",
+                buildJsonObject {
+                    put("workspace_id", unknownWorkspaceId)
+                    put("relative_path", seedName)
+                }.toString(),
+            )
+            val unknownResult = runBlocking { productionExecutor.invoke(unknownCall) }
+            assertEquals(
+                "An id outside the live exposure must not produce a dispatchable approval",
+                ToolErrorCode.OPERATION_UNAVAILABLE,
+                (unknownResult as? ToolResult.Failure)?.error?.code,
             )
 
             val metadataArgs = buildJsonObject {
@@ -529,6 +613,45 @@ class RootDirectTypedProductionAcceptanceTest {
         }
     }
 
+    private fun verifyShellResults(
+        executor: RootToolExecutor, db: SqlConnection, runs: RunRepository, runId: String,
+        workspaceId: String, coordinator: RootRuntimeCoordinator,
+    ) {
+        assertTrue("Explicit Shell consent must expose shell_exec", "shell_exec" in executor.exposedToolNames)
+        for (exit in listOf(0, 1, 2, 126)) {
+            val result = settle(executor, db, runs, runId, "shell_exec", buildJsonObject {
+                put("workspace_id", workspaceId)
+                put("command", "printf result-$exit; printf diagnostic-$exit >&2; exit $exit")
+            }.toString(), "shell-exit-$exit")
+            val body = valueObject(result.result)
+            assertEquals(exit.toString(), body.string("exit_code"))
+            assertEquals(if (exit == 0) "SUCCEEDED" else "FAILED", body.string("status"))
+            assertEquals("result-$exit", body.string("stdout"))
+            assertEquals("diagnostic-$exit", body.string("stderr"))
+            assertReceipt(db, result.invocationId, expectSuccess = exit == 0)
+            assertApprovalBinding(db, result.invocationId)
+        }
+        val missingCwd = settle(executor, db, runs, runId, "shell_exec", buildJsonObject {
+            put("workspace_id", workspaceId); put("command", "printf MUST_NOT_EXECUTE")
+            put("cwd_relative_path", "missing-${UUID.randomUUID()}")
+        }.toString(), "missing-cwd")
+        val missing = valueObject(missingCwd.result)
+        assertEquals("126", missing.string("exit_code"))
+        assertEquals("", missing.string("stdout"))
+        assertTrue(missing.string("stderr").isNotBlank())
+        assertFalse(missing.string("stderr").contains("/data/"))
+        val natural = settle(executor, db, runs, runId, "shell_exec", buildJsonObject {
+            put("workspace_id", workspaceId)
+            put("command", "(sleep 0.05; printf grace_done) & exit 0")
+        }.toString(), "natural-drain")
+        val drained = valueObject(natural.result)
+        assertEquals("SUCCEEDED", drained.string("status"))
+        assertEquals("grace_done", drained.string("stdout"))
+        assertTrue("Settled command failure must not degrade the channel",
+            coordinator.isAuthorityReadyForDispatch(Authority.ROOT_DIRECT))
+        println("ROOT_SHELL_RESULT_CASES=6")
+    }
+
     private fun successJson(
         executor: RootToolExecutor,
         db: SqlConnection,
@@ -615,7 +738,8 @@ class RootDirectTypedProductionAcceptanceTest {
     }
 
     private fun assertUid0Metadata(metadata: JsonObject, expectedBytes: Int) {
-        assertEquals("regular_file", metadata.string("type"))
+        assertEquals("file", metadata.string("type"))
+        assertEquals("regular_file", metadata.string("kind"))
         assertEquals(0, metadata.string("owner_uid").toInt())
         assertEquals(0, metadata.string("owner_gid").toInt())
         assertEquals("600", metadata.string("mode_octal"))
@@ -761,6 +885,8 @@ class RootDirectTypedProductionAcceptanceTest {
         const val MUST_NOT_APPLY = "MUST_NOT_APPLY"
         const val OVERALL_BUDGET_MS = 300_000L
         const val ACQUISITION_BUDGET_MS = 120_000L
+        /** Canonical random UUID shape; the model-visible workspace id is never a path or label. */
+        val UUID_V4 = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
         var sequence = 0
     }
 }

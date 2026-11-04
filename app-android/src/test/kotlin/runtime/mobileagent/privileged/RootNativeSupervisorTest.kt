@@ -21,6 +21,26 @@ import runtime.mobileagent.skills.tooling.ShellExecRequest
 import runtime.mobileagent.skills.tooling.ShellExecutionStatus
 import runtime.mobileagent.skills.tooling.ShellLimits
 
+private fun reportOf(
+    exitCode: Int?,
+    leaked: Boolean = false,
+    settled: Boolean = true,
+    stdout: String = "",
+    stderr: String = "",
+): RootSupervisedCommandReport = RootSupervisedCommandReport(
+    startStatus = 0,
+    leaderExited = true,
+    exitCode = exitCode,
+    timedOut = false,
+    cancelled = false,
+    leakedDescendants = leaked,
+    settled = settled,
+    stdout = stdout.toByteArray(StandardCharsets.UTF_8),
+    stderr = stderr.toByteArray(StandardCharsets.UTF_8),
+    stdoutTruncated = false,
+    stderrTruncated = false,
+)
+
 class RootNativeSupervisorTest {
 
     private data class SimProcess(
@@ -186,7 +206,6 @@ class RootNativeSupervisorTest {
             @Synchronized
             private fun isDescendantOfSup(pid: Int): Boolean {
                 var cur = procs[pid] ?: return false
-                if (cur.pgid == cmdProc.pgid) return true
                 var depth = 0
                 while (cur.ppid > 1 && depth++ < 32) {
                     if (cur.ppid == supProc.pid) return true
@@ -245,11 +264,18 @@ class RootNativeSupervisorTest {
                     stdoutTruncated = false, stderrTruncated = false,
                 )
             }
-            if (spec.cwd == "/nonexistent/invalid/cwd") {
+            // Production no longer pre-validates `cwd` in the parent (see mar_root_supervisor.c):
+            // the supervised child chdirs right before exec, so an unusable directory still starts
+            // a supervisor and reports 126 with a fixed, path-free diagnostic. This model mirrors
+            // that by asking the host whether the directory would be usable for chdir.
+            val cwd = spec.cwd
+            if (cwd != null && !java.io.File(cwd).isDirectory) {
+                spawnCount.incrementAndGet()
                 return RootSupervisedCommandReport(
-                    startStatus = -2, leaderExited = false, exitCode = null, timedOut = false,
+                    startStatus = 0, leaderExited = true, exitCode = 126, timedOut = false,
                     cancelled = false, leakedDescendants = false, settled = true,
-                    stdout = ByteArray(0), stderr = ByteArray(0),
+                    stdout = ByteArray(0),
+                    stderr = "Root shell: working directory is unavailable\n".toByteArray(StandardCharsets.UTF_8),
                     stdoutTruncated = false, stderrTruncated = false,
                 )
             }
@@ -285,7 +311,7 @@ class RootNativeSupervisorTest {
                     leaderExited = true
                     leaderExitCode = code
                 },
-                onReparentedReaped = { leakedDescendants = true },
+                onReparentedReaped = {},
             )
 
             if (!leaderExited && !cancelled) {
@@ -302,12 +328,40 @@ class RootNativeSupervisorTest {
                     leaderExited = true
                     leaderExitCode = code
                 },
-                onReparentedReaped = { leakedDescendants = true },
+                onReparentedReaped = {},
             )
 
+            // Match the native supervisor's bounded natural-drain interval after a normal leader
+            // exit. Nothing observed inside the window is a leak: only a descendant that outlives
+            // the whole window (and therefore needs a signal) keeps the outcome unknown. Latching
+            // at T+0 used to turn `cmd | head` into UNKNOWN_OUTCOME and discard its output.
+            var naturalDrainExpired = false
             if (leaderExited && !timedOut && !cancelled && !empty) {
-                leakedDescendants = true
+                val naturalGraceMs = spec.graceMs.takeIf { it > 0L } ?: 300L
+                val naturalDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(naturalGraceMs)
+                while (!empty && System.nanoTime() < naturalDeadline) {
+                    if (simCancel.cancelled.get()) {
+                        cancelled = true
+                        break
+                    }
+                    val remainingMs = TimeUnit.NANOSECONDS.toMillis(naturalDeadline - System.nanoTime())
+                        .coerceAtLeast(1L)
+                    simCancel.latch.await(minOf(remainingMs, 10L), TimeUnit.MILLISECONDS)
+                    if (simCancel.cancelled.get()) {
+                        cancelled = true
+                        break
+                    }
+                    empty = session.supervisorReapAvailable(
+                        onLeaderReaped = { code ->
+                            leaderExited = true
+                            leaderExitCode = code
+                        },
+                        onReparentedReaped = {},
+                    )
+                }
+                if (!empty && !cancelled) naturalDrainExpired = true
             }
+            if (leaderExited && naturalDrainExpired) leakedDescendants = true
 
             if (!empty) {
                 session.supervisorSignalTree(15)
@@ -319,7 +373,7 @@ class RootNativeSupervisorTest {
                             leaderExitCode = code
                         }
                     },
-                    onReparentedReaped = { leakedDescendants = true },
+                    onReparentedReaped = {},
                 )
             }
 
@@ -327,6 +381,7 @@ class RootNativeSupervisorTest {
                 procs.values.filter { it.ppid == supPid && it.state != 'Z' && it.state != 'X' }
             }
             val singleSurvivor = survivors.singleOrNull()
+            if (leaderExited && survivors.isNotEmpty()) leakedDescendants = true
             return RootSupervisedCommandReport(
                 startStatus = 0,
                 leaderExited = leaderExited,
@@ -334,7 +389,7 @@ class RootNativeSupervisorTest {
                 timedOut = timedOut,
                 cancelled = cancelled,
                 leakedDescendants = leakedDescendants,
-                settled = empty,
+                settled = empty && survivors.isEmpty(),
                 stdout = session.stdoutBytes(),
                 stderr = session.stderrBytes(),
                 stdoutTruncated = session.stdoutTruncated,
@@ -366,6 +421,39 @@ class RootNativeSupervisorTest {
         override fun selfChildren(): Set<Int> = emptySet()
     }
 
+    private object NoProcesses : RootProcessSignals {
+        override fun stat(pid: Int): RootProcStat? = null
+        override fun oomScoreAdj(pid: Int): Int? = null
+        override fun groupMembers(pgrp: Int): List<RootProcStat> = emptyList()
+        override fun childrenOf(pid: Int): List<Int> = emptyList()
+        override fun selfChildren(): Set<Int> = emptySet()
+    }
+
+    /** Replays one exact native report so the report -> outcome contract stays pinned. */
+    private class ScriptedReportBackend : RootNativeSupervisorBackend {
+        @Volatile
+        var report: RootSupervisedCommandReport = reportOf(exitCode = 0)
+
+        val spawnCount = AtomicInteger(0)
+
+        private object Handle : RootNativeSupervisorHandle {
+            override fun requestCancel(): Boolean = true
+            override fun close() = Unit
+        }
+
+        override fun isKernelSubreaperSupported(): Boolean = true
+
+        override fun createCancelHandle(): RootNativeSupervisorHandle = Handle
+
+        override fun runSupervised(
+            spec: RootSupervisedCommandSpec,
+            cancelHandle: RootNativeSupervisorHandle,
+        ): RootSupervisedCommandReport {
+            spawnCount.incrementAndGet()
+            return report
+        }
+    }
+
     private fun makeRequest(
         callId: String = "call-w3",
         command: String = "echo ok",
@@ -388,7 +476,7 @@ class RootNativeSupervisorTest {
     )
 
     @Test
-    fun kernelUnsupportedAndInvalidCwdRejectBeforeSpawnWithoutDegradingEpoch() {
+    fun kernelUnsupportedFailsClosedBeforeSpawnAndMissingCwdFailsInsideTheChild() {
         val kernel = SimulatedLinuxSubreaperKernel(kernelSupported = false)
         val runner = RootSupervisedShellRunner(backend = kernel, signals = kernel)
         val outcome = runner.execute(makeRequest(command = "id"))
@@ -404,16 +492,27 @@ class RootNativeSupervisorTest {
         assertEquals(RootServiceTerminalOutcome.FAILED, hostOutcome.terminalOutcome)
         assertFalse(hostOutcome.requiresDegradedEpoch)
 
-        // Invalid cwd rejected pre-spawn without degrading epoch.
+        // A missing working directory is no longer a pre-spawn rejection: the supervisor and the
+        // command child are spawned and the child fails before exec (exit 126, fixed and path-free
+        // stderr, command stdout empty). This is the path the old parent-side `stat` precheck hid.
         kernel.kernelSupported = true
-        val badCwdOutcome = runner.execute(makeRequest(command = "pwd", cwd = "/nonexistent/invalid/cwd"))
-        assertEquals(0, kernel.spawnCount.get())
+        val missingCwd = "/nonexistent/invalid/cwd"
+        assertFalse(java.io.File(missingCwd).exists(), "precondition: probe cwd must not exist")
+        val badCwdOutcome = runner.execute(
+            makeRequest(command = "echo cwd-command-must-not-run", cwd = missingCwd),
+        )
+        assertEquals(1, kernel.spawnCount.get())
         assertEquals(ShellExecutionStatus.FAILED, badCwdOutcome.status)
+        assertEquals(RootServiceTerminalOutcome.FAILED, badCwdOutcome.terminalOutcome)
+        assertEquals(126, badCwdOutcome.exitCode)
+        assertEquals("", badCwdOutcome.stdout)
+        assertEquals("Root shell: working directory is unavailable\n", badCwdOutcome.stderr)
+        assertFalse(badCwdOutcome.stderr.contains(missingCwd))
         assertFalse(badCwdOutcome.requiresDegradedEpoch)
     }
 
     @Test
-    fun fastSetsidDoubleForkAndBackgroundChildAreCaughtBySubreaperAndNeverReportSuccess() {
+    fun reapedDescendantsSucceedAndSettledChildrenStayUnknownWithoutDegrading() {
         val kernel = SimulatedLinuxSubreaperKernel(kernelSupported = true)
         val runner = RootSupervisedShellRunner(backend = kernel, signals = kernel)
 
@@ -428,9 +527,9 @@ class RootNativeSupervisorTest {
             session.exitProcess(session.cmdProc.pid, 0)
         }
         val fastDoubleFork = runner.execute(makeRequest(command = "(setsid sh -c 'exit 0' &); exit 0"))
-        assertEquals(ShellExecutionStatus.UNKNOWN_OUTCOME, fastDoubleFork.status)
-        assertEquals(RootServiceTerminalOutcome.UNKNOWN_OUTCOME, fastDoubleFork.terminalOutcome)
-        assertTrue(fastDoubleFork.requiresDegradedEpoch)
+        assertEquals(ShellExecutionStatus.SUCCEEDED, fastDoubleFork.status)
+        assertEquals(RootServiceTerminalOutcome.SUCCEEDED, fastDoubleFork.terminalOutcome)
+        assertFalse(fastDoubleFork.requiresDegradedEpoch)
         assertTrue(runner.unconfirmedRequestIds().isEmpty(), "All descendants were reaped (ECHILD)")
 
         // Counterexample 2: Background child / setsid survivor still alive when leader exits.
@@ -445,9 +544,74 @@ class RootNativeSupervisorTest {
         val survivingDaemon = runner.execute(makeRequest(command = "(setsid sh -c 'sleep 60' &); exit 0"))
         assertEquals(ShellExecutionStatus.UNKNOWN_OUTCOME, survivingDaemon.status)
         assertEquals(RootServiceTerminalOutcome.UNKNOWN_OUTCOME, survivingDaemon.terminalOutcome)
-        assertTrue(survivingDaemon.requiresDegradedEpoch)
+        assertFalse(survivingDaemon.requiresDegradedEpoch, "SIGTERM cleanup settled the observed descendant")
         assertEquals('X', survivorRef!!.state, "Supervisor must terminate and reap the setsid escapee")
         assertTrue(survivorRef!!.killedSignals.contains(15))
+        assertTrue(runner.unconfirmedRequestIds().isEmpty(), "Settled cleanup must not retain a drain obligation")
+    }
+
+    @Test
+    fun descendantThatFinishesNaturallyInsideTheDrainWindowIsNotALeak() {
+        val kernel = SimulatedLinuxSubreaperKernel(kernelSupported = true)
+        val runner = RootSupervisedShellRunner(backend = kernel, signals = kernel, defaultGraceMs = 1_000L)
+        var childRef: SimProcess? = null
+        var childExit: Thread? = null
+        kernel.scriptedScenario = { session ->
+            val subshell = session.forkChild(session.cmdProc.pid)
+            val child = session.forkChild(subshell.pid, newSession = true)
+            childRef = child
+            childExit = Thread {
+                Thread.sleep(30L)
+                session.exitProcess(child.pid, 0)
+            }.apply { isDaemon = true; start() }
+            session.exitProcess(subshell.pid, 0)
+            session.exitProcess(session.cmdProc.pid, 0)
+        }
+
+        val result = runner.execute(makeRequest(command = "(sleep 0.03 &); exit 0"))
+        childExit?.join(1_000L)
+        // `R4.1`: the descendant drained naturally inside the window, so the command keeps its real
+        // exit code and SUCCEEDED outcome instead of an UNKNOWN_OUTCOME with lost output.
+        assertEquals(ShellExecutionStatus.SUCCEEDED, result.status)
+        assertEquals(RootServiceTerminalOutcome.SUCCEEDED, result.terminalOutcome)
+        assertEquals(0, result.exitCode)
+        assertFalse(result.requiresDegradedEpoch)
+        assertEquals('X', childRef!!.state)
+        assertTrue(childRef!!.killedSignals.isEmpty(), "Natural cleanup opportunity must precede SIGTERM")
+        assertTrue(runner.unconfirmedRequestIds().isEmpty())
+    }
+
+    @Test
+    fun reusedCommandPgrpDoesNotMakeUnrelatedProcessAChildOfSupervisor() {
+        val kernel = SimulatedLinuxSubreaperKernel(kernelSupported = true)
+        var unrelatedReusedPid: SimProcess? = null
+        kernel.scriptedScenario = { session ->
+            val originalPid = session.cmdProc.pid
+            val originalTicks = session.cmdProc.startTicks
+            session.exitProcess(originalPid, 0)
+            session.supervisorReapAvailable({}, {}) // Model ECHILD with the original leader fully reaped.
+
+            val unrelated = SimProcess(
+                pid = originalPid,
+                ppid = 1,
+                pgid = originalPid,
+                sid = originalPid,
+                startTicks = originalTicks + 999L,
+                state = 'S',
+            )
+            kernel.procs[originalPid] = unrelated
+            unrelatedReusedPid = unrelated
+
+            // The final census and its SIGKILL retry must use supervisor ancestry, not the stale
+            // process-group number left behind by the reaped command leader.
+            session.supervisorSignalTree(9)
+            kernel.procs[originalPid] = session.cmdProc
+        }
+
+        val runner = RootSupervisedShellRunner(backend = kernel, signals = kernel)
+        runner.execute(makeRequest(command = "exit 0", timeoutMs = 50L))
+        assertTrue(unrelatedReusedPid!!.killedSignals.isEmpty(), "A reused cmd PID/pgrp must not signal an unrelated process")
+        assertEquals('S', unrelatedReusedPid!!.state)
     }
 
     @Test
@@ -469,7 +633,7 @@ class RootNativeSupervisorTest {
         assertEquals('X', cmdRef!!.state)
         assertEquals('X', setsidEscapeeRef!!.state)
         assertTrue(setsidEscapeeRef!!.killedSignals.contains(9), "Service death must SIGKILL reparented setsid tree")
-        assertTrue(outcome.requiresDegradedEpoch)
+        assertTrue(outcome.cancelled)
     }
 
     @Test
@@ -499,12 +663,12 @@ class RootNativeSupervisorTest {
         val kernel = SimulatedLinuxSubreaperKernel(kernelSupported = true)
         val runner = RootSupervisedShellRunner(backend = kernel, signals = kernel)
 
-        // 1. Timeout kills tree and reports TIMED_OUT + requiresDegradedEpoch = true.
+        // 1. Timeout remains TIMED_OUT/UNKNOWN but verified cleanup avoids degrading the channel.
         kernel.scriptedScenario = { _ -> /* leader stays alive until timeout */ }
         val timedOut = runner.execute(makeRequest(callId = "call-timeout", timeoutMs = 60L))
         assertEquals(ShellExecutionStatus.TIMED_OUT, timedOut.status)
         assertEquals(RootServiceTerminalOutcome.UNKNOWN_OUTCOME, timedOut.terminalOutcome)
-        assertTrue(timedOut.requiresDegradedEpoch)
+        assertFalse(timedOut.requiresDegradedEpoch)
 
         // 2. Cancel via terminateAll settles cleanly and returns both requestId and callId.
         val started = CountDownLatch(1)
@@ -575,6 +739,91 @@ class RootNativeSupervisorTest {
             "Multiple setsid survivors must never be cleared prematurely when one exits",
         )
         multiD2!!.state = 'X'
+    }
+
+    @Test
+    fun timeoutDegradesOnlyWhenLeaderOrFinalSettlementCannotBeConfirmed() {
+        val settledTimeout = classifyRootShellOutcome(
+            RootProcessGroupEvidence(
+                leaderExited = true,
+                exitCode = 137,
+                timedOut = true,
+                cancelled = false,
+                leakedDescendants = false,
+                settled = true,
+            ),
+        )
+        assertEquals(ShellExecutionStatus.TIMED_OUT, settledTimeout.status)
+        assertEquals(RootServiceTerminalOutcome.UNKNOWN_OUTCOME, settledTimeout.terminalOutcome)
+        assertTrue(settledTimeout.timedOut)
+        assertFalse(settledTimeout.requiresDegradedEpoch)
+
+        val unsettledTimeout = classifyRootShellOutcome(
+            RootProcessGroupEvidence(
+                leaderExited = true,
+                exitCode = 137,
+                timedOut = true,
+                cancelled = false,
+                leakedDescendants = true,
+                settled = false,
+            ),
+        )
+        assertEquals(ShellExecutionStatus.TIMED_OUT, unsettledTimeout.status)
+        assertTrue(unsettledTimeout.requiresDegradedEpoch)
+
+        val missingLeaderTimeout = classifyRootShellOutcome(
+            RootProcessGroupEvidence(
+                leaderExited = false,
+                exitCode = null,
+                timedOut = true,
+                cancelled = false,
+                leakedDescendants = false,
+                settled = true,
+            ),
+        )
+        assertEquals(ShellExecutionStatus.TIMED_OUT, missingLeaderTimeout.status)
+        assertTrue(missingLeaderTimeout.requiresDegradedEpoch)
+    }
+
+    /**
+     * `R4.1` / `M5` report contract: what the native supervisor writes into `outMeta` decides the
+     * tool-visible outcome. A natural drain must keep the real exit code and output, a proven leak
+     * must stay UNKNOWN without degrading the channel, and a pre-exec `chdir` failure must surface
+     * as an ordinary FAILED result carrying 126 and the fixed diagnostic.
+     */
+    @Test
+    fun supervisedReportKeepsNaturalDrainOutputAndSurfacesPreExec126AsFailure() {
+        val backend = ScriptedReportBackend()
+        val runner = RootSupervisedShellRunner(backend = backend, signals = NoProcesses)
+
+        backend.report = reportOf(exitCode = 0, stdout = "descendant_done\n")
+        val drained = runner.execute(makeRequest(command = "(sleep 0.05; echo descendant_done) & exit 0"))
+        assertEquals(ShellExecutionStatus.SUCCEEDED, drained.status)
+        assertEquals(RootServiceTerminalOutcome.SUCCEEDED, drained.terminalOutcome)
+        assertEquals(0, drained.exitCode)
+        assertEquals("descendant_done\n", drained.stdout)
+        assertFalse(drained.requiresDegradedEpoch)
+
+        backend.report = reportOf(exitCode = 0, leaked = true)
+        val leaked = runner.execute(makeRequest(command = "(sleep 60 &); exit 0"))
+        assertEquals(ShellExecutionStatus.UNKNOWN_OUTCOME, leaked.status)
+        assertEquals(RootServiceTerminalOutcome.UNKNOWN_OUTCOME, leaked.terminalOutcome)
+        assertFalse(leaked.requiresDegradedEpoch)
+
+        backend.report = reportOf(
+            exitCode = 126,
+            stderr = "Root shell: working directory is unavailable\n",
+        )
+        val preExec = runner.execute(
+            makeRequest(command = "echo must-not-run", cwd = "/nonexistent/invalid/cwd"),
+        )
+        assertEquals(ShellExecutionStatus.FAILED, preExec.status)
+        assertEquals(RootServiceTerminalOutcome.FAILED, preExec.terminalOutcome)
+        assertEquals(126, preExec.exitCode)
+        assertEquals("", preExec.stdout)
+        assertEquals("Root shell: working directory is unavailable\n", preExec.stderr)
+        assertFalse(preExec.requiresDegradedEpoch)
+        assertEquals(3, backend.spawnCount.get(), "Each report replay must go through one supervisor run")
     }
 
     @Test

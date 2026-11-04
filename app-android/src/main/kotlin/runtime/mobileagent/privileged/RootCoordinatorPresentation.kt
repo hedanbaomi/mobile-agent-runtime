@@ -46,18 +46,6 @@ internal object RootCoordinatorPresentation {
         )
     }
 
-    fun normalizeFileResultWorkspaceId(
-        result: runtime.mobileagent.domain.RootFileOperationResult<runtime.mobileagent.domain.RootFileMetadataSnapshot>,
-        requestedWorkspaceId: String,
-    ): runtime.mobileagent.domain.RootFileOperationResult<runtime.mobileagent.domain.RootFileMetadataSnapshot> =
-        if (result is runtime.mobileagent.domain.RootFileOperationResult.Succeeded &&
-            result.value.workspaceId != requestedWorkspaceId
-        ) {
-            result.copy(value = result.value.copy(workspaceId = requestedWorkspaceId))
-        } else {
-            result
-        }
-
     fun evaluateShizukuRootGranted(
         shizukuState: runtime.mobileagent.shizuku.ShizukuAuthorityState?,
         liveIdentity: PrivilegedSessionIdentity?,
@@ -75,20 +63,6 @@ internal object RootCoordinatorPresentation {
             sessionDegraded = degraded,
         )
         return decision is RootBridgeGateDecision.Allowed
-    }
-
-    fun mapShellOutcomeError(
-        status: runtime.mobileagent.skills.tooling.ShellExecutionStatus,
-    ): runtime.mobileagent.skills.tooling.ToolError? = when (status) {
-        runtime.mobileagent.skills.tooling.ShellExecutionStatus.SUCCEEDED -> null
-        runtime.mobileagent.skills.tooling.ShellExecutionStatus.TIMED_OUT ->
-            runtime.mobileagent.skills.tooling.ToolError(runtime.mobileagent.skills.tooling.ToolErrorCode.SHELL_TIMED_OUT)
-        runtime.mobileagent.skills.tooling.ShellExecutionStatus.CANCELLED ->
-            runtime.mobileagent.skills.tooling.ToolError(runtime.mobileagent.skills.tooling.ToolErrorCode.SHELL_CANCELLED)
-        runtime.mobileagent.skills.tooling.ShellExecutionStatus.UNKNOWN_OUTCOME ->
-            runtime.mobileagent.skills.tooling.ToolError.unknownOutcome()
-        runtime.mobileagent.skills.tooling.ShellExecutionStatus.FAILED ->
-            runtime.mobileagent.skills.tooling.ToolError(runtime.mobileagent.skills.tooling.ToolErrorCode.SHELL_EXECUTION_FAILED)
     }
 
     fun mapPlatformGrant(
@@ -159,10 +133,7 @@ internal object RootCoordinatorPresentation {
         liveIdentity: PrivilegedSessionIdentity?,
         livePolicyVersion: Long = record.consent.policyVersion,
     ): runtime.mobileagent.domain.RootChannelUiModel {
-        // A consent bound to an older policy version is stale: the execution stamp is null and the
-        // channel must not be presented as READY. It projects as "needs re-consent" instead.
-        val consentCurrent = !record.consent.enabled || record.consent.policyVersion == livePolicyVersion
-        val platformGranted = if (!consentCurrent) false else when (authority) {
+        val platformGranted = when (authority) {
             runtime.mobileagent.domain.Authority.ROOT_DIRECT -> liveIdentity?.serviceUid == 0 || record.consent.enabled
             runtime.mobileagent.domain.Authority.SHIZUKU_ROOT -> evaluateShizukuRootGranted(
                 shizukuState,
@@ -183,6 +154,7 @@ internal object RootCoordinatorPresentation {
             platformGranted = platformGranted,
             liveIdentity = liveIdentity,
             observedMismatchOrNonRootUid = nonRootMismatch,
+            livePolicyVersion = livePolicyVersion,
         )
     }
 }

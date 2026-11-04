@@ -28,6 +28,205 @@ import runtime.mobileagent.tooling.ToolExecutionContext
 /** Real local app/service/DB seams with synthetic OS facts and FDs; not a device acceptance test. */
 class RootRuntimeToolBackendIntegrationTest {
     @Test
+    fun grepReadsOnlyItsBoundedWindowsWithoutWholeFileDigestPasses() = fixture { f ->
+        val text = "line without hit\n".repeat(32_768) + "needle\n"
+        f.fd.seedText("large.txt", text)
+        f.reportedFileSize = 1024L * 1024 * 1024
+        val context = f.context("run-grep-bounded")
+        val executor = RootToolExecutor(RootToolArguments.specs(),
+            RootRuntimeToolBackend(f.db, f.coordinator, context, f.execution))
+        val call = ToolCall("runtime-grep-bounded", "file_grep", buildJsonObject {
+            put("workspace_id", f.workspace.id); put("query", "needle")
+            put("max_scanned_bytes", 131072); put("max_millis", 5000)
+        }.toString())
+        assertEquals(ToolResult.NeedsApproval, runBlocking { executor.invoke(call) })
+        f.recordCall(context.taskIdentity, call.callId, "model-grep", call.name, call.argumentsJson)
+        f.digestReads = 0
+        f.rangeReadBytes = 0L
+        val result = runBlocking { executor.approve(call.callId) }
+        assertTrue(result is ToolResult.Value, result.toString())
+        val body = Json.parseToJsonElement((result as ToolResult.Value).json).jsonObject
+        assertTrue(body.getValue("truncated").jsonPrimitive.boolean)
+        assertEquals(0, f.digestReads, "grep must not hash the whole file for each page")
+        assertEquals(131072L, f.rangeReadBytes)
+        assertTrue(body.getValue("matches").jsonArray.isEmpty())
+    }
+
+    @Test
+    fun settledServiceCancellationHasAnExplicitErrorAndWithholdsOutput() {
+        val outcome = classifyRootShellOutcome(RootProcessGroupEvidence(
+            leaderExited = true, exitCode = 1, timedOut = false, cancelled = true,
+            leakedDescendants = false, settled = true,
+        )).copy(stdout = "withheld-output", stderr = "withheld-diagnostic")
+        fixture(outcome) { f ->
+            val context = f.context("run-shell-cancelled")
+            val executor = RootToolExecutor(RootToolArguments.specs(),
+                RootRuntimeToolBackend(f.db, f.coordinator, context, f.execution))
+            val call = ToolCall("runtime-shell-cancelled", "shell_exec", buildJsonObject {
+                put("workspace_id", f.workspace.id); put("command", "synthetic-cancelled")
+            }.toString())
+            assertEquals(ToolResult.NeedsApproval, runBlocking { executor.invoke(call) })
+            f.recordCall(context.taskIdentity, call.callId, "model-shell-cancelled", call.name, call.argumentsJson)
+            val result = runBlocking { executor.approve(call.callId) }
+            assertTrue(result is ToolResult.Failure, result.toString())
+            assertEquals(runtime.mobileagent.skills.tooling.ToolErrorCode.SHELL_CANCELLED,
+                (result as ToolResult.Failure).error.code)
+            assertFalse(result.toString().contains("withheld-output"))
+        }
+    }
+
+    @Test
+    fun settledShellExitCodesKeepOutputAcrossApprovalDispatchAndProjection() {
+        for (exit in listOf(0, 1, 2, 126)) {
+            val outcome = classifyRootShellOutcome(RootProcessGroupEvidence(
+                leaderExited = true, exitCode = exit, timedOut = false, cancelled = false,
+                leakedDescendants = false, settled = true,
+            )).copy(stdout = "observed-output-$exit", stderr = "observed-diagnostic-$exit")
+            fixture(outcome) { f ->
+                val context = f.context("run-shell-$exit")
+                val executor = RootToolExecutor(RootToolArguments.specs(),
+                    RootRuntimeToolBackend(f.db, f.coordinator, context, f.execution))
+                val call = ToolCall("runtime-shell-$exit", "shell_exec", buildJsonObject {
+                    put("workspace_id", f.workspace.id); put("command", "synthetic-exit-$exit")
+                }.toString())
+                assertEquals(ToolResult.NeedsApproval, runBlocking { executor.invoke(call) })
+                f.recordCall(context.taskIdentity, call.callId, "model-shell-$exit", call.name, call.argumentsJson)
+                val result = runBlocking { executor.approve(call.callId) }
+                assertTrue(result is ToolResult.Value, result.toString())
+                val body = Json.parseToJsonElement((result as ToolResult.Value).json).jsonObject
+                assertEquals(exit, body.getValue("exit_code").jsonPrimitive.int)
+                assertEquals(exit == 0, body.getValue("success").jsonPrimitive.boolean)
+                assertEquals(outcome.status.name, body.getValue("status").jsonPrimitive.content)
+                assertEquals(outcome.stdout, body.getValue("stdout").jsonPrimitive.content)
+                assertEquals(outcome.stderr, body.getValue("stderr").jsonPrimitive.content)
+                assertEquals(1, f.shellCalls)
+                assertNotNull(f.coordinator.currentExecutionStamp(Authority.ROOT_DIRECT))
+            }
+        }
+    }
+
+    @Test
+    fun unsettledShellResultCannotDiscloseCapturedOutputAsACompletedValue() {
+        val outcome = classifyRootShellOutcome(RootProcessGroupEvidence(
+            leaderExited = true, exitCode = 1, timedOut = false, cancelled = false,
+            leakedDescendants = true, settled = true,
+        )).copy(stdout = "withheld-output", stderr = "withheld-diagnostic")
+        fixture(outcome) { f ->
+            val context = f.context("run-shell-unknown")
+            val executor = RootToolExecutor(RootToolArguments.specs(),
+                RootRuntimeToolBackend(f.db, f.coordinator, context, f.execution))
+            val call = ToolCall("runtime-shell-unknown", "shell_exec", buildJsonObject {
+                put("workspace_id", f.workspace.id); put("command", "synthetic-unknown")
+            }.toString())
+            assertEquals(ToolResult.NeedsApproval, runBlocking { executor.invoke(call) })
+            f.recordCall(context.taskIdentity, call.callId, "model-shell-unknown", call.name, call.argumentsJson)
+            assertTrue(runBlocking { executor.approve(call.callId) } is ToolResult.UnknownOutcome)
+            assertEquals(1, f.shellCalls)
+        }
+    }
+
+    @Test
+    fun factoryTypedSnapshotReachesRealRootApprovalAndRevokedDiscoveryCannotReplay() = fixture { f ->
+        val runId = "run-real-factory-typed"
+        val context = f.context(runId)
+        val root = RootToolExecutor(RootToolArguments.specs(), RootRuntimeToolBackend(f.db, f.coordinator, context, f.execution))
+        val factory = runtime.mobileagent.tooling.ToolExecutorFactory(
+            root = root, rootWorkspaceIds = setOf(f.workspace.id), boundSnapshotId = context.snapshotId,
+        )
+        assertEquals(context.snapshotId, factory.beginRun().snapshot.snapshotId)
+        val stale = runtime.mobileagent.skills.tooling.ToolInvocation.fromRuntime(
+            "model-stale-factory", "other-snapshot", "agent", "workspace_list", "{}")
+        val rejected = runBlocking { factory.invoke(stale) } as runtime.mobileagent.skills.tooling.ToolExecution.Failed
+        assertEquals(runtime.mobileagent.skills.tooling.ToolErrorCode.SNAPSHOT_STALE, rejected.error.code)
+
+        f.fd.seedText("typed.txt", "real-typed-file")
+        val args = """{"workspace_id":"${f.workspace.id}","relative_path":"typed.txt"}"""
+        val typed = runtime.mobileagent.skills.tooling.ToolInvocation.fromRuntime(
+            "model-real-typed", context.snapshotId, "agent", "file_read_text", args)
+        f.recordCall(runId, typed.requestId, typed.callId, typed.name, typed.argumentsJson)
+        val pending = runBlocking { factory.invoke(typed) } as runtime.mobileagent.skills.tooling.ToolExecution.Failed
+        assertEquals(runtime.mobileagent.skills.tooling.ToolErrorCode.APPROVAL_REQUIRED, pending.error.code)
+        val result = runBlocking { factory.approve(typed.requestId) }
+        assertTrue(result is ToolResult.Value, result.toString())
+        assertTrue((result as ToolResult.Value).json.contains("real-typed-file"))
+        val binding = f.db.query("SELECT binding_json FROM root_approval_bindings WHERE invocation_id=?", listOf(typed.requestId))
+            .single().string("binding_json")
+        assertTrue(binding.contains("\"callId\":\"model-real-typed\""))
+
+        val wrongAgent = runtime.mobileagent.skills.tooling.ToolInvocation.fromRuntime(
+            "wrong-agent", context.snapshotId, "other-agent", "file_read_text", args)
+        assertTrue(runBlocking { factory.invoke(wrongAgent) } is runtime.mobileagent.skills.tooling.ToolExecution.Failed)
+        val discovery = runtime.mobileagent.skills.tooling.ToolInvocation.fromRuntime(
+            "typed-discovery", context.snapshotId, "agent", "workspace_list", "{}")
+        assertTrue(runBlocking { factory.invoke(discovery) } is runtime.mobileagent.skills.tooling.ToolExecution.Value)
+        f.coordinator.detachSession(Authority.ROOT_DIRECT, "typed_discovery_revoked")
+        assertTrue(runBlocking { factory.invoke(discovery) } is runtime.mobileagent.skills.tooling.ToolExecution.Failed,
+            "The ToolRegistry terminal cache must revalidate the real Root discovery owner")
+        assertEquals(1, f.db.query("SELECT request_id FROM root_dispatch_receipts").size)
+        runBlocking { factory.createLegacyExecutor().close() }
+        assertTrue(runBlocking { factory.invoke(discovery) } is runtime.mobileagent.skills.tooling.ToolExecution.Failed)
+    }
+
+    @Test
+    fun settingsDangerousModeToggleKeepsTheLiveRootDirectoryUsableForANewRun() = fixture { f ->
+        f.coordinator.setRootShellConsent(Authority.ROOT_DIRECT, true, true, f.manager)
+        val before = requireNotNull(f.coordinator.currentExecutionStamp(Authority.ROOT_DIRECT, true))
+        val store = runtime.mobileagent.integration.SqliteDangerousModeStateStore(AuthorityPolicyRepository(f.db))
+        val state = store.load()
+        assertTrue(store.compareAndSet(state.revision, state.copy(policy = state.policy.copy(dangerousMode = DangerousMode.DISABLED))))
+        assertTrue(f.coordinator.isAuthorityReadyForDispatch(Authority.ROOT_DIRECT))
+        val current = requireNotNull(f.coordinator.currentExecutionStamp(Authority.ROOT_DIRECT, true))
+        assertEquals(before.identity, current.identity)
+        assertEquals(before.consentRevision, current.consentRevision)
+        assertEquals(before.shellConsentRevision, current.shellConsentRevision)
+        assertTrue(current.policyVersion > before.policyVersion)
+        val grants = CapabilityGrantRepository(f.db).forAgent("agent", includeRevoked = false)
+        val snapshot = f.coordinator.sealNewSnapshot(Authority.ROOT_DIRECT, "after-mode", "agent", grants.mapTo(mutableSetOf()) { it.grantId }) {
+            AgentRepository(f.db).createSnapshot("agent", "after-mode")
+        }
+        val now = Utc.nowIso()
+        f.db.execute("INSERT INTO conversations(id,snapshot_id,agent_snapshot_id,title,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            listOf("after-mode-conversation", snapshot.id, snapshot.id, "Fixture", now, now))
+        val runId = "after-mode-run"
+        val runs = RunRepository(f.db)
+        RunCoordinator(runs, f.coordinator::admitNewRun).prepare(
+            RunRecord(runId, snapshot.id, "after-mode-conversation", createdAt = now), "owner")
+        val context = ToolExecutionContext("agent", snapshot.id, "model-context", "after-mode-conversation", runId,
+            "config", current.policyVersion, canonicalGrants = grants,
+            snapshotGrantBindings = CapabilityGrantRepository(f.db).listSnapshotBindings(snapshot.id))
+        val executor = requireNotNull(RootToolExecutorAdmission.create(f.db, f.coordinator, context))
+        f.fd.seedText("mode.txt", "still-usable")
+        val call = ToolCall("mode-read", "file_read_text",
+            """{"workspace_id":"${f.workspace.id}","relative_path":"mode.txt"}""")
+        assertEquals(ToolResult.NeedsApproval, runBlocking { executor.invoke(call) })
+        f.db.execute("UPDATE runs SET state=? WHERE run_id=?", listOf(RunStatus.WAITING_TOOL_APPROVAL.name, runId))
+        runs.addInvocation(ToolInvocation(call.callId, runId, "model-mode-read", call.name, call.argumentsJson,
+            state = "WAITING_APPROVAL", permissionDecision = "PENDING", createdAt = now))
+        val result = runBlocking { executor.approve(call.callId) }
+        assertTrue(result is ToolResult.Value, result.toString())
+        assertTrue((result as ToolResult.Value).json.contains("still-usable"))
+    }
+
+    @Test
+    fun commonDiscoveryReturnsOnlyLiveRootWorkspaceWithoutLocators() = fixture { f ->
+        val context = f.context("run-discovery")
+        val executor = RootToolExecutor(RootToolArguments.specs(), RootRuntimeToolBackend(f.db, f.coordinator, context, f.execution))
+        val result = runBlocking { executor.invoke(ToolCall("discover", "workspace_list", "{}")) }
+        assertTrue(result is ToolResult.Value, result.toString())
+        val json = (result as ToolResult.Value).json
+        assertTrue(json.contains(f.workspace.id))
+        assertTrue(json.contains("display_name"))
+        val view = Json.parseToJsonElement(json).jsonObject.getValue("workspaces").jsonArray.single().jsonObject
+        assertFalse(view.getValue("atomic_replace").jsonPrimitive.boolean)
+        assertTrue("file_apply_patch" in view.getValue("conditional_expected_version_operations").jsonArray.map { it.jsonPrimitive.content })
+        assertFalse("file_apply_patch" in view.getValue("expected_version_operations").jsonArray.map { it.jsonPrimitive.content })
+        assertTrue(view.getValue("operation_conditions").jsonObject.getValue("file_apply_patch").jsonPrimitive.content.contains("app_private_paths_return_WORKSPACE_VERSION_UNSUPPORTED"))
+        assertFalse(json.contains(f.workspace.rootReference))
+        assertTrue(runBlocking { executor.invoke(ToolCall("invalid-discovery", "workspace_list", "{\"workspace_id\":\"other\"}")) } is ToolResult.Invalid)
+        f.coordinator.detachSession(Authority.ROOT_DIRECT, "discovery_test_disconnect")
+        assertTrue(runBlocking { executor.invoke(ToolCall("disconnected-discovery", "workspace_list", "{}")) } is ToolResult.Denied)
+    }
+    @Test
     fun foregroundSelectionAndOriginalModelInvocationReachTheReceiptedService() = fixture { f ->
         val raw = f.arguments("config.txt", "hello-root")
         val context = f.context("run-write")
@@ -222,7 +421,7 @@ class RootRuntimeToolBackendIntegrationTest {
         val work = pool.submit<ToolResult> { runBlocking { executor.approve(call.callId) } }
         try {
             assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
-            assertFalse(if (legacy) f.coordinator.cancelControlledShell(Authority.ROOT_DIRECT, call.callId)
+            assertFalse(if (legacy) f.coordinator.cancellationRoute(f.execution)(call.callId)
                 else runBlocking { executor.cancel(call.callId) })
             assertFalse(work.isDone, "Worker must still be blocked when Host records uncertainty")
             val receipt = f.db.query("SELECT stage,outcome,closed FROM root_dispatch_receipts").single()
@@ -636,28 +835,54 @@ class RootRuntimeToolBackendIntegrationTest {
         }
     }
 
-    private fun fixture(test: (Fixture) -> Unit) {
+    /** Shared with focused regression tests in this module; production code never sees it. */
+    internal fun fixture(shellOutcome: RootShellRunOutcome? = null, test: (Fixture) -> Unit) {
         val dir = Files.createTempDirectory("root-production-seam")
         InMemoryRootSqlConnection().use { db ->
-            val f = Fixture(db, dir.toFile())
+            val f = Fixture(db, dir.toFile(), shellOutcome)
             try { test(f) } finally { f.coordinator.close() }
         }
         dir.toFile().deleteRecursively()
     }
 
-    private class Fixture(val db: SqlConnection, dir: java.io.File) {
+    internal class Fixture(val db: SqlConnection, dir: java.io.File, shellOutcome: RootShellRunOutcome?) {
         val signing = "a".repeat(64)
         val boundary = RootControlPlaneBoundary("/data/user/0/runtime.mobileagent", node(9001),
             "/data/user_de/0/runtime.mobileagent", node(9002))
         val fd = InMemoryServiceFdOps("/data/local/root-workspace")
         var afterWrite: () -> Unit = {}
+        var digestReads = 0
+        var rangeReadBytes = 0L
+        var reportedFileSize: Long? = null
         private val workerFd = object : PosixFdOperations by fd {
+            override fun fstatSizeBytes(fd: PosixRetainedFd): Long? =
+                this@Fixture.fd.fstatSizeBytes(fd)?.let { size ->
+                    if (size > 0L) reportedFileSize ?: size else size
+                }
+            override fun fstatContentDigest(fd: PosixRetainedFd): String? {
+                digestReads++
+                return this@Fixture.fd.fstatContentDigest(fd)
+            }
+            override fun readFdRange(fd: PosixRetainedFd, offsetBytes: Long, maxBytes: Int): ByteArray =
+                this@Fixture.fd.readFdRange(fd, offsetBytes, maxBytes).also { rangeReadBytes += it.size }
             override fun writeAllAndFsync(fd: PosixRetainedFd, bytes: ByteArray) {
                 this@Fixture.fd.writeAllAndFsync(fd, bytes)
                 afterWrite()
             }
         }
-        val engine = RootPrivilegedServiceEngine(managerAuthorizationOverride = { RootManagerAuthorization.GRANTED }, fdOps = workerFd, serviceUidProvider = { 0 },
+        var shellCalls = 0
+        val engine = RootPrivilegedServiceEngine(
+            shellRunner = object : RootShellCommandRunner {
+                override fun runCommand(authority: Authority, request: runtime.mobileagent.skills.tooling.ShellExecRequest): RootShellRunOutcome {
+                    shellCalls++
+                    return requireNotNull(shellOutcome)
+                }
+                override fun cancel(requestId: String) = true
+            },
+            selectionPathResolver = { java.nio.file.Paths.get(it) },
+            mountPolicyProvider = { b -> runtime.mobileagent.domain.RootTrustedMountRoots.directoryTree(
+                setOf(b.credentialEncryptedIdentity.mountId, b.deviceProtectedIdentity.mountId)) },
+managerAuthorizationOverride = { RootManagerAuthorization.GRANTED }, fdOps = workerFd, serviceUidProvider = { 0 },
             controlPlaneOverride = boundary).pinTestHost(boundary, signing)
         var beforeSubmit: () -> Unit = {}
         val directTransport = EngineRootChannelTransport(engine, 10148)
@@ -693,9 +918,10 @@ class RootRuntimeToolBackendIntegrationTest {
                     }
                 }, controlPlaneBoundaryOverride = boundary, locatorCipher = TestRootLocatorCipher())
             coordinator.setUserIntent(Authority.ROOT_DIRECT, true, manager, DangerousMode.ENABLED_CONFIRM_HIGH_RISK, null)
+            if (shellOutcome != null) coordinator.setRootShellConsent(Authority.ROOT_DIRECT, true, true, manager)
             execution = requireNotNull(coordinator.currentExecutionStamp(Authority.ROOT_DIRECT))
             val selected = RootWorkspaceUiController(db, coordinator).attach(Authority.ROOT_DIRECT,
-                "/data/local/root-workspace", true, true, false, WorkspacePickerTarget("agent"))
+                "/data/local/root-workspace", true, true, shellOutcome != null, WorkspacePickerTarget("agent"))
             assertTrue(selected is WorkspaceAccessResult.Success, selected.toString())
             workspace = requireNotNull(WorkspaceRepository(db).get((selected as WorkspaceAccessResult.Success).workspace.workspaceId))
             grants = CapabilityGrantRepository(db).forAgent("agent", includeRevoked = false)

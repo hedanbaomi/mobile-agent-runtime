@@ -195,7 +195,7 @@ class RootQuiescenceAndTransportBoundTest {
         val req = ShellExecRequest.fromRuntime(
             callId = "call-leaked-child",
             command = "sleep 60 &",
-            cwd = "/data/local/root-workspace",
+            cwd = null, // Typed workspace-relative root.
             limits = ShellLimits(1_000L, 4096L),
             agentId = "agent",
             snapshotId = s.snapshot.id,
@@ -218,8 +218,8 @@ class RootQuiescenceAndTransportBoundTest {
             ),
         )
 
-        val res = s.coordinator.executeControlledShell(Authority.ROOT_DIRECT, req)
-        assertEquals(ShellExecutionStatus.UNKNOWN_OUTCOME, res.status)
+        val res = executeFixtureShell(s.coordinator, Authority.ROOT_DIRECT, req, s.workspace.id)
+        assertEquals(runtime.mobileagent.domain.RootServiceTerminalOutcome.UNKNOWN_OUTCOME, res?.terminalOutcome)
         assertTrue(RootAuthorityRepository(s.db).get(Authority.ROOT_DIRECT).degraded)
         assertEquals(0L, s.db.query("SELECT closed FROM root_dispatch_receipts").single().long("closed"))
         assertNull(
@@ -264,7 +264,7 @@ class RootQuiescenceAndTransportBoundTest {
         val req = ShellExecRequest.fromRuntime(
             callId = "call-leaked-child",
             command = "sleep 60 &",
-            cwd = "/data/local/root-workspace",
+            cwd = null, // Typed workspace-relative root.
             limits = ShellLimits(1_000L, 4096L),
             agentId = "agent",
             snapshotId = s.snapshot.id,
@@ -286,8 +286,8 @@ class RootQuiescenceAndTransportBoundTest {
                 s.workspace.id,
             ),
         )
-        val res = s.coordinator.executeControlledShell(Authority.ROOT_DIRECT, req)
-        assertEquals(ShellExecutionStatus.UNKNOWN_OUTCOME, res.status)
+        val res = executeFixtureShell(s.coordinator, Authority.ROOT_DIRECT, req, s.workspace.id)
+        assertEquals(runtime.mobileagent.domain.RootServiceTerminalOutcome.UNKNOWN_OUTCOME, res?.terminalOutcome)
         assertTrue(RootAuthorityRepository(s.db).get(Authority.ROOT_DIRECT).degraded)
 
         // The old process is gone: its in-memory active/retiring sessions and verified snapshots
@@ -524,6 +524,69 @@ class RootQuiescenceAndTransportBoundTest {
         }
     }
 
+    @Test
+    fun missingOrUnexpectedSubmitReplyPreservesVerifiedDrainMetadata() {
+        for (missing in listOf(true, false)) withSeam { s ->
+            val call = ToolCall("inv-submit-proof", "file_write_text", s.writeArgs("proof.txt", "data"))
+            s.recordCall("run-submit-proof", call.callId, "model-proof", call.name, call.argumentsJson)
+        s.db.execute("UPDATE tool_invocations SET state='PENDING' WHERE invocation_id=?", listOf(call.callId))
+            val typed = requireNotNull(RootToolArguments.normalize(call.name, call.argumentsJson)).typed
+            assertNotNull(s.coordinator.approveFileInvocation(Authority.ROOT_DIRECT, "run-submit-proof",
+                call.callId, "model-proof", s.snapshot.id, s.grants.first { it.capability.value == "file.write_text" }.grantId,
+                typed, configSnapshotHash = "config", sessionIdentity = "conversation"))
+            val bridge = s.coordinator.dispatchBridge
+            val prepared = requireNotNull(bridge.claimApprovedFileDispatch(s.execution, s.transport, typed,
+                runtime.mobileagent.domain.RootExecutionBudget(), call.callId))
+            val transport = object : RootChannelTransport by s.transport {
+                override fun submitEnvelope(controlSequence: Long, rawEnvelopeJson: String): RootServiceExecuteResponse? {
+                    val response = s.transport.submitEnvelope(controlSequence, rawEnvelopeJson)!!
+                    s.transport.cancelCommand(call.callId)
+                    return if (missing) null else response.copy(submitStage = "UNKNOWN_STAGE")
+                }
+            }
+            var degraded = false
+            val result = bridge.submitAndSettle(prepared, runtime.mobileagent.domain.RootHostControlGate(s.execution.identity),
+                transport, s.execution.identity, "data".toByteArray(), onDegradeRequired = { degraded = true })
+            assertEquals(RootServiceTerminalOutcome.UNKNOWN_OUTCOME, result?.terminalOutcome)
+            assertTrue(result?.remoteQuiescent == true)
+            assertFalse(result!!.requiresDegradedEpoch)
+            assertFalse(degraded)
+            assertFalse(result.shellOutcome!!.requiresDegradedEpoch)
+        }
+    }
+
+    @Test
+    fun closedUnknownReceiptStillAcceptsLateWorkerDrainProof() = withSeam { s ->
+        val call = ToolCall("inv-late-proof", "file_write_text", s.writeArgs("late-proof.txt", "data"))
+        s.recordCall("run-late-proof", call.callId, "model-late", call.name, call.argumentsJson)
+        s.db.execute("UPDATE tool_invocations SET state='PENDING' WHERE invocation_id=?", listOf(call.callId))
+        val typed = requireNotNull(RootToolArguments.normalize(call.name, call.argumentsJson)).typed
+        assertNotNull(s.coordinator.approveFileInvocation(Authority.ROOT_DIRECT, "run-late-proof",
+            call.callId, "model-late", s.snapshot.id, s.grants.first { it.capability.value == "file.write_text" }.grantId,
+            typed, configSnapshotHash = "config", sessionIdentity = "conversation"))
+        val bridge = s.coordinator.dispatchBridge
+        val repository = s.coordinator.rootDispatchRepository
+        val prepared = requireNotNull(bridge.claimApprovedFileDispatch(s.execution, s.transport, typed,
+            runtime.mobileagent.domain.RootExecutionBudget(), call.callId))
+        val transport = object : RootChannelTransport by s.transport {
+            override fun executeAccepted(requestId: String, payloadBytes: ByteArray): RootServiceExecuteResponse? {
+                val response = s.transport.executeAccepted(requestId, payloadBytes)
+                repository.cancelUnconfirmedInvocation(s.execution, call.callId)
+                repository.closePermit(prepared.permit, disclosed = false)
+                assertTrue(repository.getReceipt(prepared.permit.requestId)!!.closed)
+                return response
+            }
+        }
+        val result = bridge.submitAndSettle(prepared, runtime.mobileagent.domain.RootHostControlGate(s.execution.identity),
+            transport, s.execution.identity, "data".toByteArray(), onDegradeRequired = {})
+        assertEquals(RootServiceTerminalOutcome.UNKNOWN_OUTCOME, result?.terminalOutcome)
+        assertTrue(result?.remoteQuiescent == true)
+        assertFalse(result!!.requiresDegradedEpoch)
+        assertEquals(runtime.mobileagent.domain.RootDispatchOutcome.UNKNOWN_OUTCOME,
+            repository.getReceipt(prepared.permit.requestId)!!.outcome)
+        assertTrue(RootReceiptRecoveryCoordinator(s.db).allUncertainRequestsProven(Authority.ROOT_DIRECT))
+    }
+
     private fun withSeam(block: (Seam) -> Unit) {
         val dir = Files.createTempDirectory("root-w1-quiescence")
         InMemoryRootSqlConnection().use { db ->
@@ -571,6 +634,10 @@ class RootQuiescenceAndTransportBoundTest {
                 shellRunnerOverride?.unconfirmedRequestIds().orEmpty()
         }
         val engine = RootPrivilegedServiceEngine(
+            selectionPathResolver = { java.nio.file.Paths.get(it) },
+            mountPolicyProvider = { b -> runtime.mobileagent.domain.RootTrustedMountRoots.directoryTree(
+                setOf(b.credentialEncryptedIdentity.mountId, b.deviceProtectedIdentity.mountId)) },
+
             fdOps = workerFd,
             shellRunner = delegatingShellRunner,
             serviceUidProvider = { 0 },
@@ -629,7 +696,7 @@ class RootQuiescenceAndTransportBoundTest {
                 db,
                 fdOps = fd,
                 sessionConnector = connector,
-                shellRunner = delegatingShellRunner,
+
                 controlPlaneBoundaryOverride = boundary,
                 locatorCipher = TestRootLocatorCipher(),
             )
@@ -696,9 +763,9 @@ class RootQuiescenceAndTransportBoundTest {
             s.coordinator.isAuthorityReadyForDispatch(Authority.ROOT_DIRECT),
             "a bound REVOKED observation must retire the live session",
         )
-        assertTrue(
+        assertFalse(
             RootAuthorityRepository(s.db).get(Authority.ROOT_DIRECT).degraded,
-            "revocation must degrade the authority",
+            "idle revocation must not manufacture uncertain work",
         )
     }
 

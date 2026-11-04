@@ -4,24 +4,27 @@
 package runtime.mobileagent.domain
 
 /** Frozen, identity-verified mount roots confirmed by the controlled service bind path. */
-class RootTrustedMountRoots(identitiesByMountId: Map<Long, RootFdNodeIdentity>) {
+class RootTrustedMountRoots(identitiesByMountId: Map<Long, RootFdNodeIdentity>, private val allowedMountIds: Set<Long> = emptySet()) {
     private val roots: Map<Long, RootFdNodeIdentity> = identitiesByMountId.filterValues { node ->
         node.isDirectory && !node.isSymlink && node.hasValidKernelIdentity
     }
 
     fun confirms(mountId: Long, identity: RootFdNodeIdentity): Boolean =
-        roots[mountId]?.sameKernelObjectAs(identity) == true
+        mountId in allowedMountIds || roots[mountId]?.sameKernelObjectAs(identity) == true
 
-    val mountIds: Set<Long> get() = roots.keys
+    val mountIds: Set<Long> get() = roots.keys + allowedMountIds
 
     companion object {
         val NONE: RootTrustedMountRoots = RootTrustedMountRoots(emptyMap())
+        /** IDs come from a kernel mount-source snapshot excluding control-plane source aliases. */
+        fun directoryTree(mountIds: Set<Long>) = RootTrustedMountRoots(emptyMap(), mountIds.toSet())
     }
 }
 
 enum class RootWriteDomainKind {
     UID0_EXCLUSIVE,
     SINGLE_APP_PRIVATE,
+    SHARED_DIRECTORY,
     UNPROVEN,
 }
 
@@ -45,7 +48,7 @@ data class RootWriteDomainEvidence(
 
     val isProvenForMutation: Boolean
         get() = (kind == RootWriteDomainKind.UID0_EXCLUSIVE ||
-            kind == RootWriteDomainKind.SINGLE_APP_PRIVATE) && chainLength > 0
+            kind == RootWriteDomainKind.SINGLE_APP_PRIVATE || kind == RootWriteDomainKind.SHARED_DIRECTORY) && chainLength > 0
 
     companion object {
         const val REASON_NOT_ASSESSED = "write_domain_not_assessed"
@@ -124,91 +127,41 @@ object RootWriteDomainPolicy {
     }
 
     /**
-     * Assesses the directory chain from `/` or the pinned workspace root (index 0, included) to
-     * the target parent directory (last, included). Permits either:
-     * 1. [RootWriteDomainKind.UID0_EXCLUSIVE]: every directory owned by `UID 0` (optionally
-     *    preceded by OS system ancestor directories owned by `UID 1000` `system` with `gid in {0, 1000}`).
-     * 2. [RootWriteDomainKind.SINGLE_APP_PRIVATE]: an Android app private data directory path
-     *    (`/data/user/<uId>/<pkg>`, `/data/data/<pkg>`, `/data/user_de/<uId>/<pkg>`) where
-     *    ancestors above `<pkg>` (`3..4` OS directories starting at `/` owned by `UID 0`) are
-     *    `UID 0` / `UID 1000` (`system`) and all directories from `<pkg>` down to the target
-     *    parent belong to a single target app UID with private permissions.
+     * Directory ownership describes replacement guarantees, not Root's ordinary write permission.
+     * The workspace FD is already pinned; writable ancestors above it cannot change that object.
+     * Kernel DAC/SELinux and the operation's FD/control-plane checks remain authoritative.
      */
     @JvmOverloads
     fun assess(
         chain: List<RootFdNodeIdentity>,
         serviceUid: Int = SERVICE_UID,
         resolvedTargetParentPath: String? = null,
+        workspaceChainStart: Int = 0,
+        target: RootFdNodeIdentity? = null,
     ): RootWriteDomainEvidence {
-        if (chain.isEmpty()) return RootWriteDomainEvidence.unproven(RootWriteDomainEvidence.REASON_EMPTY_CHAIN)
-        val reasons = mutableListOf<String>()
-        val appLayout = parseAppPrivateLayout(resolvedTargetParentPath)
-        val osAncestorCount = if (appLayout != null) chain.size - appLayout.appDirCount else -1
-        val appStructureValid = appLayout != null &&
-            osAncestorCount in appLayout.validOsAncestorCounts &&
-            chain.first().ownerUid == serviceUid
-        var targetAppUid = 0
-        chain.forEachIndexed { index, node ->
-            var groupWriteAllowed = false
-            val isPreSarRootfsSlash = setOf(
-                index == 0,
-                index < chain.lastIndex,
-                node.ownerUid == serviceUid,
-                node.ownerGid == serviceUid,
-                (node.modeOctal and STICKY_BIT) != 0,
-                node.selinuxLabel.orEmpty().startsWith("u:object_r:rootfs:"),
-            ) == setOf(true)
-            when {
-                !node.hasValidKernelIdentity ->
-                    reasons += RootWriteDomainEvidence.REASON_IDENTITY_UNAVAILABLE
-                node.isSymlink || !node.isDirectory ->
-                    reasons += RootWriteDomainEvidence.REASON_NOT_DIRECTORY
-                node.ownerUid == serviceUid && targetAppUid == 0 ->
-                    groupWriteAllowed = false
-                node.ownerUid == SYSTEM_UID &&
-                    targetAppUid == 0 &&
-                    chain.first().ownerUid == serviceUid &&
-                    index < chain.lastIndex &&
-                    (!appStructureValid || index < osAncestorCount) ->
-                    groupWriteAllowed = node.ownerGid == SYSTEM_UID || node.ownerGid == serviceUid
-                appStructureValid &&
-                    index >= osAncestorCount &&
-                    isAndroidAppUid(node.ownerUid) &&
-                    (node.ownerUid / PER_USER_UID_RANGE) == appLayout.expectedUserId -> {
-                    if (targetAppUid == 0) {
-                        if (index != osAncestorCount) {
-                            reasons += RootWriteDomainEvidence.REASON_NOT_SERVICE_UID
-                        } else {
-                            targetAppUid = node.ownerUid
-                        }
-                    } else if (targetAppUid != node.ownerUid) {
-                        reasons += RootWriteDomainEvidence.REASON_MIXED_NON_ROOT_OWNERS
-                    }
-                    groupWriteAllowed = node.ownerGid == node.ownerUid ||
-                        node.ownerGid == node.ownerUid + CACHE_GID_OFFSET ||
-                        node.ownerGid == serviceUid
-                }
-                targetAppUid != 0 && isAndroidAppUid(node.ownerUid) && node.ownerUid != targetAppUid ->
-                    reasons += RootWriteDomainEvidence.REASON_MIXED_NON_ROOT_OWNERS
-                else ->
-                    reasons += RootWriteDomainEvidence.REASON_NOT_SERVICE_UID
-            }
-            if ((node.modeOctal and GROUP_WRITE_BIT) != 0 && !groupWriteAllowed && !isPreSarRootfsSlash) {
-                reasons += RootWriteDomainEvidence.REASON_GROUP_WRITABLE
-            }
-            if ((node.modeOctal and OTHER_WRITE_BIT) != 0 && !isPreSarRootfsSlash) {
-                reasons += RootWriteDomainEvidence.REASON_OTHER_WRITABLE
-            }
+        if (chain.isEmpty() || workspaceChainStart !in chain.indices) {
+            return RootWriteDomainEvidence.unproven(RootWriteDomainEvidence.REASON_EMPTY_CHAIN)
         }
-        return when {
-            reasons.isNotEmpty() ->
-                RootWriteDomainEvidence(RootWriteDomainKind.UNPROVEN, reasons.distinct(), chain.size)
-            targetAppUid != 0 ->
-                RootWriteDomainEvidence.singleAppPrivate(chain.size, targetAppUid)
-            else ->
-                RootWriteDomainEvidence.uid0Exclusive(chain.size)
+        if (chain.any { !it.hasValidKernelIdentity || !it.isDirectory || it.isSymlink }) {
+            return RootWriteDomainEvidence.unproven(RootWriteDomainEvidence.REASON_IDENTITY_UNAVAILABLE)
         }
+        val scoped = chain.drop(workspaceChainStart)
+        if (scoped.all { it.ownerUid == serviceUid && it.modeOctal and (GROUP_WRITE_BIT or OTHER_WRITE_BIT) == 0 }) {
+            return if (target == null || target.ownerUid == serviceUid &&
+                target.modeOctal and (GROUP_WRITE_BIT or OTHER_WRITE_BIT) == 0
+            ) RootWriteDomainEvidence.uid0Exclusive(scoped.size)
+            else RootWriteDomainEvidence(RootWriteDomainKind.SHARED_DIRECTORY, chainLength = scoped.size, ownerUid = target.ownerUid)
+        }
+        val owner = scoped.last().ownerUid
+        if (isAppPrivateDataPathForUid(resolvedTargetParentPath, owner) &&
+            scoped.all {
+                it.ownerUid in setOf(serviceUid, SYSTEM_UID, owner) && it.modeOctal and OTHER_WRITE_BIT == 0 &&
+                    (it.modeOctal and GROUP_WRITE_BIT == 0 || it.ownerGid in setOf(it.ownerUid, serviceUid, it.ownerUid + CACHE_GID_OFFSET))
+            }
+        ) return RootWriteDomainEvidence.singleAppPrivate(scoped.size, owner)
+        return RootWriteDomainEvidence(RootWriteDomainKind.SHARED_DIRECTORY, chainLength = scoped.size, ownerUid = owner)
     }
+
 }
 
 object RootOperationBoundary {

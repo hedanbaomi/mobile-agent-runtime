@@ -133,7 +133,7 @@ class RootServiceBootstrapAndLifecycleTest {
         )
         assertEquals(ShellExecutionStatus.UNKNOWN_OUTCOME, leaked.status)
         assertEquals(RootServiceTerminalOutcome.UNKNOWN_OUTCOME, leaked.terminalOutcome)
-        assertTrue(leaked.requiresDegradedEpoch)
+        assertFalse(leaked.requiresDegradedEpoch, "observed descendants were ultimately proven drained")
 
         val unconfirmed = classifyRootShellOutcome(
             RootProcessGroupEvidence(

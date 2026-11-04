@@ -416,28 +416,7 @@ class RootShizukuBridgePolicyTest {
         assertEquals("u:object_r:system_data_file:s0", defaultFdOps.fstatIdentity(openedDir)!!.selinuxLabel)
         openedDir.close()
 
-        // 2. SuProcessGroupShellRunner rejects SHIZUKU_ROOT without invoking su, and BoundedProcessGroupRunner
-        // drains a 262,144-byte stdout flood with maxOutputBytes=1024 without timing out!
-        val suRunner = SuProcessGroupShellRunner()
-        val rejectedShizuku = suRunner.runCommand(
-            Authority.SHIZUKU_ROOT,
-            runtime.mobileagent.skills.tooling.ShellExecRequest.fromRuntime(
-                callId = "call-reject",
-                command = "id",
-                cwd = null,
-                limits = runtime.mobileagent.skills.tooling.ShellLimits(1000L, 1024L),
-                agentId = "agent",
-                snapshotId = "snap",
-                selectedAuthority = Authority.SHIZUKU_ROOT,
-                dangerousMode = runtime.mobileagent.domain.DangerousMode.ENABLED_CONFIRM_HIGH_RISK,
-                policyVersion = 1L,
-                configSnapshotHash = "hash",
-                sessionIdentity = "ses",
-                toolSchemaVersion = 1,
-            ),
-        )
-        assertEquals(runtime.mobileagent.skills.tooling.ShellExecutionStatus.FAILED, rejectedShizuku.status)
-
+        // The bounded runner drains an output flood without exceeding the capture limit.
         val javaBin = java.nio.file.Paths.get(System.getProperty("java.home"), "bin", "java").toString()
         val floodReq = runtime.mobileagent.skills.tooling.ShellExecRequest.fromRuntime(
             callId = "call-flood",

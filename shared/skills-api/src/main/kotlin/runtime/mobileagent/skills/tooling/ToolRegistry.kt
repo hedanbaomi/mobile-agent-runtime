@@ -157,6 +157,10 @@ fun interface ToolHandler {
 class ToolRegistry(
     initial: Collection<ToolRegistration>,
     handlers: Map<String, ToolHandler> = emptyMap(),
+    /** Explicit binding to an already frozen Runtime snapshot; later publications always rotate. */
+    initialSnapshotId: String? = null,
+    /** Resource-backed adapters must revalidate a completed value before typed replay. */
+    private val completedResultAuthorization: (suspend (ToolInvocation) -> Boolean)? = null,
 ) {
     private val revision = AtomicLong(0)
     private val handlersByOwner = handlers.toMap()
@@ -169,7 +173,7 @@ class ToolRegistry(
      */
     private val invocationFingerprints = linkedMapOf<String, String>()
     private var registrations: List<ToolRegistration> = immutableRegistrations(initial)
-    private var current: ToolSnapshot = buildSnapshot(registrations, revision.incrementAndGet())
+    private var current: ToolSnapshot = buildSnapshot(registrations, revision.incrementAndGet(), initialSnapshotId)
 
     constructor(specs: Iterable<ToolSpec>) : this(specs.map { ToolRegistration(it, DEFAULT_OWNER) })
 
@@ -241,8 +245,25 @@ class ToolRegistry(
         // Re-bind before consulting the terminal cache.  This makes a reused
         // internal id with changed model metadata/arguments fail closed
         // instead of receiving the old result by cache hit.
-        synchronized(this) {
-            completedByInvocation[invocation.invocationId]?.let { return it }
+        val cached = synchronized(this) { completedByInvocation[invocation.invocationId] }
+        if (cached != null) {
+            if (cached !is ToolExecution.Value || completedResultAuthorization == null) return cached
+            val allowed = try {
+                completedResultAuthorization.invoke(invocation)
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (_: Exception) {
+                false
+            }
+            return synchronized(this) {
+                when {
+                    current.snapshotId != routeResult.route.snapshotId -> ToolExecution.Unknown(ToolError(ToolErrorCode.SNAPSHOT_STALE))
+                    !allowed -> ToolExecution.Failed(ToolError(ToolErrorCode.CAPABILITY_DENIED)).also {
+                        completedByInvocation[invocation.invocationId] = it
+                    }
+                    else -> completedByInvocation[invocation.invocationId] ?: ToolExecution.Failed(ToolError(ToolErrorCode.CAPABILITY_DENIED))
+                }
+            }
         }
         val handler = synchronized(this) { handlersByOwner[routeResult.route.ownerId] }
             ?: return ToolExecution.Failed(ToolError(ToolErrorCode.INTERNAL_ERROR, message = "Tool owner is unavailable"))
@@ -292,7 +313,7 @@ class ToolRegistry(
         return immutableList(result)
     }
 
-    private fun buildSnapshot(values: List<ToolRegistration>, number: Long): ToolSnapshot {
+    private fun buildSnapshot(values: List<ToolRegistration>, number: Long, initialId: String? = null): ToolSnapshot {
         val canonical = values.sortedBy { it.spec.name }.joinToString("\n") { registration ->
             listOf(
                 registration.spec.name,
@@ -304,7 +325,7 @@ class ToolRegistry(
             ).joinToString("\u001f")
         }
         return ToolSnapshot(
-            snapshotId = "tool-snapshot-$number",
+            snapshotId = initialId ?: "tool-snapshot-$number-${java.util.UUID.randomUUID()}",
             revision = number,
             specs = immutableList(values.map { it.spec }),
             schemaDigest = sha256Hex(canonical),

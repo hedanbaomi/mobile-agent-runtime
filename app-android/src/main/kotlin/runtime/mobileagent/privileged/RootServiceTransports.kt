@@ -30,6 +30,8 @@ import runtime.mobileagent.domain.RootQuiescenceQueryRequest
 import runtime.mobileagent.domain.RootRemoteQuiescenceSnapshot
 
 interface RootChannelTransport : AutoCloseable {
+    /** Transport liveness only; never substitutes for the authenticated handshake. */
+    fun isAlive(): Boolean = true
     fun handshake(request: RootServiceHandshakeRequest): RootServiceHandshakeResponse?
 
     /**
@@ -72,7 +74,7 @@ class EngineRootChannelTransport(
     private val callingUid: Int,
     private val callingPid: Int = -1,
     private val controlTimeoutMs: Long = 5_000L,
-    private val executeTimeoutMs: Long = 30_000L,
+    private val executeTimeoutMs: Long = runtime.mobileagent.domain.RootExecutionBudget.MAX_TIMEOUT_MS + 10_000L,
     private val closeTimeoutMs: Long = 1_000L,
 ) : RootChannelTransport {
     private val callGate = RootBoundedCallGate("mar-engine-root-rpc", controlTimeoutMs)
@@ -151,11 +153,12 @@ class EngineRootChannelTransport(
 class ShizukuRootBinderTransport(
     private val service: IRootPrivilegedService,
     private val controlTimeoutMs: Long = 5_000L,
-    private val executeTimeoutMs: Long = 30_000L,
+    private val executeTimeoutMs: Long = runtime.mobileagent.domain.RootExecutionBudget.MAX_TIMEOUT_MS + 10_000L,
     private val closeTimeoutMs: Long = 1_000L,
     private val onUnbind: () -> Unit = {},
 ) : RootChannelTransport {
     private val callGate = RootBoundedCallGate("mar-shizuku-root-rpc", controlTimeoutMs)
+    override fun isAlive(): Boolean = !callGate.isClosed && service.asBinder().isBinderAlive
 
     override fun handshake(request: RootServiceHandshakeRequest): RootServiceHandshakeResponse? =
         callGate.callBounded(controlTimeoutMs) {
@@ -232,7 +235,7 @@ class ShizukuRootBinderTransport(
                 .daemon(false)
                 .processNameSuffix(RootShizukuBridgePolicy.ROOT_USER_SERVICE_TAG)
                 .debuggable(false)
-                .version(4)
+                .version(6)
             val connection = object : ServiceConnection {
                 override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
                     if (binder != null && binder.isBinderAlive) {
@@ -384,7 +387,7 @@ class SuRootDaemonTransport(
     private val input: DataInputStream,
     private val output: DataOutputStream,
     private val controlTimeoutMs: Long = 5_000L,
-    private val executeTimeoutMs: Long = 30_000L,
+    private val executeTimeoutMs: Long = runtime.mobileagent.domain.RootExecutionBudget.MAX_TIMEOUT_MS + 10_000L,
     private val writeTimeoutMs: Long = 2_000L,
     private val closeTimeoutMs: Long = 1_000L,
 ) : RootChannelTransport {
@@ -401,6 +404,8 @@ class SuRootDaemonTransport(
         private set
     private val writeLock = Any()
     private val writeGate = RootBoundedCallGate("mar-root-pipe-writer", writeTimeoutMs)
+    @Volatile private var peerClosed = false
+    override fun isAlive(): Boolean = !peerClosed && !writeGate.isClosed && (process?.isAlive != false)
 
     init {
         Thread({ readLoop() }, "mar-root-pipe-reader").apply {
@@ -423,6 +428,7 @@ class SuRootDaemonTransport(
         } catch (_: Throwable) {
             // Stream closed.
         } finally {
+            peerClosed = true
             pendingReplies.keys.toList().forEach { id -> pendingReplies.remove(id)?.complete(null) }
         }
     }
@@ -592,7 +598,9 @@ class SuRootDaemonTransport(
             val cmd = "CLASSPATH='$apkPath' exec /system/bin/app_process /system/bin " +
                 "${RootPrivilegedProcessMain::class.java.name} $args"
             // Pinned to the provider path the foreground probe verified: never a PATH lookup.
-            val proc = ProcessBuilder(suPath, "-c", cmd).redirectErrorStream(false).start()
+            val proc = ProcessBuilder(suPath, "-c", cmd)
+                .redirectError(java.io.File("/dev/null"))
+                .start()
             SuRootDaemonTransport(
                 process = proc,
                 input = DataInputStream(proc.inputStream),
@@ -617,6 +625,7 @@ object RootPrivilegedProcessMain {
             ?.bootstrap ?: exitProcess(1)
         val engine = RootPrivilegedServiceEngine(
             onStopService = { exitProcess(0) },
+            managerObservationEnabled = launch.observeMagiskPolicy,
         )
         engine.pinHostBootstrap(pinned)
         engine.armLifecycleWatchdog()

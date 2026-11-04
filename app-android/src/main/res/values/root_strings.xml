@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+
+<resources>
+    <string name="root_manager_unavailable_message" formatted="false">Cannot open the Root manager. Install and open a su manager first, then grant this app root and enable the channel again.</string>
+    <string name="root_authority_unsupported_channel" formatted="false">Unsupported authority channel.</string>
+    <string name="root_authority_unsupported_dangerous_mode" formatted="false">Unsupported Dangerous Mode value.</string>
+    <string name="root_authority_build_denied" formatted="false">This build does not admit Dangerous Mode; debug or unknown builds keep it safely disabled.</string>
+    <string name="root_authority_confirmation_required" formatted="false">Confirm the Dangerous Mode risk first.</string>
+    <string name="root_authority_adapter_unavailable" formatted="false">The Dangerous Mode adapter is not wired yet; Shell stays off.</string>
+    <string name="root_authority_settings_adapter_unavailable" formatted="false">The authority adapter is not wired yet; nothing was saved.</string>
+    <string name="root_recovery_adapter_unavailable" formatted="false">The Root recovery entry is not wired yet; reconnect the channel and retry.</string>
+    <string name="root_authority_temporarily_unavailable" formatted="false">The selected Root channel is temporarily unavailable. Your message is saved; reconnect the channel and retry — nothing was sent twice.</string>
+    <string name="chat_message_saved_conversation_archived" formatted="false">Your message was saved. Restore the archived conversation before continuing.</string>
+    <string name="root_new_thread_unavailable" formatted="false">The default Root workspace is unavailable. No new conversation was created; reconnect Root or choose another workspace.</string>
+    <string name="root_send_preflight_unavailable" formatted="false">The Root channel is unavailable. Your message was not sent and your draft is kept; reconnect Root and retry.</string>
+    <string name="root_send_preflight_binding_invalid" formatted="false">This conversation’s Root workspace snapshot is invalid. Your message was not sent and your draft is kept; select the Root workspace again.</string>
+    <string name="root_send_preflight_check_failed" formatted="false">The Root/workspace state could not be verified. Sending stopped and your draft is kept; try again.</string>
+</resources>

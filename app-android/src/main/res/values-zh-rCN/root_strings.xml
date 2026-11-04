@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+
+<resources>
+    <string name="root_manager_unavailable_message" formatted="false">无法打开 Root 管理器。请先安装并打开 su 管理器，授予本应用 root 后再次启用该通道。</string>
+    <string name="root_authority_unsupported_channel" formatted="false">不支持的权限通道。</string>
+    <string name="root_authority_unsupported_dangerous_mode" formatted="false">不支持的危险模式取值。</string>
+    <string name="root_authority_build_denied" formatted="false">当前构建不允许开启危险模式；debug 或未知构建会安全关闭。</string>
+    <string name="root_authority_confirmation_required" formatted="false">请先确认危险模式风险。</string>
+    <string name="root_authority_adapter_unavailable" formatted="false">危险模式适配器尚未接入；Shell 保持关闭。</string>
+    <string name="root_authority_settings_adapter_unavailable" formatted="false">权限适配器尚未接入；设置未保存。</string>
+    <string name="root_recovery_adapter_unavailable" formatted="false">Root 恢复入口尚未接线；请重新连接该通道后重试。</string>
+    <string name="root_authority_temporarily_unavailable" formatted="false">所选 Root 通道暂时不可用。消息已保存；请重新连接通道后重试，不会重复发送。</string>
+    <string name="chat_message_saved_conversation_archived" formatted="false">消息已保存；请先恢复已归档的对话后继续。</string>
+    <string name="root_new_thread_unavailable" formatted="false">默认 Root 工作区当前不可用，未创建新会话；请重新连接 Root 或改用其他工作区。</string>
+    <string name="root_send_preflight_unavailable" formatted="false">Root 通道暂时不可用，消息未发送，草稿已保留；请重新连接 Root 后重试。</string>
+    <string name="root_send_preflight_binding_invalid" formatted="false">该会话的 Root 工作区快照已失效，消息未发送，草稿已保留；请重新选择 Root 工作区。</string>
+    <string name="root_send_preflight_check_failed" formatted="false">无法验证本次发送所需的 Root/工作区状态，已停止发送，草稿已保留；请重试。</string>
+</resources>

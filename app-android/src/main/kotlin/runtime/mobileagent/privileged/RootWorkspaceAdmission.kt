@@ -45,7 +45,7 @@ data class RootServiceRootIdentity(
     val kind: RootWorkspaceRootKind,
 ) {
     val isValidKernelObject: Boolean
-        get() = deviceId != 0L && inode > 0L && mountId > 0L && ownerUid >= 0
+        get() = deviceId != 0L && inode >= 0L && mountId > 0L && ownerUid >= 0
 }
 
 /** Opaque one-shot service handle. Neither the handle nor the selected path is printable. */
@@ -154,8 +154,13 @@ class RootWorkspaceAdmission(
             ?: return RootWorkspaceProposeOutcome.Refused(RootWorkspaceRefusal.PROVISIONAL_HANDLE_INVALID)
         val root = observedRoot(response, selection.rootKind)
             ?: return RootWorkspaceProposeOutcome.Refused(RootWorkspaceRefusal.PROPOSE_RESPONSE_INVALID, "root")
+        val resolvedPath = response.resolvedRootPath ?: selection.rootPath
+        if (!RootRecoveryLocatorCodec.isValidAbsoluteRootPath(resolvedPath)) {
+            releaseHandle(handle, execution.identity, provisional = true)
+            return RootWorkspaceProposeOutcome.Refused(RootWorkspaceRefusal.PROPOSE_RESPONSE_INVALID, "resolved_root_path")
+        }
         return RootWorkspaceProposeOutcome.Proposed(
-            RootWorkspaceProposal(handle, selection, root, execution.identity),
+            RootWorkspaceProposal(handle, selection.copy(rootPath = resolvedPath), root, execution.identity),
         )
     }
 
@@ -164,7 +169,7 @@ class RootWorkspaceAdmission(
         if (!isOpaqueId(proposal.provisionalHandle)) {
             return RootWorkspaceReleaseOutcome(RootWorkspaceRelease.NOT_ATTEMPTED, "provisional_handle_invalid")
         }
-        return releaseHandle(proposal.provisionalHandle, proposal.identity)
+        return releaseHandle(proposal.provisionalHandle, proposal.identity, provisional = true)
     }
 
     fun commit(proposal: RootWorkspaceProposal, execution: RootExecutionStamp): RootWorkspaceAdmissionOutcome {
@@ -263,7 +268,7 @@ class RootWorkspaceAdmission(
             val rejection = failure as? AdmissionRejection
             val release = stagedHandle
                 ?.let { releaseHandle(it, identity).release }
-                ?: releaseHandle(proposal.provisionalHandle, identity).release
+                ?: releaseHandle(proposal.provisionalHandle, identity, provisional = true).release
             val rollback = rollbackLocalWorkspace(workspaceId, generation)
             if (failure is Error) throw failure
             return RootWorkspaceAdmissionOutcome.Refused(
@@ -371,8 +376,13 @@ class RootWorkspaceAdmission(
             adbBindings.get(workspaceId) == null
     }
 
-    private fun releaseHandle(handle: String, identity: PrivilegedSessionIdentity): RootWorkspaceReleaseOutcome {
-        val response = call(baseRequest(PHASE_RELEASE, identity).copy(workspaceSessionHandle = handle))
+    private fun releaseHandle(
+        handle: String, identity: PrivilegedSessionIdentity, provisional: Boolean = false,
+    ): RootWorkspaceReleaseOutcome {
+        val request = baseRequest(PHASE_RELEASE, identity).let {
+            if (provisional) it.copy(provisionalHandle = handle) else it.copy(workspaceSessionHandle = handle)
+        }
+        val response = call(request)
             ?: return RootWorkspaceReleaseOutcome(RootWorkspaceRelease.TRANSPORT_FAILED)
         return if (response.accepted) {
             RootWorkspaceReleaseOutcome(RootWorkspaceRelease.ACCEPTED)

@@ -10,8 +10,6 @@ class RootWorkspaceFileMutationOperations(
     private val driver: RootPosixFileDriver,
     private val trustedMountRoots: RootTrustedMountRoots?,
     private val workspaceRootRejection: RootConfinementRejection?,
-    private val readOperations: RootWorkspaceFileReadOperations,
-    private val writeAtomic: (RootTypedArguments.FileWriteText, ByteArray) -> RootFileOperationResult<RootFileMetadataSnapshot>,
     private val settlePatchedWrite: (
         workspaceId: String,
         relativePath: String,
@@ -97,7 +95,6 @@ class RootWorkspaceFileMutationOperations(
             try {
                 val destinationRejection = verifyParent(destinationParent)
                     ?: writeDomainRejection(destinationParent.writeDomain)
-                    ?: crossOwnerMoveRejection(source.writeDomain, destinationParent.writeDomain)
                 if (destinationRejection != null) return destinationRejection
                 val status = runCatching {
                     driver.moveOpenedTarget(source, destinationParent, destinationLeaf, args.replaceExisting)
@@ -147,7 +144,7 @@ class RootWorkspaceFileMutationOperations(
                 RootConfinementRejection.SPECIAL_NODE_REJECTED,
                 RootFileOperationReason.TARGET_NOT_FOUND,
             )
-        val driverOutcome: RootDriverPatchOutcome? = try {
+        val driverOutcome: RootDriverPatchOutcome = try {
             val targetRejection = verifyTarget(opened, expectedVersion = args.expectedVersion, requireRegularFile = true)
                 ?: writeDomainRejection(opened.writeDomain)
             if (targetRejection != null) return targetRejection
@@ -197,51 +194,7 @@ class RootWorkspaceFileMutationOperations(
                 driverOutcome.patchedContentSha256,
                 driverOutcome.writeStatus,
             )
-            null -> Unit
         }
-        val current = readOperations.readFull(args.workspaceId, args.relativePath, args.expectedVersion)
-        val read = when (current) {
-            is RootFileOperationResult.Succeeded -> current.value
-            is RootFileOperationResult.Rejected -> return current
-            is RootFileOperationResult.PermissionDenied -> return current
-            is RootFileOperationResult.PostMutationFailure -> return current
-            is RootFileOperationResult.UnsupportedAttributePreservation -> return current
-        }
-        val outcome = if (args.format == "search_replace") {
-            RootSearchReplacePatch.apply(read.content, patchBytes)
-        } else {
-            RootUnifiedPatch.apply(read.content, patchBytes)
-        }
-        if (outcome !is RootPatchOutcome.Applied) {
-            return RootFileOperationResult.Rejected(
-                RootConfinementRejection.SPECIAL_NODE_REJECTED,
-                (outcome as RootPatchOutcome.Rejected).reason,
-            )
-        }
-        val patched = outcome.bytes
-        // file_write_text carries at most RootExecutionBudget.MAX_OUTPUT_BYTES; refuse before any
-        // FileWriteText construction (whose init would throw) or side effect.
-        if (patched.size > RootExecutionBudget.MAX_OUTPUT_BYTES) {
-            return RootFileOperationResult.Rejected(
-                RootConfinementRejection.MOUNT_ID_UNAVAILABLE,
-                RootFileOperationReason.PATCH_RESULT_EXCEEDS_BUDGET,
-            )
-        }
-        if (patched.size > RootContentVersionPolicy.MAX_CONTENT_BYTES) {
-            return RootFileOperationResult.Rejected(
-                RootConfinementRejection.MOUNT_ID_UNAVAILABLE,
-                RootFileOperationReason.CONTENT_VERSION_UNOBSERVABLE,
-            )
-        }
-        val writeArgs = RootTypedArguments.FileWriteText(
-            workspaceId = args.workspaceId,
-            relativePath = args.relativePath,
-            contentSha256 = RootMetadataSnapshots.sha256Hex(patched),
-            contentByteLength = patched.size,
-            replaceExisting = true,
-            expectedVersion = args.expectedVersion,
-        )
-        return writeAtomic(writeArgs, patched)
     }
 
     private fun verifyParent(parent: RootOpenedParentTarget): RootFileOperationResult<Nothing>? {
@@ -269,20 +222,6 @@ class RootWorkspaceFileMutationOperations(
             RootFileOperationResult.Rejected(
                 RootConfinementRejection.MOUNT_ID_UNAVAILABLE,
                 "${RootFileOperationReason.UNSUPPORTED_WRITE_DOMAIN}:${evidence.unprovenReasons.joinToString("+")}",
-            )
-        }
-
-    private fun crossOwnerMoveRejection(
-        sourceDomain: RootWriteDomainEvidence,
-        destinationDomain: RootWriteDomainEvidence,
-    ): RootFileOperationResult<Nothing>? =
-        if (sourceDomain.kind == destinationDomain.kind &&
-            sourceDomain.ownerUid == destinationDomain.ownerUid
-        ) {
-            null
-        } else {
-            writeDomainRejection(
-                RootWriteDomainEvidence.unproven(RootWriteDomainEvidence.REASON_MIXED_NON_ROOT_OWNERS),
             )
         }
 

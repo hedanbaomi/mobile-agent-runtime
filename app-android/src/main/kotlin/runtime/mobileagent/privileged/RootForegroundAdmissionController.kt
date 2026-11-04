@@ -27,7 +27,7 @@ internal class RootForegroundAdmissionController(
         val admission = RootWorkspaceAdmission(db, RootWorkspaceAdmissionTransport {
             transport.bindWorkspace(it) ?: RootServiceBindWorkspaceResponse(false)
         }, cipher)
-        val selected = RootWorkspaceSelection("Root workspace", path, writable = writable || shell)
+        val selected = RootWorkspaceSelection(rootWorkspaceDisplayName(path), path, writable = writable)
         val outcome = admission.admit(selected, execution) as? RootWorkspaceAdmissionOutcome.Admitted ?: return null
         val admitted = outcome.workspace
         val workspace = WorkspaceRepository(db).get(admitted.workspaceId) ?: return null
@@ -43,6 +43,36 @@ internal class RootForegroundAdmissionController(
         }
         rememberConfirmed(execution, admitted.origin, admitted.workspaceSessionHandle)
         return RootForegroundWorkspaceGrant(workspace, grants)
+    }
+
+    fun updatePermissions(
+        execution: RootExecutionStamp, workspaceId: String, agentId: String,
+        writable: Boolean, metadata: Boolean, shell: Boolean,
+    ): List<CapabilityGrant>? {
+        return runCatching { db.transaction {
+            val origin = runtime.mobileagent.data.RootWorkspaceRepository(db).getOrigin(workspaceId)
+            require(origin?.authority == execution.identity.authority)
+            val repo = runtime.mobileagent.data.WorkspaceRepository(db)
+            val workspace = requireNotNull(repo.get(workspaceId))
+            require(workspace.enabled)
+            val grants = runtime.mobileagent.data.CapabilityGrantRepository(db)
+            val roots = runtime.mobileagent.data.RootGrantRepository(db)
+            grants.forAgent(agentId, includeRevoked = false).filter {
+                it.workspaceId == workspaceId && roots.get(it.grantId) != null
+            }.forEach { grants.revoke(it.grantId) }
+            // Workspace capability is shared; revoking one Agent must not revoke another Agent's writes.
+            val otherWrites = grants.forWorkspace(workspaceId).any {
+                it.agentId != agentId && runtime.mobileagent.domain.RootApprovalTools.requiresWritableWorkspace(it.capability) &&
+                    it.isActiveFor(java.time.Instant.now(), null, null) &&
+                    roots.isDurablyBoundGrant(it, requireNotNull(origin), AuthorityPolicyRepository(db).getPolicy())
+            }
+            val sharedWritable = writable || otherWrites
+            if (workspace.writable != sharedWritable) {
+                repo.save(workspace.copy(writable = sharedWritable, revision = workspace.revision + 1))
+            }
+            requireNotNull(admitDraftGrants(execution, workspaceId, agentId,
+                RootForegroundAdmissionController.explicitCapabilities(writable, metadata, shell)))
+        } }.getOrNull()
     }
 
     fun admitDraftGrants(

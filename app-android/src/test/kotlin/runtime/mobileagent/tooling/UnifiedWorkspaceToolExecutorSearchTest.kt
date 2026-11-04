@@ -26,6 +26,8 @@ import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolResult
 import runtime.mobileagent.skills.tooling.ToolError
 import runtime.mobileagent.skills.tooling.ToolErrorCode
+import runtime.mobileagent.skills.tooling.ToolExecution
+import runtime.mobileagent.skills.tooling.ToolInvocation
 import runtime.mobileagent.skills.tooling.WorkspaceBackend
 import runtime.mobileagent.skills.tooling.WorkspaceBackendType
 import runtime.mobileagent.skills.tooling.WorkspaceCreateDirectoryRequest
@@ -50,6 +52,113 @@ import runtime.mobileagent.workspace.SharedWorkspaceBackendAdapter
  * batch/job page be disclosed while a repeated call id stays a non-replayable replay.
  */
 class UnifiedWorkspaceToolExecutorSearchTest {
+
+    @Test
+    fun ordinaryReadBatchDoesNotAcquireRootConfirmationFromAnIdenticalSharedSchema(): Unit = runBlocking {
+        val fixture = readFixture()
+        val tools = runtime.mobileagent.RunProductivityTools(fixture.executor, this, { true }, { it },
+            rootWorkspaceIds = setOf("another-root-workspace"))
+        try {
+            val call = ToolCall("ordinary-batch", "read_batch",
+                """{"calls":[{"call_id":"ordinary-read","tool":"file_read_text","arguments":{"workspace_id":"${fixture.workspaceId}","relative_path":"src/Main.kt"}}]}""")
+            val result = tools.executor.invoke(call)
+            assertTrue(result is ToolResult.Value, "An ordinary authorized read must not acquire a Root prompt: $result")
+            assertEquals(1, fixture.backend.readCalls)
+        } finally { tools.executor.close() }
+    }
+
+    @Test
+    fun distinctRuntimeRequestsWithTheSameModelCorrelationCannotReuseARevokedTypedValue(): Unit = runBlocking {
+        val fixture = readFixture()
+        val args = """{"workspace_id":"${fixture.workspaceId}","relative_path":"src/Main.kt"}"""
+        fun request() = ToolInvocation.fromRuntime("same-model", fixture.context.snapshotId, fixture.context.agentId, "file_read_text", args)
+        val first = request()
+        assertTrue(fixture.executor.invoke(first, fixture.context) is ToolExecution.Value)
+        assertTrue(fixture.executor.invoke(first, fixture.context) is ToolExecution.Value, "Same-runtime replay still works while authorized")
+        assertEquals(1, fixture.backend.readCalls)
+        val grants = fixture.authority.grants
+        fixture.authority.grants = emptyList()
+        val second = request()
+        assertFalse(first.requestId == second.requestId)
+        assertTrue(fixture.executor.invoke(second, fixture.context) is ToolExecution.Failed,
+            "A new runtime request must independently authorize even when its model correlation and arguments repeat")
+        assertTrue(fixture.executor.invoke(first, fixture.context) is ToolExecution.Failed,
+            "The original typed result must also pass the live replay gate")
+        assertEquals(1, fixture.backend.readCalls)
+        fixture.authority.grants = grants
+        assertTrue(fixture.executor.invoke(first, fixture.context) is ToolExecution.Failed, "A refused retained value stays withheld")
+        assertTrue(fixture.executor.invoke(request(), fixture.context) is ToolExecution.Value, "A newly authorized runtime request is a separate execution")
+        assertEquals(2, fixture.backend.readCalls)
+    }
+
+    @Test
+    fun legacyWorkspaceCacheAlsoRevalidatesAndCannotReviveAfterDenial(): Unit = runBlocking {
+        val fixture = readFixture()
+        val call = ToolCall("legacy-cache", "file_read_text", """{"workspace_id":"${fixture.workspaceId}","relative_path":"src/Main.kt"}""")
+        assertTrue(fixture.executor.invoke(call) is ToolResult.Value)
+        val grants = fixture.authority.grants
+        fixture.authority.grants = emptyList()
+        assertTrue(fixture.executor.invoke(call) is ToolResult.Denied)
+        fixture.authority.grants = grants
+        assertTrue(fixture.executor.invoke(call) is ToolResult.Denied)
+        assertTrue(fixture.executor.invoke(call.copy(callId = "new-authorized-request")) is ToolResult.Value)
+        assertEquals(2, fixture.backend.readCalls)
+    }
+
+    @Test
+    fun rootAndInternalWorkspacesShareNamesButKeepExactIdRoutes(): Unit = runBlocking {
+        val fixture = readFixture { id -> listOf(
+            grant("enum-$id", CapabilityId.WORKSPACE_ENUMERATE, id),
+            grant("read-$id", CapabilityId.FILE_READ_TEXT, id),
+        ) }
+        val rootCalls = mutableListOf<ToolCall>()
+        val root = object : runtime.mobileagent.skills.ToolExecutor {
+            override val specs = listOf("file_read_text", "workspace_list").map { name ->
+                val spec = if (name == "workspace_list") WorkspaceDiscovery.spec else runtime.mobileagent.privileged.RootToolArguments.spec(name)!!
+                runtime.mobileagent.skills.ToolSpec(spec.name, spec.description, spec.inputSchema, spec.capability!!.value, spec.sideEffect, spec.schemaVersion)
+            }
+            override suspend fun invoke(call: ToolCall): ToolResult {
+                rootCalls += call
+                return if (call.name == "workspace_list") ToolResult.Value(WorkspaceDiscovery.render(listOf(
+                    AgentWorkspaceView("root-id", "Root", true, "selected_directory", true, false, false,
+                        emptyList(), listOf("file_read_text"), emptyList(), emptyMap()),
+                ))) else ToolResult.Value("root result")
+            }
+            override suspend fun approve(callId: String) = ToolResult.Invalid("unused")
+            override suspend fun authorizeReplay(call: ToolCall) = rootCalls.any { it == call }
+        }
+        val factory = ToolExecutorFactory(workspace = fixture.executor, root = root, rootWorkspaceIds = setOf("root-id"))
+        assertEquals(1, factory.toolingSpecs.count { it.name == "file_read_text" })
+        assertEquals(UnifiedWorkspaceToolExecutor.TOOL_SCHEMA_VERSION, factory.toolingSpecs.single { it.name == "file_read_text" }.schemaVersion)
+        assertTrue(factory.invoke(ToolCall("internal-call", "file_read_text", """{"workspace_id":"${fixture.workspaceId}","relative_path":"src/Main.kt"}""")) is ToolResult.Value)
+        assertEquals(1, fixture.backend.readCalls)
+        assertTrue(rootCalls.isEmpty())
+        assertEquals(ToolResult.Value("root result"), factory.invoke(ToolCall("root-call", "file_read_text", """{"workspace_id":"root-id","relative_path":"src/Main.kt"}""")))
+        assertEquals(1, rootCalls.size)
+        assertEquals(1, fixture.backend.readCalls)
+        val discovery = factory.invoke(ToolCall("both", "workspace_list", "{}")) as ToolResult.Value
+        val ids = Json.parseToJsonElement(discovery.json).jsonObject.getValue("workspaces").jsonArray
+            .map { it.jsonObject.getValue("workspace_id").jsonPrimitive.content }.toSet()
+        assertEquals(setOf("root-id", fixture.workspaceId), ids)
+    }
+
+    @Test
+    fun unavailableRootBindingNeverFallsBackToAnOrdinaryWorkspaceWithTheSameId(): Unit = runBlocking {
+        val fixture = readFixture()
+        val factory = ToolExecutorFactory(workspace = fixture.executor, rootWorkspaceIds = setOf(fixture.workspaceId))
+        val result = factory.invoke(ToolCall("no-fallback", "file_read_text", """{"workspace_id":"${fixture.workspaceId}","relative_path":"src/Main.kt"}"""))
+        assertTrue(result is ToolResult.Failure)
+        assertEquals(0, fixture.backend.readCalls)
+    }
+
+    @Test
+    fun ordinaryNumericVersionsHaveOneOpaqueModelSpellingWithoutLosingLegacyInput() {
+        val old = ModelToolArguments.objectOrNull("""{"expected_version":42}""")!!
+        val common = ModelToolArguments.objectOrNull("""{"expected_version":"42"}""")!!
+        assertEquals(ModelToolArguments.numericVersion(old), ModelToolArguments.numericVersion(common))
+        assertEquals(null, ModelToolArguments.numericVersion(ModelToolArguments.objectOrNull("""{"expected_version":"opaque-root-token"}""")!!))
+        assertEquals(null, ModelToolArguments.numericVersion(ModelToolArguments.objectOrNull("""{"expected_version":"00042"}""")!!))
+    }
 
     @TempDir
     lateinit var tempDir: Path

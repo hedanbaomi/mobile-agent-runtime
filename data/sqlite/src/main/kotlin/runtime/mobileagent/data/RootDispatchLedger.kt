@@ -5,6 +5,7 @@ package runtime.mobileagent.data
 
 import java.security.MessageDigest
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import runtime.mobileagent.domain.*
@@ -22,7 +23,36 @@ internal class RootDispatchLedger(private val db: SqlConnection) {
         "SELECT * FROM root_dispatch_receipts WHERE request_id=?",listOf(requestId),
     ).singleOrNull()?.let(::decode)
 
-    fun list(): List<RootDispatchReceipt> = db.query("SELECT * FROM root_dispatch_receipts ORDER BY request_id").map(::decode)
+    fun listOpen(authority: Authority? = null): List<RootDispatchReceipt> = db.query(
+        "SELECT * FROM root_dispatch_receipts WHERE closed=0" +
+            (if (authority == null) "" else " AND authority=?") + " ORDER BY request_id",
+        if (authority == null) emptyList() else listOf(authority.name),
+    ).map(::decode)
+
+    fun listForAuthority(authority: Authority, maxEpoch: Long = Long.MAX_VALUE): List<RootDispatchReceipt> = db.query(
+        "SELECT * FROM root_dispatch_receipts WHERE authority=? AND identity_epoch<=? ORDER BY request_id",
+        listOf(authority.name, maxEpoch),
+    ).map(::decode)
+
+    /**
+     * Startup backfill only: unreadable historical UNKNOWN rows remain on disk. The caller
+     * already requires a degraded authority; all acknowledgement/proof reads stay strict,
+     * so omitting a damaged row here never becomes evidence that it drained.
+     */
+    fun readableUnknownForBackfill(authority: Authority, afterEpoch: Long, maxEpoch: Long): List<RootDispatchReceipt> =
+        db.query(
+            "SELECT * FROM root_dispatch_receipts WHERE authority=? AND outcome='UNKNOWN_OUTCOME' AND identity_epoch>? AND identity_epoch<=? ORDER BY request_id",
+            listOf(authority.name, afterEpoch, maxEpoch),
+        ).mapNotNull { row ->
+            try { decode(row) }
+            catch (_: SerializationException) { null }
+            catch (_: IllegalArgumentException) { null }
+        }
+
+    fun unknownAfter(authority: Authority, afterEpoch: Long, maxEpoch: Long): List<RootDispatchReceipt> = db.query(
+        "SELECT * FROM root_dispatch_receipts WHERE authority=? AND outcome='UNKNOWN_OUTCOME' AND identity_epoch>? AND identity_epoch<=? ORDER BY request_id",
+        listOf(authority.name, afterEpoch, maxEpoch),
+    ).map(::decode)
 
     fun insert(receipt: RootDispatchReceipt) {
         require(receipt.stage == RootDispatchStage.CLAIMED && receipt.revision == 1L)

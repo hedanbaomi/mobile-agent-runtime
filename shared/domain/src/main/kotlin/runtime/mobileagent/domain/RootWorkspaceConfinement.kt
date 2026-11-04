@@ -70,14 +70,16 @@ class RootControlPlaneBoundary(
     fun isChainProtected(chain: List<RootFdNodeIdentity>): Boolean =
         chain.any(::isNodeProtected)
 
+    /** Both user-0 spellings remain protected whether Android implements the alias as a link or bind. */
+    fun protectedDataDirectoryPaths(): List<String> = listOfNotNull(
+        credentialEncryptedDataDir, deviceProtectedDataDir, primaryUserDataDirAlias(credentialEncryptedDataDir),
+    )
+
     fun isProtected(candidateAbsolutePath: String?, node: RootFdNodeIdentity): Boolean {
         if (isNodeProtected(node)) return true
         if (candidateAbsolutePath != null) {
             if (!RootRecoveryLocatorCodec.isValidAbsoluteRootPath(candidateAbsolutePath)) return true
-            if (isSameOrDescendant(candidateAbsolutePath, credentialEncryptedDataDir)) return true
-            if (isSameOrDescendant(candidateAbsolutePath, deviceProtectedDataDir)) return true
-            val aliasRoot = primaryUserDataDirAlias(credentialEncryptedDataDir)
-            if (aliasRoot != null && isSameOrDescendant(candidateAbsolutePath, aliasRoot)) return true
+            if (protectedDataDirectoryPaths().any { isSameOrDescendant(candidateAbsolutePath, it) }) return true
         }
         return false
     }

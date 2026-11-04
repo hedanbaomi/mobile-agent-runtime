@@ -93,7 +93,11 @@ internal class RootPosixInspection(
             resolvedTargetAbsolutePath = targetPath,
             retainedFdHandle = handle,
             directoryChain = walk.chain,
-            writeDomain = RootWriteDomainPolicy.assess(walk.fullChain, resolvedTargetParentPath = parentPath),
+            writeDomain = RootWriteDomainPolicy.assess(walk.fullChain, resolvedTargetParentPath = parentPath,
+                workspaceChainStart = walk.ancestorsAboveRoot.size).let { evidence ->
+                if (evidence.isUid0Exclusive && fdOps.usesEmulatedStoragePermissions(walk.fd)) evidence.copy(kind = runtime.mobileagent.domain.RootWriteDomainKind.SHARED_DIRECTORY)
+                else evidence
+            },
             ancestorsAboveRoot = walk.ancestorsAboveRoot,
         )
     }

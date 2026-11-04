@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import runtime.mobileagent.domain.Authority
 import runtime.mobileagent.domain.RootServiceTerminalOutcome
 import runtime.mobileagent.skills.tooling.ShellExecRequest
 import runtime.mobileagent.skills.tooling.ShellExecutionStatus
@@ -153,10 +154,110 @@ internal class RootSupervisedShellRunner(
             requiresDegradedEpoch = false,
         )
 
-    private fun defaultSanitizedEnvironment(): Map<String, String> = mapOf(
-        "PATH" to "/system/bin:/system/xbin:/vendor/bin",
+    private fun defaultSanitizedEnvironment(): Map<String, String> = rootShellEnvironment(System.getenv())
+}
+
+/** Keep Android's runtime setup, without inheriting daemon CLASSPATH or loader overrides. */
+internal fun rootShellEnvironment(inherited: Map<String, String>): Map<String, String> =
+    inherited.filterKeys { it in ROOT_ANDROID_ENVIRONMENT_KEYS } + mapOf(
+        "PATH" to "/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:/vendor/bin:/odm/bin",
         "HOME" to "/data/local/tmp",
         "TMPDIR" to "/data/local/tmp",
         "LANG" to "C.UTF-8",
     )
+
+private val ROOT_ANDROID_ENVIRONMENT_KEYS = setOf(
+    "BOOTCLASSPATH", "DEX2OATBOOTCLASSPATH", "SYSTEMSERVERCLASSPATH", "STANDALONE_SYSTEMSERVER_JARS",
+    "ANDROID_ROOT", "ANDROID_DATA", "ANDROID_STORAGE", "ANDROID_RUNTIME_ROOT",
+    "ANDROID_ART_ROOT", "ANDROID_I18N_ROOT", "ANDROID_TZDATA_ROOT", "EXTERNAL_STORAGE",
+)
+
+data class RootShellRunOutcome(
+    val status: ShellExecutionStatus,
+    val exitCode: Int? = null,
+    val stdout: String = "",
+    val stderr: String = "",
+    val stdoutTruncated: Boolean = false,
+    val stderrTruncated: Boolean = false,
+    val timedOut: Boolean = false,
+    val cancelled: Boolean = false,
+    val terminalOutcome: RootServiceTerminalOutcome,
+    val requiresDegradedEpoch: Boolean = false,
+) {
+    override fun toString(): String =
+        "RootShellRunOutcome(status=$status,exitCode=$exitCode,terminalOutcome=$terminalOutcome,redacted=true)"
+}
+
+interface RootShellCommandRunner {
+    fun runCommand(
+        authority: Authority,
+        request: ShellExecRequest,
+    ): RootShellRunOutcome
+
+    fun cancel(requestId: String): Boolean
+
+    /**
+     * Terminates every in-flight process group and returns the request ids whose whole group
+     * (and observed escapees) were confirmed gone within the budget. Unconfirmed ids stay
+     * unconfirmed so the forced shutdown reports `UNKNOWN_OUTCOME`/`DEGRADED`.
+     */
+    fun terminateAll(deadlineMs: Long): Set<String> = emptySet()
+
+    fun activeRequestIds(): Set<String> = emptySet()
+
+    fun unconfirmedRequestIds(): Set<String> = emptySet()
+}
+
+/**
+ * Direct `UID 0` service shell entry backed by [RootSupervisedShellRunner] (`PR_SET_CHILD_SUBREAPER`
+ * + `PR_SET_PDEATHSIG` + `setsid` + `waitpid(-1)` until `ECHILD`).
+ *
+ * When constructed with only an unproven sampled [RootShellGroupRunner] or when the kernel/runtime
+ * cannot prove subreaper support prior to spawn, [runCommand] fails closed before spawning any
+ * process (`status = FAILED`, `requiresDegradedEpoch = false`).
+ */
+class Uid0ProcessGroupShellRunner internal constructor(
+    private val groupRunner: RootShellGroupRunner,
+    private val supervisedRunner: RootSupervisedShellRunner? = null,
+) : RootShellCommandRunner {
+    constructor() : this(
+        groupRunner = RootShellGroupRunner(),
+        supervisedRunner = RootSupervisedShellRunner(),
+    )
+
+    internal constructor(supervisedRunner: RootSupervisedShellRunner) : this(
+        groupRunner = RootShellGroupRunner(),
+        supervisedRunner = supervisedRunner,
+    )
+
+    override fun runCommand(
+        authority: Authority,
+        request: ShellExecRequest,
+    ): RootShellRunOutcome {
+        if (authority != Authority.ROOT_DIRECT && authority != Authority.SHIZUKU_ROOT) {
+            return RootShellRunOutcome(
+                status = ShellExecutionStatus.FAILED,
+                terminalOutcome = RootServiceTerminalOutcome.FAILED,
+                requiresDegradedEpoch = false,
+            )
+        }
+        val supervisor = supervisedRunner ?: return RootShellRunOutcome(
+            status = ShellExecutionStatus.FAILED,
+            terminalOutcome = RootServiceTerminalOutcome.FAILED,
+            requiresDegradedEpoch = false,
+        )
+        return supervisor.execute(request)
+    }
+
+    override fun cancel(requestId: String): Boolean =
+        supervisedRunner?.cancel(requestId) ?: groupRunner.cancel(requestId)
+
+    override fun terminateAll(deadlineMs: Long): Set<String> =
+        supervisedRunner?.terminateAll(deadlineMs) ?: groupRunner.terminateAll(deadlineMs)
+
+    override fun activeRequestIds(): Set<String> =
+        supervisedRunner?.activeRequestIds() ?: groupRunner.activeRequestIds()
+
+    override fun unconfirmedRequestIds(): Set<String> =
+        supervisedRunner?.unconfirmedRequestIds() ?: groupRunner.unconfirmedRequestIds()
 }

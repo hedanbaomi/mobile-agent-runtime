@@ -102,10 +102,12 @@
     <string name="trpg_agent_mode_badge" formatted="false">TRPG</string>
     <string name="trpg_agent_summary_mode">Mode: %1$s</string>
     <string name="root_workspace_title" formatted="false">Authorize a Root workspace</string>
-    <string name="root_workspace_notice" formatted="false">Authorize this directory only. Device paths stay on this device; tools use relative paths. Start a new chat to use new grants. Each call still needs approval.</string>
+    <string name="root_workspace_notice" formatted="false">Authorize this directory only. Device paths stay on this device; tools use relative paths. Start a new chat to use new grants. Read-only calls follow your tool confirmation setting; writes and Shell still need approval.</string>
     <string name="root_workspace_path" formatted="false">Absolute device path</string>
     <string name="root_workspace_write" formatted="false">Allow write, create, move and delete in supported directories</string>
     <string name="root_workspace_metadata" formatted="false">Read permissions, ownership and SELinux labels; change permissions and ownership when write is enabled</string>
-    <string name="root_workspace_shell" formatted="false">Allow Root Shell for this workspace (also requires channel Shell consent and Dangerous Mode)</string>
+    <string name="root_workspace_shell" formatted="false">Allow Root Shell for this workspace (also requires channel Shell consent)</string>
+    <string name="root_workspace_attach" formatted="false">Attach Root directory</string>
+    <string name="root_workspace_only">This Agent uses Root workspaces: %1$s. Their permissions are set when attaching each directory.</string>
     <string name="root_workspace_confirm" formatted="false">Confirm directory and selected permissions</string>
 </resources>

@@ -114,7 +114,7 @@ class RootAuthorityTest {
         assertEquals(RootAccessDenial.ROOT_SHELL_CONSENT_REQUIRED, denial(shell = true, current = consent().copy(shellEnabled = false)))
         assertEquals(RootAccessDenial.ROOT_SHELL_CONSENT_REQUIRED, denial(shell = true, frozen = stamp().copy(shellConsentRevision = 0)))
         assertEquals(RootAccessDenial.ROOT_SHELL_CONSENT_REQUIRED, denial(shell = true, current = consent().copy(shellRevision = 4)))
-        assertEquals(RootAccessDenial.DANGEROUS_MODE_DISABLED, denial(shell = true, mode = DangerousMode.DISABLED))
+        assertNull(denial(shell = true, mode = DangerousMode.DISABLED), "Explicit Root Shell consent is independent of the ADB dangerous-mode toggle")
         assertNull(denial(shell = true, mode = DangerousMode.ENABLED_CONFIRM_HIGH_RISK))
         assertNull(denial(shell = true, mode = DangerousMode.ENABLED_AUTONOMOUS))
     }

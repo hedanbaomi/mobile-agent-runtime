@@ -5,7 +5,6 @@ package runtime.mobileagent.data
 
 import runtime.mobileagent.domain.Authority
 import runtime.mobileagent.domain.CapabilityId
-import runtime.mobileagent.domain.DangerousMode
 import runtime.mobileagent.domain.GrantLifetime
 import runtime.mobileagent.domain.PrivilegeTier
 import runtime.mobileagent.domain.RootApprovalTools
@@ -45,14 +44,14 @@ data class RootToolExposureSnapshot(
  *    - Active, readable (and writable for mutation tools) `PRIVILEGED` workspace with valid
  *      `RootWorkspaceOrigin` and attached encrypted `RootWorkspaceLocator`
  *    - Unrevoked, unconsumed, unexpired `RootSnapshotGrantBinding` in the frozen [snapshotId]
- * 2. Root `shell_exec` is exposed ONLY when all 5 gates hold simultaneously:
+ * 2. Root `shell_exec` additionally requires the channel's independent shell consent and grant:
  *    - Selected Root authority (`ROOT_DIRECT` or `SHIZUKU_ROOT`)
  *    - Verified `PrivilegeTier.ROOT` (`serviceUid == 0`)
  *    - `rootConsent.enabled == true` with matching `consentRevision`
  *    - `rootConsent.shellEnabled == true` with matching `shellConsentRevision > 0`
- *    - `AuthorityPolicy.dangerousMode != DangerousMode.DISABLED` AND a valid `shell.execute`
+ *    - A valid `shell.execute`
  *      `RootSnapshotGrantBinding` on a writable Root workspace in [snapshotId].
- * 3. Toggling consent or `DangerousMode` OFF and back ON advances revisions, so a frozen
+ * 3. Consent edits and the global policy CAS advance revisions, so a frozen
  *    [RootExecutionStamp] or old [snapshotId] can never resurrect exposure.
  */
 class RootToolExposureGate(
@@ -78,8 +77,7 @@ class RootToolExposureGate(
         }
         val shellFiveWayReady = state.consent.shellEnabled &&
             execution.shellConsentRevision > 0L &&
-            state.consent.shellRevision == execution.shellConsentRevision &&
-            policy.dangerousMode != DangerousMode.DISABLED
+            state.consent.shellRevision == execution.shellConsentRevision
 
         val snapshotRepo = RootSnapshotGrantRepository(db, clock)
         val workspaceRepo = WorkspaceRepository(db)

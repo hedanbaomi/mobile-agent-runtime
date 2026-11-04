@@ -12,4 +12,12 @@
     <string name="database_recovery_failed">Could not complete recovery. Your saved data was kept.</string>
     <string name="host_initializing">Initializing local data…</string>
     <string name="host_initialization_failed">Local data could not be initialized. Reopen the app; existing data is retained.</string>
+    <string name="root_recovery_restart_required">Previous Root work has not finished shutting down. Restart the device, then enable the Root channel again to recover. The previous command will not be retried.</string>
+    <string name="root_permission_update_failed">Permission status was not updated: %1$s</string>
+    <string name="root_permission_update_retry">Please refresh and try again.</string>
+    <string name="root_shizuku_state_unknown">Shizuku status could not be confirmed. Please try again.</string>
+    <string name="root_shizuku_not_running">Start Shizuku before requesting access.</string>
+    <string name="root_shizuku_uid_not_root">Shizuku is running without Root. Start Shizuku as Root, then enable this channel.</string>
+    <string name="root_shizuku_version_unsupported">This Shizuku version is unsupported. Update to version 13 or later.</string>
+    <string name="root_shizuku_permission_rejected">The Shizuku permission request was not accepted. Open Shizuku and check this app’s permission.</string>
 </resources>

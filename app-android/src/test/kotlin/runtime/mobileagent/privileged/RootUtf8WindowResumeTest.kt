@@ -93,7 +93,45 @@ class RootUtf8WindowResumeTest {
     @Test
     fun jsonEscapingStillObeysOutputBudget() {
         Fixture(ByteArray(RootExecutionBudget.MAX_OUTPUT_BYTES) { 0 }).use { f ->
-            assertEquals("result_exceeds_budget", f.read(0, RootExecutionBudget.MAX_OUTPUT_BYTES).errorReason)
+            var offset = 0L
+            do {
+                val response = f.read(offset, RootExecutionBudget.MAX_OUTPUT_BYTES)
+                assertEquals(RootServiceTerminalOutcome.SUCCEEDED, response.terminalOutcome)
+                val encoded = RootPrivilegedServiceEngine.json.encodeToString(RootServiceExecuteResponse.serializer(), response)
+                assertTrue(encoded.toByteArray().size <= RootExecutionBudget.MAX_OUTPUT_BYTES)
+                val body = Json.parseToJsonElement(response.fileResultJson!!).jsonObject
+                val text = body.getValue("text").jsonPrimitive.content
+                assertTrue(text.all { it == '\u0000' })
+                val next = body.getValue("next_offset_bytes").jsonPrimitive.long
+                assertTrue(next > offset)
+                assertEquals(text.toByteArray().size.toLong(), next - offset)
+                offset = next
+            } while (!body.getValue("eof").jsonPrimitive.boolean)
+            assertEquals(RootExecutionBudget.MAX_OUTPUT_BYTES.toLong(), offset)
+        }
+    }
+
+    @Test
+    fun outerJsonBudgetPreservesUnicodeAndEscapedPageOffsets() {
+        val text = "中😀\\\"\n".repeat(1000)
+        val bytes = text.toByteArray()
+        Fixture(bytes).use { f ->
+            var offset = 0L
+            val recovered = StringBuilder()
+            while (offset < bytes.size) {
+                val response = f.read(offset, RootExecutionBudget.MAX_OUTPUT_BYTES, 2048)
+                assertEquals(RootServiceTerminalOutcome.SUCCEEDED, response.terminalOutcome)
+                assertTrue(RootPrivilegedServiceEngine.json.encodeToString(RootServiceExecuteResponse.serializer(), response).toByteArray().size <= 2048)
+                val body = Json.parseToJsonElement(response.fileResultJson!!).jsonObject
+                val page = body.getValue("text").jsonPrimitive.content
+                recovered.append(page)
+                val next = body.getValue("next_offset_bytes").jsonPrimitive.long
+                assertEquals(page.toByteArray().size.toLong(), next - offset)
+                assertEquals(next == bytes.size.toLong(), body.getValue("eof").jsonPrimitive.boolean)
+                assertTrue(next > offset)
+                offset = next
+            }
+            assertEquals(text, recovered.toString())
         }
     }
 
@@ -119,8 +157,8 @@ class RootUtf8WindowResumeTest {
             executor = RootWorkspaceFileExecutor(rootIdentity, control, driver)
         }
 
-        fun read(offset: Long, maxBytes: Int) = RootServiceFileDispatch.execute(
-            executor, RootTypedArguments.FileReadText("ws", "text", offset, maxBytes), status, ByteArray(0),
+        fun read(offset: Long, maxBytes: Int, outputBudget: Int = RootExecutionBudget.MAX_OUTPUT_BYTES) = RootServiceFileDispatch.execute(
+            executor, RootTypedArguments.FileReadText("ws", "text", offset, maxBytes), status, ByteArray(0), outputBudget,
         )
 
         override fun close() = driver.close()

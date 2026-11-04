@@ -420,8 +420,6 @@ internal object RootPathGuards {
 }
 
 internal object RootControlJson {
-    private data class Frame(val keys: MutableSet<String>?, var expectingKey: Boolean = true)
-
     val codec = kotlinx.serialization.json.Json {
         encodeDefaults = true
         explicitNulls = true
@@ -442,45 +440,7 @@ internal object RootControlJson {
         return codec.decodeFromString(RootTypedArguments.serializer(), rawJson)
     }
 
-    fun requireStrictJsonObject(text: String, maxBytes: Int, maxDepth: Int, maxNodes: Int) {
-        val utf8 = text.toByteArray(Charsets.UTF_8)
-        require(utf8.size in 2..maxBytes && !text.contains('\u0000')) { "JSON size or content is invalid" }
-        val stack = mutableListOf<Frame>()
-        var i = 0
-        var nodes = 0
-        var sawRootObject = false
-        while (i < text.length) {
-            when (val ch = text[i]) {
-                '{', '[' -> {
-                    if (stack.isEmpty()) sawRootObject = (ch == '{')
-                    require(stack.size < maxDepth && ++nodes <= maxNodes) { "JSON exceeds structure budget" }
-                    stack += Frame(if (ch == '{') hashSetOf() else null)
-                }
-                '}', ']' -> {
-                    require(stack.isNotEmpty()) { "Unbalanced JSON closing token" }
-                    stack.removeAt(stack.lastIndex)
-                }
-                ',' -> {
-                    stack.lastOrNull()?.let { if (it.keys != null) it.expectingKey = true }
-                    require(++nodes <= maxNodes) { "JSON exceeds node budget" }
-                }
-                '"' -> {
-                    val start = i++
-                    while (i < text.length && text[i] != '"') {
-                        if (text[i] == '\\') i++
-                        i++
-                    }
-                    require(i < text.length) { "Unterminated JSON string" }
-                    val frame = stack.lastOrNull()
-                    if (frame?.keys != null && frame.expectingKey) {
-                        val key = codec.decodeFromString(kotlinx.serialization.serializer<String>(), text.substring(start, i + 1))
-                        require(frame.keys.add(key)) { "Duplicate JSON object key" }
-                        frame.expectingKey = false
-                    }
-                }
-            }
-            i++
-        }
-        require(sawRootObject && stack.isEmpty()) { "JSON root must be a balanced object" }
-    }
+    fun requireStrictJsonObject(text: String, maxBytes: Int, maxDepth: Int, maxNodes: Int) =
+        BoundedJson.requireStrictJsonObject(text, maxBytes, maxDepth, maxNodes)
+
 }

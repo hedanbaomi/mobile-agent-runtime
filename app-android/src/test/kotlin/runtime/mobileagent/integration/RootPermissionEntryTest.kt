@@ -23,9 +23,9 @@ class RootPermissionEntryTest {
     private fun facts(
         binder: Boolean = true,
         permission: Boolean = false,
-        uid: Int? = 0,
-        version: Int? = 13,
-        preV11: Boolean = false,
+        uid: Int? = if (permission) 0 else null,
+        version: Int? = if (permission) 13 else null,
+        preV11: Boolean = version == null,
     ) = RootShizukuLiveFacts(
         binderAlive = binder,
         preV11 = preV11,
@@ -93,6 +93,21 @@ class RootPermissionEntryTest {
     }
 
     @Test
+    fun grantedPermissionWithUnknownUidStillCannotBecomeRootReady() {
+        val recorder = Recorder()
+        for (observed in listOf(facts(permission = true, uid = null), facts(permission = true, version = null))) {
+            assertFalse(RootPermissionEntry.platformReady(observed))
+            val failure = assertThrows(IllegalStateException::class.java) {
+                RootPermissionEntry.request({ observed }, { recorder.refreshes.incrementAndGet() },
+                    { recorder.requests.incrementAndGet(); true })
+            }
+            assertEquals("ROOT_SHIZUKU_STATE_UNKNOWN", failure.message)
+        }
+        assertEquals(0, recorder.requests.get())
+        assertEquals(0, recorder.refreshes.get())
+    }
+
+    @Test
     fun shellUidServerIsReportedAsStartShizukuAsRootNotAsMissingPermission() {
         val recorder = Recorder()
         val failure = assertThrows(IllegalStateException::class.java) {
@@ -102,7 +117,7 @@ class RootPermissionEntryTest {
                 requester = { recorder.requests.incrementAndGet(); true },
             )
         }
-        assertTrue(failure.message.orEmpty().contains("Root"), "must guide the user to start Shizuku as Root")
+        assertEquals("ROOT_SHIZUKU_UID_NOT_ROOT", failure.message, "Settings maps the stable code to a localized Root-start instruction")
         assertEquals(0, recorder.requests.get())
     }
 
@@ -114,6 +129,18 @@ class RootPermissionEntryTest {
         assertFalse(RootPermissionEntry.platformReady(facts(permission = true, uid = 0, version = null)))
         assertFalse(RootPermissionEntry.platformReady(facts(binder = false)))
         assertFalse(RootPermissionEntry.platformReady(null))
+    }
+
+    @Test
+    fun knownUnsupportedVersionCannotRequestOrRefreshRootEntry() {
+        val recorder = Recorder()
+        val failure = assertThrows(IllegalStateException::class.java) {
+            RootPermissionEntry.request({ facts(version = 12) }, { recorder.refreshes.incrementAndGet() },
+                { recorder.requests.incrementAndGet(); true })
+        }
+        assertEquals("ROOT_SHIZUKU_VERSION_UNSUPPORTED", failure.message)
+        assertEquals(0, recorder.requests.get())
+        assertEquals(0, recorder.refreshes.get())
     }
 
     @Test

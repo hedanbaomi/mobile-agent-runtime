@@ -8,12 +8,15 @@ import kotlinx.coroutines.runInterruptible
 import kotlinx.serialization.json.*
 import runtime.mobileagent.data.RootToolExposureGate
 import runtime.mobileagent.data.SqlConnection
+import runtime.mobileagent.data.WorkspaceRepository
 import runtime.mobileagent.domain.*
 import runtime.mobileagent.skills.ResultDisclosure
 import runtime.mobileagent.skills.ToolResult
 import runtime.mobileagent.skills.tooling.ToolError
 import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.tooling.ToolExecutionContext
+import runtime.mobileagent.tooling.AgentWorkspaceView
+import runtime.mobileagent.tooling.OperationScopeView
 
 /** Run-owned adapter. Only an explicit approval of the original durable invocation may dispatch. */
 class RootRuntimeToolBackend(
@@ -53,6 +56,36 @@ class RootRuntimeToolBackend(
             RootToolExposure(it.toolName, it.capability, it.workspaceId, it.grantId, it.pathScope, it.writableWorkspace)
         }
     }
+
+    override fun workspaceViews(): List<AgentWorkspaceView> = exposedTools().groupBy { it.workspaceId }
+        .mapNotNull { (id, bindings) ->
+            val workspace = WorkspaceRepository(db).get(id)?.takeIf { it.enabled } ?: return@mapNotNull null
+            val operations = bindings.map { it.toolName }.distinct().sorted()
+            AgentWorkspaceView(
+                id = id, displayName = workspace.displayName, enabled = true,
+                workspaceScope = if (workspace.scope == WorkspaceScope.FULL_DEVICE_FILES) "full_device_files" else "selected_directory",
+                readable = bindings.any { !RootApprovalTools.requiresWritableWorkspace(it.capability) },
+                writable = bindings.any { RootApprovalTools.requiresWritableWorkspace(it.capability) },
+                // Root does not promise workspace-wide conditional replacement on mixed ownership paths.
+                atomicReplace = false, createOnlyOperations = emptyList(), authorizedOperations = operations,
+                expectedVersionOperations = operations.filter { it == "file_set_metadata" },
+                conditionalExpectedVersionOperations = operations.filter { it in setOf("file_write_text", "file_apply_patch") },
+                operationConditions = operations.filter { it in setOf("file_write_text", "file_apply_patch", "file_move") }.associateWith {
+                    when (it) {
+                        "file_apply_patch" -> "requires_uid0_exclusive_parent_chain; app_private_paths_return_WORKSPACE_VERSION_UNSUPPORTED"
+                        "file_move" -> "no_replace_and_all_directory_moves_require_kernel_atomic_no_replace_rename; emulated_storage_may_reject_these_moves; replace_existing_true_supports_regular_file_entry_replace_only; no_non_atomic_fallback"
+                        else -> "expected_version_requires_uid0_exclusive_parent_chain; emulated_storage_uses_non_atomic_fd_write_and_filesystem_default_create_permissions; app_private_paths_allow_unconditional_replace_only"
+                    }
+                },
+                patchFormats = if ("file_apply_patch" in operations) listOf("unified_diff", "search_replace") else emptyList(),
+                operationScopes = bindings.groupBy { it.toolName }.mapValues { (_, scopes) ->
+                    OperationScopeView(scopes.any { it.pathScope.isNullOrEmpty() }, scopes.mapNotNull { it.pathScope?.takeIf(String::isNotEmpty) }.distinct().sorted())
+                },
+            )
+        }.sortedBy { it.id }
+
+    override fun acceptsDiscoveryContext(snapshotId: String, agentId: String): Boolean =
+        snapshotId == context.snapshotId && agentId == context.agentId && execution?.let(::live) == true
 
     override suspend fun invoke(invocation: RootToolInvocation): ToolResult {
         if (!matchesContext(invocation) || !currentlyExposed(invocation)) return denied()
@@ -184,19 +217,30 @@ class RootRuntimeToolBackend(
         if (response.requiresDegradedEpoch || response.terminalOutcome == RootServiceTerminalOutcome.UNKNOWN_OUTCOME) {
             return ToolResult.UnknownOutcome("Root operation outcome is unknown; user acknowledgement is required")
         }
-        if (response.terminalOutcome != RootServiceTerminalOutcome.SUCCEEDED) {
-            return ToolResult.Failure(RootBridgeErrorCode.fromExecuteFailure(response))
+        if (response.terminalOutcome == RootServiceTerminalOutcome.CANCELLED) {
+            return ToolResult.Failure(ToolError(ToolErrorCode.SHELL_CANCELLED, "Root invocation was cancelled; output withheld"))
         }
-        response.fileResultJson?.let { return ToolResult.Value(it) }
-        response.shellOutcome?.let { shell ->
+        // A settled nonzero command exit is an observed shell result, not a transport failure.
+        // Only disclose a complete command result; pre-execution failures and cancellation
+        // keep their typed failure/unknown semantics below.
+        response.shellOutcome?.takeIf {
+            response.errorReason == null && it.exitCode != null && !it.timedOut && !it.cancelled &&
+                !it.requiresDegradedEpoch && it.terminalOutcomeName == response.terminalOutcome?.name &&
+                response.terminalOutcome in setOf(RootServiceTerminalOutcome.SUCCEEDED, RootServiceTerminalOutcome.FAILED)
+        }?.let { shell ->
             return ToolResult.Value(buildJsonObject {
                 put("status", shell.statusName)
+                put("success", shell.exitCode == 0)
                 shell.exitCode?.let { put("exit_code", it) }
                 put("stdout", shell.stdout); put("stderr", shell.stderr)
                 put("stdout_truncated", shell.stdoutTruncated); put("stderr_truncated", shell.stderrTruncated)
                 put("timed_out", shell.timedOut); put("cancelled", shell.cancelled)
             }.toString())
         }
+        if (response.terminalOutcome != RootServiceTerminalOutcome.SUCCEEDED) {
+            return ToolResult.Failure(RootBridgeErrorCode.fromExecuteFailure(response))
+        }
+        response.fileResultJson?.let { return ToolResult.Value(it) }
         return ToolResult.Failure(ToolError(ToolErrorCode.OPERATION_UNAVAILABLE))
     }
 

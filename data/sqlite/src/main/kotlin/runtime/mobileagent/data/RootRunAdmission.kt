@@ -3,6 +3,10 @@
 
 package runtime.mobileagent.data
 
+import runtime.mobileagent.domain.AppError
+import runtime.mobileagent.domain.ErrorCode
+import runtime.mobileagent.domain.RetryClass
+
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import runtime.mobileagent.domain.Authority
@@ -111,18 +115,20 @@ class RootRunAdmission(
     ): RunRecord = when (val target = resolveRunTarget(record.conversationId, record.snapshotId)) {
         RootRunTarget.None -> RunRepository(db, clock).create(record)
         is RootRunTarget.Bound -> {
-            require(selectedAuthority == target.authority) {
-                "Root workspace requires ${target.authority} to be selected"
-            }
-            val execution = requireNotNull(resolveExecution(target.authority)) {
-                "Selected Root authority has no verified active session"
-            }
+            if (selectedAuthority != target.authority) throw unavailable(record.runId)
+            val execution = resolveExecution(target.authority) ?: throw unavailable(record.runId)
             create(record, execution)
         }
         RootRunTarget.Invalid -> {
             throw IllegalArgumentException("Root workspace or snapshot binding is invalid")
         }
     }
+
+    private fun unavailable(runId: String) = AppError(
+        ErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE,
+        "The selected Root channel is unavailable. Reconnect it before sending.",
+        RetryClass.USER_ACTION, "root-admission", runId,
+    ).asException()
 
     fun create(record: RunRecord, execution: RootExecutionStamp): RunRecord = db.transaction {
         require(record.state == RunStatus.CREATED) { "Root admission requires a new Run" }

@@ -33,6 +33,34 @@ import runtime.mobileagent.skills.tooling.ToolResultBudget
 
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class ReadBatchToolExecutorTest {
+    @Test
+    fun exactChildAuthorityPredicateDoesNotTurnASharedToolNameIntoBlanketApproval() = runTest {
+        val delegate = FakeBatchDelegate(listOf(ToolSpec("read_doc", "read", "{}", "", false)))
+        val executor = ReadBatchToolExecutor(delegate, { true }, { true }, { it }, setOf("read_doc"),
+            approvalRequiredForCall = { call ->
+                Json.parseToJsonElement(call.argumentsJson).jsonObject["workspace_id"]?.jsonPrimitive?.content == "root-id"
+            })
+        fun call(id: String, workspace: String) = ToolCall(id, "read_batch",
+            """{"calls":[{"call_id":"child-$id","tool":"read_doc","arguments":{"workspace_id":"$workspace"}}]}""")
+        assertTrue(executor.invoke(call("ordinary", "internal-id")) is ToolResult.Value)
+        assertEquals(1, delegate.dispatched.size)
+        assertEquals(ToolResult.NeedsApproval, executor.invoke(call("root", "root-id")))
+        assertEquals(1, delegate.dispatched.size)
+        assertTrue(executor.approve("root") is ToolResult.Value)
+        assertEquals(2, delegate.dispatched.size)
+        executor.close()
+    }
+
+    @Test
+    fun failedAuthorityPredicateRequiresApprovalBeforeAnyChildDispatch() = runTest {
+        val delegate = FakeBatchDelegate(listOf(ToolSpec("read_doc", "read", "{}", "", false)))
+        val executor = ReadBatchToolExecutor(delegate, { true }, { true }, { it }, setOf("read_doc"),
+            approvalRequiredForCall = { error("authority fact unavailable") })
+        assertEquals(ToolResult.NeedsApproval, executor.invoke(ToolCall("predicate-failure", "read_batch", batch("child" to "read_doc"))))
+        assertTrue(delegate.dispatched.isEmpty())
+        executor.close()
+    }
+
     private val specs = listOf(
         ToolSpec("kb_search", "search", """{"type":"object"}""", "", false),
         ToolSpec("read_doc", "read", """{"type":"object"}""", "", false),

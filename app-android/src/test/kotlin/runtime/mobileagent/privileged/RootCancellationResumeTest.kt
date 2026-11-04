@@ -26,8 +26,29 @@ import runtime.mobileagent.skills.ResultDisclosure
 import runtime.mobileagent.skills.ToolCall
 import runtime.mobileagent.skills.ToolResult
 import runtime.mobileagent.skills.tooling.ToolInvocation
+import runtime.mobileagent.skills.tooling.ToolExecution
 
 class RootCancellationResumeTest {
+    @Test
+    fun legacyObservationRetainsTheOriginalTypedReservationAndAuthorizationContext() = runBlocking {
+        IndependentRemoteBackend().use { backend ->
+            val executor = executor(backend)
+            val typed = invocation()
+            backend.releaseRemote.countDown()
+            assertTrue(executor.invoke(typed) is ToolExecution.Value)
+            val call = ToolCall(typed.requestId, typed.name, typed.argumentsJson)
+            assertTrue(executor.invoke(call) is ToolResult.Value)
+            val original = backend.disclosedInvocations.single()
+            assertEquals(typed.requestId, original.runtimeInvocationId)
+            assertEquals(typed.callId, original.modelCallId)
+            assertEquals(typed.snapshotId, original.snapshotId)
+            assertEquals(typed.agentId, original.agentId)
+            assertTrue(executor.invoke(call.copy(argumentsJson = """{"workspace_id":"root-ws","relative_path":"different"}""")) is ToolResult.Invalid)
+            assertTrue(executor.invoke(typed) is ToolExecution.Value)
+            assertEquals(1, backend.dispatches.get())
+        }
+    }
+
     @Test
     fun closeBetweenCancellationSettlementAndDeliveryRetainsOriginalResponsibility() = runBlocking {
         IndependentRemoteBackend().use { backend ->
@@ -73,6 +94,8 @@ class RootCancellationResumeTest {
                     "Interrupting the Host waiter must explicitly cancel the independent remote")
                 assertTrue(backend.remoteStopped.await(5, TimeUnit.SECONDS))
                 assertTrue(executor.invoke(call) is ToolResult.UnknownOutcome)
+                assertTrue(executor.invoke(call.copy(argumentsJson = """{"workspace_id":"root-ws","relative_path":"different"}""")) is ToolResult.Invalid,
+                    "Cancellation tombstones do not authorize a changed canonical request")
                 assertFalse(executor.authorizeReplay(call))
                 assertFalse(executor.authorizeDeferredResult(call))
                 assertFalse(executor.cancel(invocation.callId))
@@ -322,6 +345,7 @@ private class IndependentRemoteBackend(private val needsApproval: Boolean = fals
     val remoteStopped = CountDownLatch(1)
     val dispatches = AtomicInteger()
     val disclosures = AtomicInteger()
+    val disclosedInvocations = CopyOnWriteArrayList<RootToolInvocation>()
     val cancels = CopyOnWriteArrayList<String>()
     val approvals = CopyOnWriteArrayList<String>()
     val cancelStarted = CompletableDeferred<Unit>()
@@ -358,6 +382,7 @@ private class IndependentRemoteBackend(private val needsApproval: Boolean = fals
 
     override suspend fun authorizeDisclosure(invocation: RootToolInvocation, disclosure: ResultDisclosure): Boolean {
         disclosures.incrementAndGet()
+        disclosedInvocations += invocation
         return true
     }
 

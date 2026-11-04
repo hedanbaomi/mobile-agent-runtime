@@ -6,7 +6,9 @@ package runtime.mobileagent.privileged
 import java.nio.ByteBuffer
 import java.nio.CharBuffer
 import java.nio.charset.CodingErrorAction
-import kotlinx.serialization.json.*
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import runtime.mobileagent.domain.*
 
 /** Closed file protocol dispatch. No typed file operation is translated into a shell command. */
@@ -16,6 +18,7 @@ internal object RootServiceFileDispatch {
         args: RootTypedArguments,
         acceptedStatus: RootControlStatusSnapshot,
         payloadBytes: ByteArray,
+        maxOutputBytes: Int = RootExecutionBudget.MAX_OUTPUT_BYTES,
     ): RootServiceExecuteResponse {
         val result: RootFileOperationResult<*> = when {
             executor == null -> RootFileOperationResult.Rejected(RootConfinementRejection.STAGED_HANDLE_INVALID, "workspace_unbound")
@@ -36,7 +39,7 @@ internal object RootServiceFileDispatch {
             }
         }
         return when (result) {
-            is RootFileOperationResult.Succeeded -> success(acceptedStatus, result.value, args.toolName)
+            is RootFileOperationResult.Succeeded -> success(acceptedStatus, result.value, args.toolName, maxOutputBytes)
             is RootFileOperationResult.PostMutationFailure -> RootServiceExecuteResponse(
                 "ACCEPTED", acceptedStatus, terminalOutcome = result.terminalOutcome,
                 requiresDegradedEpoch = result.requiresDegradedEpoch,
@@ -52,82 +55,165 @@ internal object RootServiceFileDispatch {
         }
     }
 
-    private fun success(status: RootControlStatusSnapshot, value: Any?, tool: String): RootServiceExecuteResponse {
-        val body = when (value) {
-            is RootFileMetadataSnapshot -> metadata(value, includePrivileged = tool != "file_stat")
-            is RootDirectoryListing -> listing(value)
-            is RootGlobSearchResult -> globListing(value)
-            is RootFileReadResult -> read(value).let { it.body ?: return failure(status, it.error) }
-            is RootGrepSearchResult -> grepListing(value)
-            is RootDeletedEntry -> buildJsonObject {
-                put("workspace_id", value.workspaceId); put("path", value.relativePath); put("deleted", true)
+    private fun success(status: RootControlStatusSnapshot, value: Any?, tool: String, maxOutputBytes: Int): RootServiceExecuteResponse {
+        val budget = maxOutputBytes.coerceIn(1, RootExecutionBudget.MAX_OUTPUT_BYTES)
+        return when (value) {
+            is RootFileMetadataSnapshot -> boundedMetadata(status, value, includePrivileged = tool != "file_stat", budget)
+            is RootDirectoryListing -> boundedListing(status, value, budget)
+            is RootGlobSearchResult -> boundedGlob(status, value, budget)
+            is RootFileReadResult -> read(value, status, budget).let { window ->
+                window.body?.let { response(status, it) } ?: failure(status, window.error)
             }
-            is RootMovedEntry -> buildJsonObject {
-                put("workspace_id", value.workspaceId); put("source_path", value.sourceRelativePath)
-                put("destination_path", value.destinationRelativePath); put("stat", metadata(value.snapshot, false))
-            }
-            else -> return failure(status, "unsupported_result")
-        }.toString()
-        // JSON escaping may multiply the raw content size. Never emit an oversized control frame.
-        if (body.toByteArray(Charsets.UTF_8).size > RootExecutionBudget.MAX_OUTPUT_BYTES) {
-            return failure(status, "result_exceeds_budget")
+            is RootGrepSearchResult -> boundedGrep(status, value, budget)
+            is RootDeletedEntry -> single(status, RootModelResultProjection.deleted(value), null, budget)
+            is RootMovedEntry -> single(status, RootModelResultProjection.moved(value), null, budget)
+            else -> failure(status, "unsupported_result")
         }
-        return RootServiceExecuteResponse(
-            "ACCEPTED", status, terminalOutcome = RootServiceTerminalOutcome.SUCCEEDED,
-            resultSha256 = RootPrivilegedServiceEngine.sha256Hex(body), fileResultJson = body,
-            fileSnapshot = value as? RootFileMetadataSnapshot,
+    }
+
+    private fun boundedMetadata(
+        status: RootControlStatusSnapshot,
+        value: RootFileMetadataSnapshot,
+        includePrivileged: Boolean,
+        maxOutputBytes: Int,
+    ): RootServiceExecuteResponse {
+        val full = response(status, RootModelResultProjection.metadata(value, includePrivileged), value)
+        // file_get_metadata requests these attributes; dropping them cannot be a successful read.
+        return if (fits(full, maxOutputBytes)) full else failure(status, "result_exceeds_budget")
+    }
+
+    private fun boundedListing(
+        status: RootControlStatusSnapshot,
+        value: RootDirectoryListing,
+        maxOutputBytes: Int,
+    ): RootServiceExecuteResponse {
+        val total = value.entries.size
+        if (total == 0) {
+            return accept(status, RootModelResultProjection.listing(value, emptyList(), value.truncated, value.nextCursor, listReasons(value, 0)), maxOutputBytes)
+                ?: failure(status, "result_exceeds_budget")
+        }
+        var low = 1
+        var high = total
+        var best: JsonObject? = null
+        while (low <= high) {
+            val count = low + (high - low) / 2
+            val body = listingBody(value, count)
+            if (fits(response(status, body), maxOutputBytes)) {
+                best = body
+                low = count + 1
+            } else {
+                high = count - 1
+            }
+        }
+        return best?.let { response(status, it) } ?: failure(status, "result_exceeds_budget")
+    }
+
+    private fun listingBody(value: RootDirectoryListing, count: Int): JsonObject {
+        val rendered = value.entries.take(count)
+        val dropped = rendered.size < value.entries.size
+        // A cursor must name the last entry actually returned; using the
+        // original cursor would skip every entry between the two.
+        val nextCursor = if (dropped) rendered.last().name else value.nextCursor
+        return RootModelResultProjection.listing(
+            value,
+            rendered,
+            value.truncated || dropped,
+            nextCursor,
+            listReasons(value, count),
         )
     }
 
-    private fun metadata(value: RootFileMetadataSnapshot, includePrivileged: Boolean) = buildJsonObject {
-        put("workspace_id", value.workspaceId); put("path", value.relativePath)
-        put("type", value.entryKind.name.lowercase()); put("size_bytes", value.sizeBytes); put("version", value.version)
-        if (includePrivileged) {
-            put("mode_octal", value.modeOctal.toString(8)); put("owner_uid", value.ownerUid); put("owner_gid", value.ownerGid)
-            value.selinuxLabel?.let { put("selinux_label", it) }; put("hardlink_count", value.hardlinkCount)
-            put("device_id", value.deviceId); put("inode", value.inode); put("mount_id", value.mountId)
+    private fun listReasons(value: RootDirectoryListing, count: Int): List<String> = buildList {
+        if (value.truncated) add(RootModelResultProjection.PAGE_LIMIT_REASON)
+        if (count < value.entries.size) add(RootModelResultProjection.RESULT_BYTES_REASON)
+    }
+
+    private fun boundedGlob(
+        status: RootControlStatusSnapshot,
+        value: RootGlobSearchResult,
+        maxOutputBytes: Int,
+    ): RootServiceExecuteResponse {
+        val total = value.matches.size
+        var low = 0
+        var high = total
+        var best: JsonObject? = null
+        while (low <= high) {
+            val count = low + (high - low) / 2
+            val rendered = value.matches.take(count)
+            val dropped = rendered.size < total
+            val reasons = if (dropped) value.truncationReasons + RootModelResultProjection.RESULT_BYTES_REASON else value.truncationReasons
+            val body = RootModelResultProjection.glob(value, rendered, value.truncated || dropped, reasons)
+            if (fits(response(status, body), maxOutputBytes)) {
+                best = body
+                low = count + 1
+            } else {
+                high = count - 1
+            }
         }
+        return best?.let { response(status, it) } ?: failure(status, "result_exceeds_budget")
     }
 
-    private fun listing(value: RootDirectoryListing) = buildJsonObject {
-        put("workspace_id", value.workspaceId); put("path", value.relativePath)
-        put("entries", buildJsonArray { value.entries.forEach { entry -> add(buildJsonObject {
-            put("name", entry.name); put("path", entry.relativePath)
-            put("type", entry.entryKind.name.lowercase()); put("size_bytes", entry.sizeBytes)
-            entry.version?.let { put("version", it) }
-        }) } })
-        put("truncated", value.truncated); put("skipped_special_entries", value.skippedSpecialEntries)
-        value.nextCursor?.let { put("next_cursor", it) }
+    private fun boundedGrep(
+        status: RootControlStatusSnapshot,
+        value: RootGrepSearchResult,
+        maxOutputBytes: Int,
+    ): RootServiceExecuteResponse {
+        val total = value.matches.size
+        var low = 0
+        var high = total
+        var best: JsonObject? = null
+        while (low <= high) {
+            val count = low + (high - low) / 2
+            val rendered = value.matches.take(count)
+            val dropped = rendered.size < total
+            val reasons = if (dropped) value.truncationReasons + RootModelResultProjection.RESULT_BYTES_REASON else value.truncationReasons
+            val body = RootModelResultProjection.grep(value, rendered, value.truncated || dropped, reasons)
+            if (fits(response(status, body), maxOutputBytes)) {
+                best = body
+                low = count + 1
+            } else {
+                high = count - 1
+            }
+        }
+        return best?.let { response(status, it) } ?: failure(status, "result_exceeds_budget")
     }
 
-    private fun globListing(value: RootGlobSearchResult) = buildJsonObject {
-        put("workspace_id", value.workspaceId); put("path", value.root); put("pattern", value.pattern)
-        put("entries", buildJsonArray { value.matches.forEach { entry -> add(buildJsonObject {
-            put("path", entry.relativePath); put("type", entry.entryKind.name.lowercase())
-            put("size_bytes", entry.sizeBytes); put("depth", entry.depth)
-        }) } })
-        put("truncated", value.truncated)
-        put("truncation_reasons", buildJsonArray { value.truncationReasons.forEach { add(JsonPrimitive(it)) } })
-        put("scanned_entries", value.counters.entries); put("scanned_files", value.counters.files)
-        put("skipped_entries", value.counters.skippedEntries)
+    private fun accept(
+        status: RootControlStatusSnapshot,
+        body: JsonObject,
+        maxOutputBytes: Int,
+    ): RootServiceExecuteResponse? {
+        val response = response(status, body)
+        return response.takeIf { fits(it, maxOutputBytes) }
     }
 
-    private fun grepListing(value: RootGrepSearchResult) = buildJsonObject {
-        put("workspace_id", value.workspaceId); put("path", value.root); put("query", value.query)
-        put("case_sensitive", value.caseSensitive)
-        put("matches", buildJsonArray { value.matches.forEach { m -> add(buildJsonObject {
-            put("path", m.relativePath); put("line_number", m.lineNumber)
-            put("column", m.column); put("line_text", m.line)
-        }) } })
-        put("truncated", value.truncated)
-        put("truncation_reasons", buildJsonArray { value.truncationReasons.forEach { add(JsonPrimitive(it)) } })
-        put("scanned_files", value.counters.files); put("scanned_bytes", value.counters.bytes)
-        put("skipped_entries", value.counters.skippedEntries)
+    private fun single(
+        status: RootControlStatusSnapshot,
+        body: JsonObject,
+        snapshot: RootFileMetadataSnapshot?,
+        maxOutputBytes: Int,
+    ): RootServiceExecuteResponse {
+        val response = response(status, body, snapshot)
+        return if (fits(response, maxOutputBytes)) response else failure(status, "result_exceeds_budget")
     }
+
+    private fun response(
+        status: RootControlStatusSnapshot,
+        body: JsonObject,
+        snapshot: RootFileMetadataSnapshot? = null,
+    ) = RootServiceExecuteResponse(
+        "ACCEPTED", status, terminalOutcome = RootServiceTerminalOutcome.SUCCEEDED,
+        resultSha256 = RootPrivilegedServiceEngine.sha256Hex(body.toString()), fileResultJson = body.toString(),
+        fileSnapshot = snapshot,
+    )
+
+    private fun fits(response: RootServiceExecuteResponse, maxOutputBytes: Int): Boolean =
+        RootPrivilegedServiceEngine.json.encodeToString(RootServiceExecuteResponse.serializer(), response)
+            .toByteArray(Charsets.UTF_8).size <= maxOutputBytes.coerceAtMost(RootExecutionBudget.MAX_OUTPUT_BYTES)
 
     private data class ReadWindow(val body: JsonObject? = null, val error: String = "non_utf8_text")
 
-    private fun read(value: RootFileReadResult): ReadWindow {
+    private fun read(value: RootFileReadResult, status: RootControlStatusSnapshot, maxOutputBytes: Int): ReadWindow {
         val input = ByteBuffer.wrap(value.content)
         val output = CharBuffer.allocate(value.content.size)
         val decoder = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
@@ -143,18 +229,23 @@ internal object RootServiceFileDispatch {
         // A caller must enlarge the budget rather than repeat a successful zero-progress page.
         if (value.truncated && input.position() == 0) return ReadWindow(error = "utf8_window_too_small")
         val fullText = output.flip().toString()
-        return ReadWindow(body = buildReadJson(value, fullText, input.position()))
-    }
-
-    private fun buildReadJson(value: RootFileReadResult, text: String, consumedBytes: Int): JsonObject {
-        val nextOffset = value.offsetBytes + consumedBytes
-        val effectiveTruncated = value.truncated || nextOffset < value.totalSizeBytes
-        return buildJsonObject {
-            put("workspace_id", value.workspaceId); put("path", value.relativePath); put("text", text)
-            put("offset_bytes", value.offsetBytes); put("byte_length", consumedBytes)
-            put("total_size_bytes", value.totalSizeBytes); put("next_offset_bytes", nextOffset)
-            put("eof", !effectiveTruncated); put("version", value.version); put("truncated", effectiveTruncated)
+        val fullBody = RootModelResultProjection.read(value, fullText, input.position())
+        if (fits(response(status, fullBody), maxOutputBytes)) return ReadWindow(body = fullBody)
+        // Budget the actual outer response, including both layers of JSON escaping.
+        // Binary search Unicode scalar prefixes, never UTF-16 halves or raw byte offsets.
+        var low = 1
+        var high = fullText.codePointCount(0, fullText.length)
+        var best: JsonObject? = null
+        while (low <= high) {
+            val count = low + (high - low) / 2
+            val prefix = fullText.substring(0, fullText.offsetByCodePoints(0, count))
+            val body = RootModelResultProjection.read(value, prefix, prefix.toByteArray(Charsets.UTF_8).size)
+            if (fits(response(status, body), maxOutputBytes)) {
+                best = body
+                low = count + 1
+            } else high = count - 1
         }
+        return best?.let { ReadWindow(body = it) } ?: ReadWindow(error = "result_exceeds_budget")
     }
 
     private fun safeReason(result: RootFileOperationResult.Rejected): String = when {
@@ -166,7 +257,7 @@ internal object RootServiceFileDispatch {
     private val SAFE_REASON_TOKEN = Regex("[a-z][a-z0-9_]{1,63}")
 
     private fun failure(status: RootControlStatusSnapshot, reason: String): RootServiceExecuteResponse {
-        val body = buildJsonObject { put("error", reason) }.toString()
+        val body = buildJsonObject { put("success", false); put("error", reason) }.toString()
         return RootServiceExecuteResponse("ACCEPTED", status, terminalOutcome = RootServiceTerminalOutcome.FAILED,
             resultSha256 = RootPrivilegedServiceEngine.sha256Hex(body), fileResultJson = body, errorReason = reason)
     }

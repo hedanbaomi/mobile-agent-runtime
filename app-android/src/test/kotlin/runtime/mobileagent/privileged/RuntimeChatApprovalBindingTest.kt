@@ -338,7 +338,11 @@ class RuntimeChatApprovalBindingTest {
         val boundary = RootControlPlaneBoundary("/data/user/0/runtime.mobileagent", node(9001),
             "/data/user_de/0/runtime.mobileagent", node(9002))
         val fd = InMemoryServiceFdOps("/data/local/root-workspace")
-        val engine = RootPrivilegedServiceEngine(managerAuthorizationOverride = { RootManagerAuthorization.GRANTED }, fdOps = fd, serviceUidProvider = { 0 },
+        val engine = RootPrivilegedServiceEngine(
+            selectionPathResolver = { java.nio.file.Paths.get(it) },
+            mountPolicyProvider = { b -> runtime.mobileagent.domain.RootTrustedMountRoots.directoryTree(
+                setOf(b.credentialEncryptedIdentity.mountId, b.deviceProtectedIdentity.mountId)) },
+managerAuthorizationOverride = { RootManagerAuthorization.GRANTED }, fdOps = fd, serviceUidProvider = { 0 },
             controlPlaneOverride = boundary).pinTestHost(boundary, signing)
         val transport = EngineRootChannelTransport(engine, 10148)
         val manager = AuthorityManager(InMemoryAuthorityStateStore())

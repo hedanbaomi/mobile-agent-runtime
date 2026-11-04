@@ -568,6 +568,7 @@ class ChatViewModel internal constructor(
         invalidateRead()
         val generation = readGeneration
         runJob = null
+        val preflight = chatRunPreflight()
         state.value = state.value.copy(streaming = true, loading = false, status = "正在准备会话…", statusKind = "")
         preflightJob = viewModelScope.launch {
             var resources: RunResources? = null
@@ -576,6 +577,9 @@ class ChatViewModel internal constructor(
                     container.createChatConversation(selectedAgent ?: error("请先创建并选择 Agent。")).id
                 }
                 if (generation != readGeneration || state.value.selectedSessionId != selectedConversation || state.value.selectedAgentId != selectedAgent) return@launch
+                // Reject an offline Root before selecting the new thread, adopting images, or
+                // clearing the composer. prepare() rechecks immediately before USER persistence.
+                preflight.rootRefusal(conversationId)?.let { throw it }
                 if (selectedConversation == null) selectCommittedSession(conversationId, selectedAgent)
                 imageDraft.adopt(conversationId, inputImages, pendingImages)
                 val owner = runOwnership.begin(conversationId)
@@ -586,7 +590,7 @@ class ChatViewModel internal constructor(
                     draftFailure(chatDraftOwner(conversationId, selectedAgent), it)
                 }
                 publishRunState(owner, state.value.copy(input = "", streaming = true, loading = false))
-                sendAfterInput(text, owner, admitted, inputImages)
+                sendAfterInput(text, owner, admitted, inputImages, preflight)
             } catch (cancelled: CancellationException) {
                 resources?.let { publishRunState(it.owner, state.value.copy(streaming = false)) }
                 throw cancelled
@@ -614,17 +618,30 @@ class ChatViewModel internal constructor(
         }
     }
 
-    private suspend fun sendAfterInput(text: String, owner: ChatRunOwner, resources: RunResources, uploads: List<ChatImageUpload>) {
+    private fun chatRunPreflight(): ChatRunPreflight = ChatRunPreflight(
+        container.runs, container.conversations, container.transfer,
+        (container as? ThreadWorkspacePortProvider)?.threadWorkspacePort,
+        (container as? ThreadWorkspaceRuntimePortProvider)?.threadWorkspaceRuntimePort,
+        container.conversationImages,
+        container.chatRootSendGate(),
+    )
+
+    private suspend fun sendAfterInput(
+        text: String,
+        owner: ChatRunOwner,
+        resources: RunResources,
+        uploads: List<ChatImageUpload>,
+        preflight: ChatRunPreflight,
+    ) {
         val conversationId = owner.conversationId
         // Durable data and authorization use this run's own evidence, never the selected page.
         val runCitations = LinkedHashMap(citations)
         val threadWorkspacePort = (container as? ThreadWorkspacePortProvider)?.threadWorkspacePort
         val threadWorkspaceRuntimePort =
             (container as? ThreadWorkspaceRuntimePortProvider)?.threadWorkspaceRuntimePort
-        val prepared = when (val result = ChatRunPreflight(
-            container.runs, container.conversations, container.transfer,
-            threadWorkspacePort, threadWorkspaceRuntimePort, container.conversationImages,
-        ).prepare(conversationId, text, uploads, textOnly = state.value.textDegradation) { message ->
+        val prepared = when (val result = preflight.prepare(
+            conversationId, text, uploads, textOnly = state.value.textDegradation,
+        ) { message ->
             imageDraft.persisted(conversationId)
             publishRunState(owner, state.value.copy(
                 messages = state.value.messages + messageUi(message), input = "",
@@ -1024,6 +1041,9 @@ class ChatViewModel internal constructor(
                     scope = kotlinx.coroutines.CoroutineScope(currentCoroutineContext() + Dispatchers.IO),
                     liveContext = { withContext(Dispatchers.IO) { container.agents.isLiveBinding(binding.snapshot) } },
                     reserveCalls = runTools::reserveAdditionalToolCalls,
+                    rootWorkspaceIds = withContext(Dispatchers.IO) {
+                        toolingContext?.let(container.runtimeIntegration::frozenRootWorkspaceIds).orEmpty()
+                    },
                 )
                 resources.productivity = productivity
                 resources.confirmedDeviceAction = runTools::confirmedDeviceActionReceipt
@@ -1394,27 +1414,57 @@ class ChatViewModel internal constructor(
                     }
                     val selectedAuthority = authoritySnapshot?.selectedAuthority?.name ?: "NONE"
                     val dangerousMode = authoritySnapshot?.dangerousMode?.name ?: "UNKNOWN"
+                    val capability = diagnosticToolCapability(call.name, toolExecutor.specs)
+                    // Approval follows the workspace this exact call names. A mixed Root+SAF Run
+                    // must not make a SAF write inherit Root confirmation, and a Root write must
+                    // never inherit the ordinary skip switch. read_batch carries its workspace
+                    // ids in child arguments, even though the outer spec has no workspace capability.
+                    val workspaceScoped = capability == DiagnosticToolCapability.WORKSPACE_READ ||
+                        capability == DiagnosticToolCapability.WORKSPACE_WRITE ||
+                        AgentToolConfirmation.invocationWorkspaceIds(call.name, call.argumentsJson).isNotEmpty()
+                    val invocationAuthority = if (workspaceScoped) {
+                        AgentToolConfirmation.invocationWorkspaceAuthority(
+                            call.name, call.argumentsJson, threadWorkspaceId,
+                        ) { workspaceId -> container.runtimeIntegration.approvalWorkspaceAuthority(workspaceId) }
+                    } else {
+                        diagnosticToolAuthority(call.name, toolExecutor.specs, threadWorkspaceId, selectedAuthority)
+                    }
                     val approvalAudit = PendingApprovalAudit(
                         runId = run.runId,
                         callId = call.callId,
                         invocationId = invocationId(call.callId, call.name),
                         agentId = binding.snapshot.agentId,
                         sessionRef = conversationId,
-                        capability = diagnosticToolCapability(call.name, toolExecutor.specs),
-                        authority = diagnosticToolAuthority(call.name, toolExecutor.specs, threadWorkspaceId, selectedAuthority),
+                        capability = capability,
+                        authority = invocationAuthority,
                     )
                     rememberPendingApproval(approvalAudit)
                     recordToolApprovalState(approvalAudit, DiagnosticApprovalState.REQUESTED, "permission")
                     if (!withContext(Dispatchers.Main) { canProjectRun(owner) }) return@approvalDecision false
                     val liveAgent = container.agents.get(binding.snapshot.agentId)
-                    if (!AgentToolConfirmation.requiresExplicitApproval(
-                            toolName = call.name,
-                            selectedAuthority = selectedAuthority,
-                            workspaceAuthority = approvalAudit.authority,
-                            rootRun = runtime.mobileagent.data.RootRunManifest.hasRootStamp(record.manifestJson),
-                        ) &&
-                        AgentToolConfirmation.allows(binding.snapshot.permissionSettingsJson,
-                            liveAgent?.permissionSettingsJson)) {
+                    val snapshotSettings = binding.snapshot.permissionSettingsJson
+                    val liveAgentSettings = liveAgent?.permissionSettingsJson
+                    val rootRun = runtime.mobileagent.data.RootRunManifest.hasRootStamp(record.manifestJson)
+                    val runScopedRoot = rootRun &&
+                        AgentToolConfirmation.isRunScopedRootTool(call.name, call.argumentsJson)
+                    // Root read-only calls have their own opt-in (`skipRootReadConfirmations`, frozen
+                    // snapshot + live Agent); the ordinary global switch can never authorize them.
+                    // Every Root write, Shell and background job stays in the explicit branch.
+                    val autoApproved = AgentToolConfirmation.autoApprovesInvocation(
+                        toolName = call.name,
+                        argumentsJson = call.argumentsJson,
+                        selectedAuthority = selectedAuthority,
+                        workspaceAuthority = invocationAuthority,
+                        fallbackWorkspaceId = threadWorkspaceId,
+                        rootRun = rootRun,
+                        runScopedRoot = runScopedRoot,
+                        rootReadConfirmed = AgentToolConfirmation.allowsRootRead(snapshotSettings, liveAgentSettings),
+                        ordinarySkip = AgentToolConfirmation.allows(snapshotSettings, liveAgentSettings),
+                        authorityForWorkspace = { workspaceId ->
+                            container.runtimeIntegration.approvalWorkspaceAuthority(workspaceId)
+                        },
+                    )
+                    if (autoApproved) {
                         markPendingApprovalDecision(run.runId, approvalAudit.invocationId, call.callId, "APPROVED")
                         recordToolApprovalState(approvalAudit, DiagnosticApprovalState.APPROVED, "agent_auto_skip")
                         approvedToolInFlight = true
@@ -1969,20 +2019,32 @@ class ChatViewModel internal constructor(
                 val archivedBeforeAdmission = !runAdmitted && withContext(Dispatchers.IO) {
                     runCatching { container.conversations.get(conversationId)?.archived == true }.getOrDefault(false)
                 }
-                val errorPart = if (archivedBeforeAdmission) {
-                    ErrorPart(MessageErrorCode.PERMISSION_DENIED, "对话已归档，输入草稿已保留；请先恢复后继续。")
-                } else if (failure is ChatInputBudgetExceeded) {
-                    ErrorPart(
+                val errorPart = when {
+                    archivedBeforeAdmission ->
+                        ErrorPart(MessageErrorCode.PERMISSION_DENIED, getApplication<Application>().getString(R.string.chat_message_saved_conversation_archived))
+                    failure is AppException -> {
+                        // Domain failures already carry a stable code; the closed table decides the
+                        // message category instead of guessing from the text. A Root admission refusal
+                        // is product copy, so it is localized here; other codes keep the domain message.
+                        val mapped = toSafeErrorPart(failure.error.code.name)
+                        val localized = ChatRootErrors.preflightMessageResource(failure.error)?.let {
+                            getApplication<Application>().rootChatMessage(it)
+                        } ?: when {
+                            ChatRootErrors.isRootAuthorityFailure(failure.error) ->
+                                getApplication<Application>().rootChatMessage(R.string.root_authority_temporarily_unavailable)
+                            else -> null
+                        }
+                        mapped.copy(message = localized ?: failure.error.userMessage.ifBlank { mapped.message })
+                    }
+                    failure is ChatInputBudgetExceeded -> ErrorPart(
                         MessageErrorCode.CONTEXT_OVERFLOW,
                         failure.userMessage(),
                     )
-                } else if (queryUnknown) {
-                    ErrorPart(
+                    queryUnknown -> ErrorPart(
                         MessageErrorCode.UNKNOWN_OUTCOME,
                         "知识库查询结果未知，可能已产生外部影响；不会自动重试。",
                     )
-                } else {
-                    toSafeErrorPart(failure.message.orEmpty())
+                    else -> toSafeErrorPart(failure.message.orEmpty())
                 }
                 preparationStage?.let { stage ->
                     runCatching {
@@ -1994,13 +2056,12 @@ class ChatViewModel internal constructor(
                 record = record.copy(state = if (queryUnknown) RunStatus.UNKNOWN_OUTCOME else if (record.state in TERMINAL) record.state else RunStatus.FAILED,
                     errorCode = if (queryUnknown) "UNKNOWN_OUTCOME" else record.errorCode ?: errorPart.code.name,
                     stopReason = errorPart.message)
-                if (runAdmitted) {
-                    persistTerminalError(errorPart)
-                    publishRunState(owner, state.value.copy(status = errorPart.message, statusKind = "error", error = null))
-                } else {
-                    publishRunState(owner, state.value.copy(input = text, status = errorPart.message, statusKind = "error", error = null))
-                    saveRunDraft(owner)
-                }
+                // The preflight already persisted and projected the user message before this run
+                // coroutine started, so restoring `text` into the input box would persist a second
+                // identical message on the next send. Keep the input empty and make the failure
+                // visible as its own message, which is also what the admitted path does.
+                persistTerminalError(errorPart)
+                publishRunState(owner, state.value.copy(status = errorPart.message, statusKind = "error", error = null))
             } finally {
                 watchdogJob.cancel()
                 // Shield the whole cleanup, including dispatcher returns. Individually shielding
@@ -2234,7 +2295,7 @@ class ChatViewModel internal constructor(
     }
 
     private fun failRun(owner: ChatRunOwner, failure: Exception) {
-        publishRunState(owner, state.value.copy(error = SecretRedactor.redact(failure.message ?: "操作失败。")))
+        publishRunState(owner, state.value.copy(error = localizedFailureMessage(failure)))
     }
 
     private fun publishRunCitations(owner: ChatRunOwner, source: Map<String, Pair<Citation, String>>) {
@@ -2562,6 +2623,8 @@ class ChatViewModel internal constructor(
             authority == null -> ""
             authority.selectedAuthority == Authority.SHIZUKU -> "Shizuku"
             authority.selectedAuthority == Authority.WIRED_ADB -> "Wired ADB"
+            authority.selectedAuthority == Authority.ROOT_DIRECT -> "Root"
+            authority.selectedAuthority == Authority.SHIZUKU_ROOT -> "Shizuku Root"
             else -> ""
         }
         // Only user-supplied display metadata belongs in the view model. Fixed
@@ -2583,7 +2646,13 @@ class ChatViewModel internal constructor(
         )
     }
 
-    private fun fail(failure: Exception) { state.value = state.value.copy(error = SecretRedactor.redact(failure.message ?: "操作失败。")) }
+    private fun localizedFailureMessage(failure: Exception): String {
+        val resource = (failure as? AppException)?.error?.let(ChatRootErrors::preflightMessageResource)
+        return SecretRedactor.redact(resource?.let { getApplication<Application>().rootChatMessage(it) }
+            ?: failure.message ?: "操作失败。")
+    }
+
+    private fun fail(failure: Exception) { state.value = state.value.copy(error = localizedFailureMessage(failure)) }
     private companion object {
         const val SELECTED_SESSION_KEY = "chat.selectedSessionId"
         const val SELECTED_AGENT_KEY = "chat.selectedAgentId"

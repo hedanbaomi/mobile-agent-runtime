@@ -13,9 +13,12 @@ package runtime.mobileagent.privileged
  * (`native/src/core/su/su_daemon.cpp`, commit 6c807d35b241c6a22b35534af8b6fe447a66f073):
  * global `root_access`, `multiuser_mode` mapping, and a policy row that is ALLOW and still valid.
  */
-enum class RootManagerAuthorization {
+enum class RootManagerAuthorization(val permitsSession: Boolean = false) {
     /** Persistent ALLOW for this app uid (and the global settings still permit app requests). */
-    GRANTED,
+    GRANTED(true),
+
+    /** Authenticated UID0 session; this provider has no supported live policy observer. */
+    SESSION_GRANTED(true),
 
     /** The manager explicitly denies, is globally disabled, or only allows ADB. */
     REVOKED,
@@ -23,7 +26,7 @@ enum class RootManagerAuthorization {
     /** No persistent grant / interactive-only / expired row / ambiguous data. */
     UNKNOWN,
 
-    /** No supported manager was found (or the database could not be read). */
+    /** The RPC was not bound to the authenticated session, or a selected observer is unavailable. */
     UNSUPPORTED,
 }
 
@@ -124,18 +127,32 @@ internal data class RootDirectProvider(
     val path: String,
     val version: String,
     val major: Int,
-)
+) {
+    val observeMagiskPolicy: Boolean
+        get() = version.contains(":MAGISKSU", ignoreCase = true) && major in MAGISK_POLICY_SCHEMA_MAJORS
+}
+
+/** Known su locations, followed by bounded absolute PATH entries. Listing is not execution. */
+internal val ROOT_SU_FIXED_PATHS = listOf("/sbin/su", "/system/xbin/su", "/system/bin/su", "/debug_ramdisk/su")
+
+/** Bounds an environment-controlled PATH scan; Android's real PATH is far shorter. */
+internal const val ROOT_PATH_ENTRY_LIMIT = 64
+
+/** The same su candidates the foreground probe will execute, resolved for reuse by readers. */
+internal fun rootPathSuCandidates(pathValue: String? = System.getenv("PATH")): List<String> {
+    val fromPath = pathValue.orEmpty().split(':').asSequence()
+        .map { it.trim() }
+        .filter { it.startsWith("/") }
+        .take(ROOT_PATH_ENTRY_LIMIT)
+        .map { it.trimEnd('/') + "/su" }
+    return (ROOT_SU_FIXED_PATHS.asSequence() + fromPath).distinct().toList()
+}
 
 /**
- * Binds the acquisition to the *actual* `su` binary it will launch.
- *
- * Finding a `magisk` binary somewhere proves nothing about which provider answers `su`; an
- * unknown/KernelSU `su` next to an old Magisk policy must not be treated as MagiskSU. This probe
- * runs only on the explicit foreground acquisition path, is bounded, and returns null for any
- * provider it cannot prove is MagiskSU. The resolved absolute path is then *pinned* for launch.
+ * Resolve and pin an executable su. Version output selects an optional policy observer;
+ * it never grants Root or excludes another provider. The service UID0 handshake decides that.
  */
 internal object RootDirectProviderProbe {
-    private val CANDIDATE_PATHS = listOf("/sbin/su", "/system/xbin/su", "/system/bin/su", "/debug_ramdisk/su")
     private val MAGISKSU_VERSION = Regex("""^(\d+)\.\d+:(?i:MAGISKSU)\b""")
 
     fun resolve(
@@ -143,7 +160,8 @@ internal object RootDirectProviderProbe {
         isCancelled: () -> Boolean = { false },
     ): RootDirectProvider? {
         val deadline = System.nanoTime() + timeoutMs * 1_000_000L
-        for (path in CANDIDATE_PATHS) {
+        val paths = rootPathSuCandidates()
+        for (path in paths) {
             if (isCancelled()) return null
             val remainingMs = (deadline - System.nanoTime()) / 1_000_000L
             if (remainingMs <= 0) return null
@@ -153,9 +171,8 @@ internal object RootDirectProviderProbe {
                 timeoutMs = remainingMs,
                 maxBytes = 512,
                 isCancelled = isCancelled,
-            )?.text ?: continue
-            val major = MAGISKSU_VERSION.find(version.trim())?.groupValues?.getOrNull(1)?.toIntOrNull()
-                ?: continue
+            )?.text.orEmpty()
+            val major = MAGISKSU_VERSION.find(version.trim())?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
             return RootDirectProvider(path = path, version = version.trim(), major = major)
         }
         return null

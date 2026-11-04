@@ -190,6 +190,10 @@ class RootShizukuRevocationRegressionTest {
                 shellRunnerOverride?.unconfirmedRequestIds().orEmpty()
         }
         val engine = RootPrivilegedServiceEngine(
+            selectionPathResolver = { java.nio.file.Paths.get(it) },
+            mountPolicyProvider = { b -> runtime.mobileagent.domain.RootTrustedMountRoots.directoryTree(
+                setOf(b.credentialEncryptedIdentity.mountId, b.deviceProtectedIdentity.mountId)) },
+
             fdOps = workerFd,
             shellRunner = delegatingShellRunner,
             serviceUidProvider = { 0 },
@@ -257,7 +261,7 @@ class RootShizukuRevocationRegressionTest {
                 db,
                 fdOps = fd,
                 sessionConnector = connector,
-                shellRunner = delegatingShellRunner,
+
                 controlPlaneBoundaryOverride = boundary,
                 locatorCipher = TestRootLocatorCipher(),
             )

@@ -234,7 +234,10 @@ class RootWorkspaceFileReadOperations(
         ))
     }
 
-    fun read(args: RootTypedArguments.FileReadText): RootFileOperationResult<RootFileReadResult> {
+    fun read(
+        args: RootTypedArguments.FileReadText,
+        includeContentVersion: Boolean = true,
+    ): RootFileOperationResult<RootFileReadResult> {
         if (workspaceRootRejection != null) {
             return RootFileOperationResult.Rejected(workspaceRootRejection, RootFileOperationReason.WORKSPACE_ROOT_UNCONFINED)
         }
@@ -244,7 +247,8 @@ class RootWorkspaceFileReadOperations(
                 RootFileOperationReason.READ_WINDOW_INVALID,
             )
         }
-        val opened = driver.inspectOpenedTarget(args.workspaceId, args.relativePath, followFinalSymlink = false)
+        val opened = driver.inspectOpenedTarget(args.workspaceId, args.relativePath,
+            followFinalSymlink = false, includeContentDigest = includeContentVersion)
             ?: return RootFileOperationResult.Rejected(
                 RootConfinementRejection.SPECIAL_NODE_REJECTED,
                 RootFileOperationReason.TARGET_NOT_FOUND,
@@ -259,7 +263,7 @@ class RootWorkspaceFileReadOperations(
                 requireRegularFile = true,
             )
             if (rejection != null) return RootFileOperationResult.Rejected(rejection, "confinement_rejected")
-            if (opened.sizeBytes > RootContentVersionPolicy.MAX_CONTENT_BYTES) {
+            if (includeContentVersion && opened.sizeBytes > RootContentVersionPolicy.MAX_CONTENT_BYTES) {
                 return RootFileOperationResult.Rejected(
                     RootConfinementRejection.CAPACITY_EXCEEDED,
                     RootFileOperationReason.CONTENT_VERSION_UNOBSERVABLE,

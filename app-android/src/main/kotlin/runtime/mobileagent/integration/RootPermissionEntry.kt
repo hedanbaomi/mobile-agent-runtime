@@ -67,16 +67,19 @@ internal object RootPermissionEntry {
             runCatching { Shizuku.requestPermission(code); true }.getOrDefault(false)
         },
     ) {
-        val facts = sample() ?: error("无法确认 Shizuku 状态；请稍后重试。")
-        if (!facts.binderAlive) error("Shizuku 未运行")
-        if (facts.serverUid == 2000) {
-            error("Shizuku 当前以 Shell(2000) 运行；请以 Root 启动 Shizuku 后再启用 Root 通道。")
-        }
+        val facts = sample() ?: error("ROOT_SHIZUKU_STATE_UNKNOWN")
+        if (!facts.binderAlive) error("ROOT_SHIZUKU_NOT_RUNNING")
+        // Before platform permission, the fresh sampler may read neither the UID nor the version.
+        // Requesting that permission is not Root consent or service acquisition.
+        if (facts.serverUid != null && facts.serverUid != 0) error("ROOT_SHIZUKU_UID_NOT_ROOT")
+        if (facts.serverVersion != null && facts.serverVersion < 13) error("ROOT_SHIZUKU_VERSION_UNSUPPORTED")
         if (facts.permissionGranted) {
+            if (facts.serverUid == null || facts.serverVersion == null) error("ROOT_SHIZUKU_STATE_UNKNOWN")
+            if (facts.preV11) error("ROOT_SHIZUKU_VERSION_UNSUPPORTED")
             // Already granted: refresh the observed state only. No Root acquire, no consent write.
             refresh()
             return
         }
-        if (!requester(ROOT_PERMISSION_REQUEST_CODE)) error("Shizuku 权限请求未被接受")
+        if (!requester(ROOT_PERMISSION_REQUEST_CODE)) error("ROOT_SHIZUKU_PERMISSION_REQUEST_REJECTED")
     }
 }

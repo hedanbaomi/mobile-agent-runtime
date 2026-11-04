@@ -3,6 +3,19 @@
 
 package runtime.mobileagent.tooling
 
+import runtime.mobileagent.tooling.ModelToolArguments.string
+import runtime.mobileagent.tooling.ModelToolArguments.stringAllowEmpty
+import runtime.mobileagent.tooling.ModelToolArguments.boolean
+import runtime.mobileagent.tooling.ModelToolArguments.stringElement
+import runtime.mobileagent.tooling.ModelToolArguments.booleanElement
+import runtime.mobileagent.tooling.ModelToolArguments.containsAny
+import runtime.mobileagent.tooling.ModelToolArguments.aliasString
+import runtime.mobileagent.tooling.ModelToolArguments.aliasStringAllowEmpty
+import runtime.mobileagent.tooling.ModelToolArguments.aliasStringElement
+import runtime.mobileagent.tooling.ModelToolArguments.aliasLong
+import runtime.mobileagent.tooling.ModelToolArguments.aliasLongElement
+import runtime.mobileagent.tooling.ModelToolArguments.aliasBoolean
+import runtime.mobileagent.tooling.ModelToolArguments.aliasBooleanElement
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Collections
@@ -13,12 +26,8 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
@@ -84,7 +93,15 @@ class UnifiedWorkspaceToolExecutor(
     /** Compatibility adapter for the existing ToolExecutor boundary. */
     override val specs: List<LegacyToolSpec> = Collections.unmodifiableList(toolingSpecs.map(::toLegacySpec))
 
+    /** IDs remain frozen even when their backend goes offline; routing never searches another authority. */
+    val workspaceIds: Set<String> by lazy {
+        registry.descriptors().mapNotNull { registry.registered(it.id) }.filter { registered ->
+            exposedWorkspaceOperations.any { workspaceOperationAvailable(schemaContext, registered, it, requireLiveReady = false) }
+        }.mapTo(linkedSetOf()) { it.descriptor.id }
+    }
+
     private val lock = Any()
+    private var closed = false
     private val callsByRequest = linkedMapOf<String, BoundCall>()
     private val requestByModelCall = linkedMapOf<ModelCallKey, String>()
 
@@ -120,7 +137,9 @@ class UnifiedWorkspaceToolExecutor(
         call: ToolCall,
         context: ToolExecutionContext,
         requestId: String,
+        runtimeOwned: Boolean = false,
     ): ToolResult {
+        if (synchronized(lock) { closed }) return ToolResult.Failure(ToolError(ToolErrorCode.OPERATION_UNAVAILABLE))
         // Fail-closed backstop for stale model schemas: file_move is never
         // exposed, and the Android workspace backends cannot honor a move.
         // Return the typed failure before any registry, audit, or backend
@@ -129,14 +148,13 @@ class UnifiedWorkspaceToolExecutor(
         val parsed = parse(call) ?: return ToolResult.Invalid(ToolErrorCode.INVALID_REQUEST.name)
         val candidate = bind(requestId, call, parsed, context)
         val existingReservation = synchronized(lock) {
-            val key = modelKey(context, call.callId)
+            val key = modelKey(context, if (runtimeOwned) requestId else call.callId)
             val existingRequestId = requestByModelCall[key]
             if (existingRequestId != null) {
                 true to callsByRequest[existingRequestId]
             } else {
-                // Claim the model call id and publish its BoundCall in one
-                // critical section. Two concurrent deliveries can therefore
-                // never both pass the replay gate and reach the backend.
+                // Typed calls reserve their exact runtime request ID. A model correlation ID
+                // may describe several distinct executions and must never alias their results.
                 requestByModelCall[key] = requestId
                 callsByRequest[requestId] = candidate
                 false to null
@@ -146,8 +164,10 @@ class UnifiedWorkspaceToolExecutor(
             val bound = existingReservation.second
             return when {
                 bound == null -> ToolResult.UnknownOutcome(ToolErrorCode.CALL_ID_REPLAY.name)
-                bound.call != call -> ToolResult.Invalid(ToolErrorCode.CALL_ID_REPLAY.name)
-                bound.result != null -> bound.result!!
+                !bound.matches(call) -> ToolResult.Invalid(ToolErrorCode.CALL_ID_REPLAY.name)
+                bound.result is ToolResult.UnknownOutcome -> bound.result!!
+                bound.result != null -> if (authorizeReplay(call.copy(callId = bound.requestId))) bound.result!!
+                    else ToolResult.Denied(ToolErrorCode.CAPABILITY_DENIED.name)
                 bound.approvalPending -> ToolResult.NeedsApproval
                 else -> ToolResult.UnknownOutcome(ToolErrorCode.CALL_ID_REPLAY.name)
             }
@@ -165,6 +185,7 @@ class UnifiedWorkspaceToolExecutor(
             call,
             context.copy(modelCallId = invocation.callId),
             invocation.requestId,
+            runtimeOwned = true,
         )
         return result.toToolExecution()
     }
@@ -260,10 +281,12 @@ class UnifiedWorkspaceToolExecutor(
     override suspend fun authorizeReplay(call: ToolCall): Boolean {
         val requestId = resolveRequestId(call.callId)
         val bound = synchronized(lock) { callsByRequest[requestId] } ?: return false
-        if (bound.call != call) return false
+        if (!bound.matches(call)) return false
         val result = synchronized(lock) { bound.result } ?: return false
         if (result is ToolResult.UnknownOutcome) return false
-        return revalidateReplay(bound)
+        val allowed = revalidateReplay(bound)
+        if (!allowed) synchronized(lock) { bound.deferredInvalidated = true }
+        return allowed && synchronized(lock) { !closed && !bound.deferredInvalidated }
     }
 
     /**
@@ -291,17 +314,24 @@ class UnifiedWorkspaceToolExecutor(
         val requestId = resolveRequestId(call.callId)
         val bound = synchronized(lock) { callsByRequest[requestId] } ?: return false
         // Exact bound call only: never a different argument shape for a reused id.
-        if (bound.call != call) return false
+        if (!bound.matches(call)) return false
         if (synchronized(lock) { bound.approvalPending }) return false
         if (synchronized(lock) { bound.deferredInvalidated }) return false
         val result = synchronized(lock) { bound.result }
         if (result !is ToolResult.Value) return false
         if (!bound.parsed.kind.isReadOnlyDisclosable) return false
-        if (revalidateDeferred(bound)) return true
+        if (revalidateDeferred(bound)) return synchronized(lock) { !closed && !bound.deferredInvalidated }
         // Fail closed permanently: a payload whose authority could not be proven
         // again must not become disclosable if the authorization is restored.
         synchronized(lock) { bound.deferredInvalidated = true }
         return false
+    }
+
+    override suspend fun withholdDeferredResult(call: ToolCall) {
+        val requestId = resolveRequestId(call.callId)
+        synchronized(lock) {
+            callsByRequest[requestId]?.takeIf { it.matches(call) }?.deferredInvalidated = true
+        }
     }
 
     /**
@@ -311,6 +341,7 @@ class UnifiedWorkspaceToolExecutor(
      */
     override suspend fun close() {
         synchronized(lock) {
+            closed = true
             callsByRequest.values.forEach { bound -> bound.onceReceipts.clear() }
             callsByRequest.clear()
             requestByModelCall.clear()
@@ -342,6 +373,11 @@ class UnifiedWorkspaceToolExecutor(
             return false
         }
         val operation = bound.parsed
+        if (operation.kind == WorkspaceOperation.WORKSPACE_LIST) {
+            val receipts = synchronized(lock) { bound.onceReceipts.toList() }
+            val views = authorizedWorkspaceViews(context, requireLiveReady = true, consumedReceipts = receipts)
+            return views.isNotEmpty() && (bound.result as? ToolResult.Value)?.json == WorkspaceDiscovery.render(views)
+        }
         val registered = registry.registered(operation.workspaceId) ?: return false
         if (!workspaceOperationStructurallyAvailable(context, registered, operation.kind, requireLiveReady = false)) return false
         if (!workspaceOperationStructurallyAvailable(context, registered, operation.kind, requireLiveReady = true)) return false
@@ -375,7 +411,8 @@ class UnifiedWorkspaceToolExecutor(
         if (bound.context.agentId != context.agentId || bound.context.snapshotId != context.snapshotId) return false
         val operation = bound.parsed
         if (operation.kind == WorkspaceOperation.WORKSPACE_LIST) {
-            return authorizedWorkspaces(context, WorkspaceOperation.WORKSPACE_LIST, requireLiveReady = true).isNotEmpty()
+            val views = authorizedWorkspaceViews(context, requireLiveReady = true)
+            return views.isNotEmpty() && (bound.result as? ToolResult.Value)?.json == WorkspaceDiscovery.render(views)
         }
         val registered = registry.registered(operation.workspaceId) ?: return false
         if (!workspaceOperationAvailable(context, registered, operation.kind, requireLiveReady = true)) return false
@@ -834,6 +871,7 @@ class UnifiedWorkspaceToolExecutor(
             operationScopes = available.associate { operation ->
                 operation.modelToolName() to operationScope(context, registered, operation)
             }.toSortedMap(),
+            patchFormats = if (WorkspaceOperation.APPLY_PATCH in available) listOf("unified_diff", "replace") else emptyList(),
         )
     }
 
@@ -911,49 +949,6 @@ class UnifiedWorkspaceToolExecutor(
         WorkspaceScope.FULL_DEVICE_FILES -> "full_device_files"
     }
 
-    /** Model-facing workspace entry; never built from a raw backend descriptor. */
-    private data class AgentWorkspaceView(
-        val id: String,
-        val displayName: String,
-        val enabled: Boolean,
-        val workspaceScope: String,
-        val readable: Boolean,
-        val writable: Boolean,
-        val atomicReplace: Boolean,
-        val createOnlyOperations: List<String>,
-        val authorizedOperations: List<String>,
-        val expectedVersionOperations: List<String>,
-        val operationScopes: Map<String, OperationScopeView>,
-    ) {
-        fun toJson(): JsonObject = buildJsonObject {
-            put("workspace_id", id)
-            put("display_name", displayName)
-            put("enabled", enabled)
-            put("readable", readable)
-            put("writable", writable)
-            put("workspace_scope", workspaceScope)
-            put("atomic_replace", atomicReplace)
-            putJsonArray("create_only_operations") { createOnlyOperations.forEach { add(it) } }
-            putJsonArray("authorized_operations") { authorizedOperations.forEach { add(it) } }
-            put("version_scope", "target_entry")
-            putJsonArray("expected_version_operations") { expectedVersionOperations.forEach { add(it) } }
-            putJsonObject("operation_scopes") {
-                operationScopes.forEach { (toolName, scope) ->
-                    putJsonObject(toolName) {
-                        put("whole_workspace", scope.wholeWorkspace)
-                        putJsonArray("path_scopes") { scope.pathScopes.forEach { add(it) } }
-                    }
-                }
-            }
-        }
-    }
-
-    /** One operation's resolved scope: whole-workspace, bounded relative scopes, or neither. */
-    private data class OperationScopeView(
-        val wholeWorkspace: Boolean,
-        val pathScopes: List<String>,
-    )
-
     /**
      * Whether this operation has any permitted path at all.
      *
@@ -1027,6 +1022,9 @@ class UnifiedWorkspaceToolExecutor(
     ): Boolean {
         val descriptor = registered.descriptor
         if (!descriptor.enabled) return false
+        // A Root run may share its INTERNAL/SAF grants, never an ADB/privileged backend.
+        if (schemaContext.authoritySelection?.selected in setOf(Authority.ROOT_DIRECT, Authority.SHIZUKU_ROOT) &&
+            descriptor.backendType == WorkspaceBackendType.PRIVILEGED) return false
         if (descriptor.backendType == WorkspaceBackendType.SAF_TREE) {
             // A dead SAF root is reported by the real adapter as a disabled
             // live descriptor plus a cleared operation-capability set.  That
@@ -1422,7 +1420,9 @@ class UnifiedWorkspaceToolExecutor(
 
     private fun parse(call: ToolCall): ParsedCall? = runCatching {
         if (call.callId.isBlank() || call.name !in TOOL_NAMES) return null
-        val root = Json.parseToJsonElement(call.argumentsJson) as? JsonObject ?: return null
+        val root = ModelToolArguments.objectOrNull(call.argumentsJson)?.let { raw ->
+            ModelToolArguments.numericVersion(raw) ?: return null
+        } ?: return null
         val kind = when (call.name) {
             WORKSPACE_LIST -> WorkspaceOperation.WORKSPACE_LIST
             FILE_LIST -> WorkspaceOperation.LIST
@@ -1471,7 +1471,6 @@ class UnifiedWorkspaceToolExecutor(
         val cursor = root.string("cursor")
         if (kind == WorkspaceOperation.LIST && root.containsKey("cursor") && cursor == null) return null
         val offsetBytes = root.aliasLong("offsetBytes", "offset_bytes") ?: 0L
-        if (kind != WorkspaceOperation.READ && root.containsAny("offsetBytes", "offset_bytes")) return null
         if (kind == WorkspaceOperation.READ && offsetBytes < 0L) return null
         val text = root.stringAllowEmpty("text")?.also {
             require(it.toByteArray(StandardCharsets.UTF_8).size <= MAX_WRITE_BYTES)
@@ -1494,7 +1493,7 @@ class UnifiedWorkspaceToolExecutor(
         val patchFormat = if (root.containsKey("format")) {
             val rawFormat = root.stringAllowEmpty("format") ?: return null
             when (rawFormat) {
-                "unified_diff" -> WorkspacePatchFormat.UNIFIED_DIFF
+                "unified_diff", "unified" -> WorkspacePatchFormat.UNIFIED_DIFF
                 "replace" -> WorkspacePatchFormat.REPLACE
                 else -> return null
             }
@@ -1574,7 +1573,7 @@ class UnifiedWorkspaceToolExecutor(
                                 put("relative_path", normalizeOutputPath(entry.relativePath))
                                 put("type", if (entry.type == WorkspaceEntryType.DIRECTORY) "directory" else "file")
                                 put("bytes", entry.sizeBytes)
-                                entry.version?.let { put("version", it) }
+                                entry.version?.let { put("version", it.toString()) }
                             }) }
                         }
                         if (value.skippedEntries > 0 || value.warnings.isNotEmpty()) {
@@ -1600,13 +1599,13 @@ class UnifiedWorkspaceToolExecutor(
                         put("relative_path", WorkspacePathPolicy.normalize(value.relativePath, false))
                         put("type", if (value.type == WorkspaceEntryType.DIRECTORY) "directory" else "file")
                         put("bytes", value.sizeBytes)
-                        value.version?.let { put("version", it) }
+                        value.version?.let { put("version", it.toString()) }
                     }
                     is runtime.mobileagent.skills.tooling.WorkspaceText -> {
                         put("relative_path", WorkspacePathPolicy.normalize(value.relativePath, false))
                         put("text", value.text)
                         put("bytes", value.byteSize)
-                        value.version?.let { put("version", it) }
+                        value.version?.let { put("version", it.toString()) }
                         put("offset_bytes", value.offsetBytes)
                         value.totalBytes?.let { put("total_bytes", it) }
                         put("eof", value.eof)
@@ -1616,7 +1615,7 @@ class UnifiedWorkspaceToolExecutor(
                         put("relative_path", WorkspacePathPolicy.normalize(value.relativePath, false))
                         put("type", if (value.type == WorkspaceEntryType.DIRECTORY) "directory" else "file")
                         put("bytes", value.byteSize)
-                        value.version?.let { put("version", it) }
+                        value.version?.let { put("version", it.toString()) }
                     }
                     else -> put("value", value.toString())
                 }
@@ -1695,6 +1694,7 @@ class UnifiedWorkspaceToolExecutor(
         parametersJson = spec.inputSchema,
         capability = spec.capability?.value.orEmpty(),
         sideEffect = spec.sideEffect,
+        schemaVersion = spec.schemaVersion,
     )
 
     private fun CapabilityId.toLegacyString(): String = value
@@ -1729,7 +1729,10 @@ class UnifiedWorkspaceToolExecutor(
          */
         var deferredInvalidated: Boolean = false,
         var result: ToolResult? = null,
-    )
+    ) {
+        fun matches(candidate: ToolCall): Boolean = call.name == candidate.name && call.argumentsJson == candidate.argumentsJson &&
+            (candidate.callId == call.callId || candidate.callId == requestId)
+    }
 
     private data class ParsedCall(
         val kind: WorkspaceOperation,
@@ -1883,7 +1886,7 @@ class UnifiedWorkspaceToolExecutor(
          */
         val isReadOnlyDisclosable: Boolean
             get() = when (this) {
-                LIST, STAT, READ, GLOB, GREP -> true
+                WORKSPACE_LIST, LIST, STAT, READ, GLOB, GREP -> true
                 else -> false
             }
     }
@@ -1901,61 +1904,6 @@ class UnifiedWorkspaceToolExecutor(
         WorkspaceOperation.GREP -> WorkspaceSearchProtocol.grepKeys
     }
 
-    private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString && it.content.isNotBlank() }?.content
-    private fun JsonObject.stringAllowEmpty(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
-    private fun JsonObject.long(key: String): Long? = (this[key] as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull
-    private fun JsonObject.boolean(key: String): Boolean? = (this[key] as? JsonPrimitive)?.takeUnless { it.isString }?.contentOrNull?.toBooleanStrictOrNull()
-    private fun JsonObject.stringElement(key: String): Boolean = (this[key] as? JsonPrimitive)?.isString == true
-    private fun JsonObject.longElement(key: String): Boolean = (this[key] as? JsonPrimitive)?.let { !it.isString && it.longOrNull != null } == true
-    private fun JsonObject.optionalLong(key: String): Long? {
-        if (!containsKey(key)) return null
-        if (!longElement(key)) return null
-        return long(key)
-    }
-    private fun JsonObject.booleanElement(key: String): Boolean =
-        (this[key] as? JsonPrimitive)?.let { !it.isString && it.contentOrNull?.toBooleanStrictOrNull() != null } == true
-
-    private fun JsonObject.containsAny(first: String, second: String): Boolean =
-        containsKey(first) || containsKey(second)
-
-    private fun JsonObject.aliasElement(first: String, second: String): kotlinx.serialization.json.JsonElement? {
-        val firstValue = this[first]
-        val secondValue = this[second]
-        require(firstValue == null || secondValue == null || firstValue == secondValue) {
-            "Conflicting argument aliases"
-        }
-        return firstValue ?: secondValue
-    }
-
-    private fun JsonObject.aliasString(first: String, second: String): String? =
-        (aliasElement(first, second) as? JsonPrimitive)
-            ?.takeIf { it.isString && it.content.isNotBlank() }
-            ?.content
-
-    private fun JsonObject.aliasStringAllowEmpty(first: String, second: String): String? =
-        (aliasElement(first, second) as? JsonPrimitive)?.takeIf { it.isString }?.content
-
-    private fun JsonObject.aliasStringElement(first: String, second: String): Boolean =
-        !containsAny(first, second) || (aliasElement(first, second) as? JsonPrimitive)?.isString == true
-
-    private fun JsonObject.aliasLong(first: String, second: String): Long? =
-        (aliasElement(first, second) as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull
-
-    private fun JsonObject.aliasLongElement(first: String, second: String): Boolean =
-        !containsAny(first, second) ||
-            (aliasElement(first, second) as? JsonPrimitive)?.let { !it.isString && it.longOrNull != null } == true
-
-    private fun JsonObject.aliasBoolean(first: String, second: String): Boolean? =
-        (aliasElement(first, second) as? JsonPrimitive)
-            ?.takeUnless { it.isString }
-            ?.contentOrNull
-            ?.toBooleanStrictOrNull()
-
-    private fun JsonObject.aliasBooleanElement(first: String, second: String): Boolean =
-        !containsAny(first, second) ||
-            (aliasElement(first, second) as? JsonPrimitive)
-                ?.let { !it.isString && it.contentOrNull?.toBooleanStrictOrNull() != null } == true
-
     companion object {
         /** camelCase/snake_case aliases of the search limits, in [WorkspaceSearchProtocol.request] order. */
         private val SEARCH_LIMIT_KEYS = listOf(
@@ -1966,7 +1914,7 @@ class UnifiedWorkspaceToolExecutor(
             "maxResults" to "max_results",
             "maxMillis" to "max_millis",
         )
-        const val TOOL_SCHEMA_VERSION = 3
+        const val TOOL_SCHEMA_VERSION = ModelToolArguments.WORKSPACE_SCHEMA_VERSION
         const val WORKSPACE_LIST = "workspace_list"
         const val FILE_LIST = "file_list"
         const val FILE_STAT = "file_stat"
@@ -2023,28 +1971,25 @@ class UnifiedWorkspaceToolExecutor(
                 "file_read_text + file_write_text), then file_delete the source.",
         )
 
-        private val FILE_SCHEMA = """{"type":"object","additionalProperties":false,"required":["workspace_id","relative_path"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","minLength":1,"maxLength":512}}}"""
-        private val VERSIONED_FILE_SCHEMA = """{"type":"object","additionalProperties":false,"required":["workspace_id","relative_path"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","minLength":1,"maxLength":512},"expected_version":{"type":"integer","minimum":0}}}"""
-
         /**
          * The model-visible schema.  The bounded-search entries come from
          * [WorkspaceSearchProtocol], which owns their schema text, argument
          * validation and result rendering.
          */
         private val TOOL_SPECS = listOf(
-            ToolSpec(WORKSPACE_LIST, "List authorized workspaces.", """{"type":"object","additionalProperties":false,"properties":{}}""", CapabilityId(CapabilityId.WORKSPACE_ENUMERATE), false, TOOL_SCHEMA_VERSION),
-            ToolSpec(FILE_LIST, "List entries in an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspace_id"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","maxLength":512},"max_entries":{"type":"integer","minimum":1,"maximum":1000},"cursor":{"type":"string","minLength":1,"maxLength":512}}}""", CapabilityId(CapabilityId.FILE_LIST), false, TOOL_SCHEMA_VERSION),
+            WorkspaceDiscovery.spec,
+            ToolSpec(FILE_LIST, "List entries in an authorized workspace.", ModelToolArguments.workspaceSchema(FILE_LIST), CapabilityId(CapabilityId.FILE_LIST), false, TOOL_SCHEMA_VERSION),
             WorkspaceSearchProtocol.globSpec,
-            ToolSpec(FILE_STAT, "Read metadata for an authorized workspace entry.", FILE_SCHEMA, CapabilityId(CapabilityId.FILE_STAT), false, TOOL_SCHEMA_VERSION),
-            ToolSpec(FILE_READ_TEXT, "Read a bounded UTF-8 chunk from an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspace_id","relative_path"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","minLength":1,"maxLength":512},"max_bytes":{"type":"integer","minimum":1,"maximum":262144},"offset_bytes":{"type":"integer","minimum":0}}}""", CapabilityId(CapabilityId.FILE_READ_TEXT), false, TOOL_SCHEMA_VERSION),
+            ToolSpec(FILE_STAT, "Read metadata for an authorized workspace entry.", ModelToolArguments.workspaceSchema(FILE_STAT), CapabilityId(CapabilityId.FILE_STAT), false, TOOL_SCHEMA_VERSION),
+            ToolSpec(FILE_READ_TEXT, "Read a bounded UTF-8 chunk from an authorized workspace.", ModelToolArguments.workspaceSchema(FILE_READ_TEXT), CapabilityId(CapabilityId.FILE_READ_TEXT), false, TOOL_SCHEMA_VERSION),
             WorkspaceSearchProtocol.grepSpec,
-            ToolSpec(FILE_WRITE_TEXT, "Create or replace UTF-8 text in an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspace_id","relative_path","text"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","minLength":1,"maxLength":512},"text":{"type":"string","maxLength":262144},"replace":{"type":"boolean"},"expected_version":{"type":"integer","minimum":0}}}""", CapabilityId(CapabilityId.FILE_WRITE_TEXT), true, TOOL_SCHEMA_VERSION),
-            ToolSpec(FILE_CREATE_DIRECTORY, "Create a directory in an authorized workspace.", VERSIONED_FILE_SCHEMA, CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY), true, TOOL_SCHEMA_VERSION),
-            ToolSpec(FILE_DELETE, "Delete one authorized workspace file or empty directory.", VERSIONED_FILE_SCHEMA, CapabilityId(CapabilityId.FILE_DELETE), true, TOOL_SCHEMA_VERSION),
+            ToolSpec(FILE_WRITE_TEXT, "Create or replace UTF-8 text in an authorized workspace.", ModelToolArguments.workspaceSchema(FILE_WRITE_TEXT), CapabilityId(CapabilityId.FILE_WRITE_TEXT), true, TOOL_SCHEMA_VERSION),
+            ToolSpec(FILE_CREATE_DIRECTORY, "Create a directory in an authorized workspace.", ModelToolArguments.workspaceSchema(FILE_CREATE_DIRECTORY), CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY), true, TOOL_SCHEMA_VERSION),
+            ToolSpec(FILE_DELETE, "Delete one authorized workspace file or empty directory.", ModelToolArguments.workspaceSchema(FILE_DELETE), CapabilityId(CapabilityId.FILE_DELETE), true, TOOL_SCHEMA_VERSION),
             // file_move has no model-visible spec: the Android workspace
             // backends cannot honor a move.  Supported explicit steps are a
             // copy followed by file_delete; stale calls fail closed above.
-            ToolSpec(FILE_APPLY_PATCH, "Apply a conditional text patch in an authorized workspace.", """{"type":"object","additionalProperties":false,"required":["workspace_id","relative_path","patch","expected_version"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","minLength":1,"maxLength":512},"patch":{"type":"string","minLength":1,"maxLength":262144},"expected_version":{"type":"integer","minimum":0},"format":{"type":"string","enum":["unified_diff","replace"]}}}""", CapabilityId("file.apply_patch"), true, TOOL_SCHEMA_VERSION),
+            ToolSpec(FILE_APPLY_PATCH, "Apply a conditional text patch in an authorized workspace.", ModelToolArguments.workspaceSchema(FILE_APPLY_PATCH), CapabilityId("file.apply_patch"), true, TOOL_SCHEMA_VERSION),
         )
 
         private fun canonicalJson(root: JsonObject): String = root.toSortedMap().entries.joinToString(";") { (key, value) -> "$key=$value" }

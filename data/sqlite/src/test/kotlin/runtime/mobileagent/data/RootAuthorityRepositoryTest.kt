@@ -57,13 +57,17 @@ class RootAuthorityRepositoryTest {
             val repo = RootAuthorityRepository(db)
             val root = repo.confirmRoot(Authority.ROOT_DIRECT, 0, 0)!!
             AuthorityPolicyRepository(db).updatePolicy(0, Authority.ROOT_DIRECT, DangerousMode.DISABLED)
+            val carried = repo.get(Authority.ROOT_DIRECT)
+            assertNull(repo.setShellConsent(Authority.ROOT_DIRECT, root.revision, true, 0))
             assertThrows(IllegalArgumentException::class.java) {
-                repo.setShellConsent(Authority.ROOT_DIRECT, root.revision, true, 0)
+                repo.setShellConsent(Authority.ROOT_DIRECT, carried.revision, true, 0)
             }
             assertThrows(IllegalArgumentException::class.java) {
                 repo.confirmRoot(Authority.SHIZUKU_ROOT, 0, 0)
             }
-            assertEquals(root, repo.get(Authority.ROOT_DIRECT))
+            assertEquals(root.consent.copy(policyVersion = 1), carried.consent)
+            assertEquals(root.revision + 1, carried.revision)
+            assertEquals(carried, repo.get(Authority.ROOT_DIRECT))
             assertEquals(0, repo.get(Authority.SHIZUKU_ROOT).revision)
         }
     }

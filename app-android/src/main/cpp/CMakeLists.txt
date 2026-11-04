@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(mar_root_supervisor LANGUAGES C)
 
-add_library(mar_root_supervisor SHARED mar_root_supervisor.c)
+add_library(mar_root_supervisor SHARED mar_root_supervisor.c mar_root_file_ops.c)
 target_compile_features(mar_root_supervisor PRIVATE c_std_11)
 target_compile_options(mar_root_supervisor PRIVATE -Wall -Wextra -Werror=return-type)
 target_link_libraries(mar_root_supervisor PRIVATE log)

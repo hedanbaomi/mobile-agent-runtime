@@ -36,7 +36,34 @@ internal class ChatRunPreflight(
     private val workspace: ThreadWorkspacePort?,
     private val workspaceRuntime: ThreadWorkspaceRuntimePort?,
     private val images: runtime.mobileagent.data.ConversationImageRepository? = null,
+    private val rootGate: ChatRootSendGate? = null,
 ) {
+    /**
+     * The UI calls this before it clears the composer. [prepare] calls it again immediately
+     * before the USER row is appended, so a Root disconnect between those two points cannot
+     * persist an orphan turn or start a paid request.
+     */
+    suspend fun rootRefusal(conversationId: String): Exception? {
+        val conversation = withContext(Dispatchers.IO) { conversations.get(conversationId) } ?: return null
+        return rootRefusal(conversation)
+    }
+
+    private suspend fun rootRefusal(conversation: Conversation): Exception? {
+        val gate = rootGate ?: return null
+        return try {
+            when (val check = withContext(Dispatchers.IO) {
+                gate.check(conversation.id, conversation.snapshotId)
+            }) {
+                ChatRootSendCheck.Allowed -> null
+                is ChatRootSendCheck.Refused -> check.refusal.asException(conversation.id)
+            }
+        } catch (cancel: CancellationException) {
+            throw cancel
+        } catch (_: Exception) {
+            ChatRootErrors.checkFailed(conversation.id)
+        }
+    }
+
     suspend fun prepare(
         conversationId: String,
         text: String,
@@ -52,6 +79,10 @@ internal class ChatRunPreflight(
         if (unknown != null) return ChatPreflightResult.Unknown(unknown.runId)
         val conversation = withContext(Dispatchers.IO) { conversations.get(conversationId) }
             ?: return ChatPreflightResult.MissingConversation
+        // Root admission is checked against the frozen snapshot before any durable mutation.
+        // A rejection here keeps the composer draft and never reaches the provider; Run creation
+        // still performs its own admission to close a race with this read-only check.
+        rootRefusal(conversation)?.let { return ChatPreflightResult.Failed(it, userMessagePersisted = false) }
         // Persisting an image turn the frozen model cannot accept would poison every later history
         // projection, so this capability check precedes the message write. Text-only degradation is
         // known without the snapshot; a snapshot that cannot be resolved keeps the existing

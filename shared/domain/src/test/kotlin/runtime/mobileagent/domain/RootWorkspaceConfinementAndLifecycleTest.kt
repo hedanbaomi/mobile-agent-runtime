@@ -103,6 +103,29 @@ class RootWorkspaceConfinementAndLifecycleTest {
     )
 
     @Test
+    fun fuseZeroInodeRoundTripsAndStillBindsDeviceMountAndObject() {
+        val root = targetDirNode.copy(deviceId = 23L, inode = 0L, mountId = 48L)
+        assertTrue(root.hasValidKernelIdentity)
+        assertFalse(root.copy(inode = -1L).hasValidKernelIdentity)
+        assertFalse(root.copy(mountId = 0L).hasValidKernelIdentity)
+        assertFalse(root.sameKernelObjectAs(root.copy(mountId = 49L)))
+        val payload = RootRecoveryLocatorPayload(
+            originSha256 = origin.canonicalSha256(), workspaceId = origin.workspaceId,
+            workspaceGenerationId = origin.generationId, authority = origin.authority,
+            rootKind = RootWorkspaceRootKind.DIRECTORY, absoluteRootPath = "/storage/emulated",
+            rootDeviceId = root.deviceId, rootInode = root.inode, rootMountId = root.mountId,
+        )
+        val bytes = RootRecoveryLocatorCodec.encode(payload)
+        assertEquals(payload, RootRecoveryLocatorCodec.decode(bytes))
+        assertNull(RootFdConfinementPolicy.verifyReattachLocator(
+            bytes, origin, origin.canonicalSha256(), payload.absoluteRootPath, root, controlPlane,
+        ).second)
+        assertEquals(RootConfinementRejection.IDENTITY_MISMATCH, RootFdConfinementPolicy.verifyReattachLocator(
+            bytes, origin, origin.canonicalSha256(), payload.absoluteRootPath, root.copy(inode = 1L), controlPlane,
+        ).second)
+    }
+
+    @Test
     fun recoveryLocatorRoundTripsAndRejectsLegacyShizukuOrTamperedBytes() {
         val payload = RootRecoveryLocatorPayload(
             originSha256 = origin.canonicalSha256(),
@@ -797,82 +820,30 @@ class RootWorkspaceConfinementAndLifecycleTest {
         assertTrue(dataDataAssessed.isProvenForMutation)
         assertEquals(10200, dataDataAssessed.ownerUid)
 
-        // 1b. Truncated chain missing OS ancestors, app UID on OS ancestor, or UID 0 below app root is rejected.
-        assertEquals(
-            RootWriteDomainKind.UNPROVEN,
-            RootWriteDomainPolicy.assess(
-                listOf(appRootDir, appFilesDir),
-                resolvedTargetParentPath = "/data/user/0/com.example.fixture/files",
-            ).kind,
+        // Ownership is a conditional-replacement capability, not a blanket Root write gate.
+        val sharedChains = listOf(
+            listOf(appRootDir),
+            listOf(slashDir.copy(modeOctal = 511, ownerUid = 2000)),
+            userChain.dropLast(1) + appFilesDir.copy(ownerUid = 10201, ownerGid = 10201),
+            userChain.dropLast(1) + appFilesDir.copy(modeOctal = 0b111_000_010),
+            userChain.dropLast(1) + appFilesDir.copy(modeOctal = 0b111_010_000, ownerGid = 2000),
         )
-        assertEquals(
-            RootWriteDomainKind.UNPROVEN,
-            RootWriteDomainPolicy.assess(
-                listOf(slashDir, appRootDir, userDir, user0Dir, appRootDir, appFilesDir),
-                resolvedTargetParentPath = "/data/user/0/com.example.fixture/files",
-            ).kind,
+        for (chain in sharedChains) {
+            val domain = RootWriteDomainPolicy.assess(chain, resolvedTargetParentPath = "/storage/emulated/0")
+            assertEquals(RootWriteDomainKind.SHARED_DIRECTORY, domain.kind)
+            assertTrue(domain.isProvenForMutation)
+            assertFalse(domain.isUid0Exclusive)
+        }
+        // A pinned root-owned 0700 workspace under shell's writable tmp directory supports CAS.
+        val exclusive = RootWriteDomainPolicy.assess(
+            listOf(slashDir, dataDir, userDir.copy(ownerUid = 2000, modeOctal = 511),
+                appRootDir.copy(ownerUid = 0, ownerGid = 0)),
+            resolvedTargetParentPath = "/data/local/tmp/root-owned",
+            workspaceChainStart = 3,
         )
-        assertEquals(
-            RootWriteDomainKind.UNPROVEN,
-            RootWriteDomainPolicy.assess(
-                listOf(slashDir, dataDir, userDir, user0Dir, appRootDir, slashDir),
-                resolvedTargetParentPath = "/data/user/0/com.example.fixture/files",
-            ).kind,
-        )
-        assertEquals(
-            RootWriteDomainKind.UNPROVEN,
-            RootWriteDomainPolicy.assess(
-                listOf(slashDir, dataDir, userDir, user0Dir, slashDir, appFilesDir),
-                resolvedTargetParentPath = "/data/user/0/com.example.fixture/files",
-            ).kind,
-        )
-
-        // 2. Non-app path (/workspace or /data/local/tmp) owned by 10200 or 2000 is rejected as UNPROVEN.
-        val nonAppPath = RootWriteDomainPolicy.assess(listOf(appFilesDir), resolvedTargetParentPath = "/workspace")
-        assertEquals(RootWriteDomainKind.UNPROVEN, nonAppPath.kind)
-        assertFalse(nonAppPath.isProvenForMutation)
-        assertTrue(RootWriteDomainEvidence.REASON_NOT_SERVICE_UID in nonAppPath.unprovenReasons)
-
-        val shellDir = appFilesDir.copy(ownerUid = 2000, ownerGid = 2000)
-        val shellAssessed = RootWriteDomainPolicy.assess(
-            listOf(slashDir, dataDir, userDir, user0Dir, shellDir, shellDir),
-            resolvedTargetParentPath = "/data/user/0/com.example.fixture/files",
-        )
-        assertEquals(RootWriteDomainKind.UNPROVEN, shellAssessed.kind)
-
-        // 3. Mixed non-root app UIDs in the same chain are rejected.
-        val otherAppDir = appFilesDir.copy(inode = 5002L, ownerUid = 10201, ownerGid = 10201)
-        val mixedAssessed = RootWriteDomainPolicy.assess(
-            listOf(slashDir, dataDir, userDir, user0Dir, appRootDir, otherAppDir),
-            resolvedTargetParentPath = "/data/user/0/com.example.fixture/files",
-        )
-        assertEquals(RootWriteDomainKind.UNPROVEN, mixedAssessed.kind)
-        assertTrue(RootWriteDomainEvidence.REASON_MIXED_NON_ROOT_OWNERS in mixedAssessed.unprovenReasons)
-
-        // 4. User ID mismatch (/data/user/10/... with user 0 UID 10200) is rejected.
-        val wrongUserAssessed = RootWriteDomainPolicy.assess(
-            userChain,
-            resolvedTargetParentPath = "/data/user/10/com.example.fixture/files",
-        )
-        assertEquals(RootWriteDomainKind.UNPROVEN, wrongUserAssessed.kind)
-
-        // 5. World-writable or foreign-group-writable app directory is rejected.
-        val worldWritable = appFilesDir.copy(modeOctal = 0b111_000_010)
-        assertEquals(
-            RootWriteDomainKind.UNPROVEN,
-            RootWriteDomainPolicy.assess(
-                listOf(slashDir, dataDir, userDir, user0Dir, appRootDir, worldWritable),
-                resolvedTargetParentPath = "/data/user/0/com.example.fixture/files",
-            ).kind,
-        )
-        val foreignGroupWritable = appFilesDir.copy(modeOctal = 0b111_010_000, ownerGid = 2000)
-        assertEquals(
-            RootWriteDomainKind.UNPROVEN,
-            RootWriteDomainPolicy.assess(
-                listOf(slashDir, dataDir, userDir, user0Dir, appRootDir, foreignGroupWritable),
-                resolvedTargetParentPath = "/data/user/0/com.example.fixture/files",
-            ).kind,
-        )
+        assertTrue(exclusive.isUid0Exclusive)
+        assertFalse(RootWriteDomainPolicy.assess(emptyList()).isProvenForMutation)
+        assertFalse(RootWriteDomainPolicy.assess(listOf(appRootDir.copy(isSymlink = true))).isProvenForMutation)
 
         // 6. Control-plane boundary blocks /data/data/<host_pkg> alias even when initialized with /data/user/0/<host_pkg>.
         assertTrue(

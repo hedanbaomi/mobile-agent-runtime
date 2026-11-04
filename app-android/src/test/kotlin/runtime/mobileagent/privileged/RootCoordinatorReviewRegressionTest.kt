@@ -36,20 +36,6 @@ class RootCoordinatorReviewRegressionTest {
     }
 
     @Test
-    fun unverifiedRootIntegrationDoesNotRegisterProductionBackends() = fixture { f ->
-        val shells = mutableMapOf<ElevatedAuthority, ShellExecutor>()
-        val workspaces = mutableMapOf<ElevatedAuthority, WorkspaceBackend>()
-        val providers = mutableMapOf<Authority, PrivilegedWorkspaceProvider>()
-        f.coordinator.registerBackends(shells, workspaces, providers, object : FullDeviceFilesGrantStore {
-            override fun load(workspaceId: String): FullDeviceFilesGrant? = null
-            override fun save(grant: FullDeviceFilesGrant): WorkspaceResult<Unit> = error("unexpected grant")
-            override fun revoke(workspaceId: String, expectedRevision: Long): WorkspaceResult<Unit> = error("unexpected revoke")
-        })
-        assertTrue(shells.isEmpty() && workspaces.isEmpty() && providers.isEmpty(),
-            "Incomplete bootstrap, FD binding and Run approval integration must not expose Root tools")
-    }
-
-    @Test
     fun attachCannotReplaceAnEpochOrForgeAServiceFromHostDto() = fixture { f ->
         f.enable()
         val identity = f.coordinator.currentExecutionStamp(Authority.ROOT_DIRECT)!!.identity

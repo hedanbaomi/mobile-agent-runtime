@@ -95,6 +95,8 @@ class ReadBatchToolExecutor(
     private val deferredResultAuthorized: suspend (ToolCall) -> Boolean = replayAuthorized,
     private val childCallId: (outerCallId: String, index: Int, childCallId: String) -> String = { _, _, child -> child },
     approvalRequiredTools: Set<String> = emptySet(),
+    /** Runtime-owned authority facts may require approval for this exact bounded child call. */
+    private val approvalRequiredForCall: (ToolCall) -> Boolean = { false },
 ) : ToolExecutor, BackgroundWorkSummary {
     private val lock = Any()
 
@@ -328,7 +330,11 @@ class ReadBatchToolExecutor(
             requests.add(ChildRequest(index, childCallId, runtimeCallId, tool, argumentsJson))
         }
 
-        if (!batchApproved && requests.any { it.tool in frozenApprovalRequired }) {
+        if (!batchApproved && requests.filter { it.tool in frozenEligible }.any { request ->
+            request.tool in frozenApprovalRequired || !guardBoolean {
+                !approvalRequiredForCall(ToolCall(request.runtimeCallId, request.tool, request.argumentsJson))
+            }
+        }) {
             synchronized(lock) { entry.pendingApproval = true }
             return ToolResult.NeedsApproval
         }

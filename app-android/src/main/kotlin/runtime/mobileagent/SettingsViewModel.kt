@@ -23,6 +23,7 @@ import runtime.mobileagent.diagnostics.DiagnosticLevel
 import runtime.mobileagent.domain.LocalePreference
 import runtime.mobileagent.domain.Authority
 import runtime.mobileagent.domain.DangerousMode
+import runtime.mobileagent.domain.isRootAuthority
 import runtime.mobileagent.domain.SecretStatus
 import runtime.mobileagent.domain.WebSearchProvider
 import runtime.mobileagent.domain.ThemePreference
@@ -32,6 +33,7 @@ import runtime.mobileagent.feature.settings.WiredPairingUiState
 import runtime.mobileagent.provider.SecretRedactor
 import runtime.mobileagent.serialization.TransferConflictPolicy
 import runtime.mobileagent.serialization.TransferOptions
+import runtime.mobileagent.data.RootAuthorityRepository
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.util.Locale
@@ -80,6 +82,15 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val diagnosticsStatus = mutableStateOf(SettingsDiagnosticsFeedback.NONE)
     val webSearchStatus = mutableStateOf("")
     val error = mutableStateOf<String?>(null)
+    private val authorityActions = SettingsAuthorityActions(
+        scope = viewModelScope,
+        port = authorityPort,
+        onSnapshot = { authorityState.value = it },
+        onError = { error.value = it },
+        onFactsChanged = { refreshRuntimeFacts() },
+        errorMapper = ::safeAuthorityError,
+        reasonMapper = ::authorityReason,
+    )
     private var pendingExport: Pair<String, TransferOptions>? = null
     private var transferRunning = false
     /** The pairing token is intentionally held only in this ViewModel process memory. */
@@ -106,6 +117,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         val webSearchEnabled: Boolean = false,
         val webSearchProviderId: String = "brave",
         val globalRootPrompt: String = "",
+        /** Root channels whose durable epoch still requires an explicit foreground recovery. */
+        val degradedRootChannels: List<String> = emptyList(),
     )
 
     private val runtimeFacts = mutableStateOf(SettingsRuntimeFacts())
@@ -168,8 +181,18 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             webSearchEnabled = searchConfigured && app.container.settings.webSearchEnabled(),
             webSearchProviderId = app.container.settings.webSearchProvider()?.id.orEmpty(),
             globalRootPrompt = app.container.settings.effectiveGlobalRootPrompt(),
+            // Durable Root recovery facts are read off the main thread with the other I/O facts.
+            degradedRootChannels = degradedRootChannels(),
         )
     }
+
+    /** Root channels whose durable state still carries an unconfirmed Root outcome. */
+    private fun degradedRootChannels(): List<String> = runCatching {
+        val roots = RootAuthorityRepository(app.container.db)
+        listOf(Authority.ROOT_DIRECT, Authority.SHIZUKU_ROOT)
+            .filter { roots.get(it).degraded }
+            .map { it.name }
+    }.getOrDefault(emptyList())
 
     fun uiState(noticeCount: Int): SettingsUiState {
         val facts = runtimeFacts.value
@@ -228,6 +251,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         dangerousModeBuildAllowed = authority.dangerousModeBuildAllowed,
         dangerousModeBuildKnown = authority.dangerousModeBuildKnown,
         dangerousModeReason = authority.dangerousModeReason,
+        rootRecoveryRequired = facts.degradedRootChannels,
         )
     }
 
@@ -241,55 +265,34 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     /** Revalidates ephemeral provider state and persisted SAF grants on resume. */
-    fun refreshAuthorities() {
-        runCatching { authorityPort.refresh() }
-            .onSuccess {
-                authorityState.value = it
-                error.value = null
-            }
-            .onFailure { failure ->
-                error.value = safeAuthorityError(failure)
-            }
-    }
+    fun refreshAuthorities() = authorityActions.refreshAuthorities()
 
     fun selectAuthority(value: String) {
-        val authority = parseAuthority(value) ?: run {
-            error.value = "不支持的权限通道。"
-            return
+        parseAuthority(value)?.let { authority ->
+            if (authority != Authority.WIRED_ADB) clearWiredPairing(notifyPort = true, status = "CANCELLED")
+            authorityActions.selectAuthority(authority)
         }
-        if (authority != Authority.WIRED_ADB) clearWiredPairing(notifyPort = true, status = "CANCELLED")
-        mutateAuthority { authorityPort.selectAuthority(authority) }
     }
 
     fun setAuthorityIntent(value: String, enabled: Boolean) {
-        val authority = parseAuthority(value) ?: run {
-            error.value = "不支持的权限通道。"
-            return
+        parseAuthority(value)?.let { authority ->
+            if (authority == Authority.WIRED_ADB && !enabled) {
+                clearWiredPairing(notifyPort = true, status = "CANCELLED")
+            }
+            authorityActions.setAuthorityIntent(authority, enabled)
         }
-        if (authority == Authority.WIRED_ADB && !enabled) {
-            clearWiredPairing(notifyPort = true, status = "CANCELLED")
-        }
-        mutateAuthority { authorityPort.setUserIntent(authority, enabled) }
     }
 
-    fun requestShizukuPermission() {
-        mutateAuthority { authorityPort.requestShizukuPermission() }
-    }
+    fun requestShizukuPermission() = authorityActions.requestShizukuPermission()
 
     /** Explicit foreground enable of Root-over-Shizuku; selects first, then binds the intent. */
-    fun enableShizukuRoot() {
-        RootChannelEntryActions.enableShizukuRoot(
-            platformReady = { authorityPort.rootShizukuPlatformReady() },
-            requestPermission = { authorityState.value = authorityPort.requestRootShizukuPermission() },
-            select = { authorityState.value = authorityPort.selectAuthority(Authority.SHIZUKU_ROOT) },
-            setIntent = { authorityState.value = authorityPort.setUserIntent(Authority.SHIZUKU_ROOT, true) },
-            clearError = { error.value = null },
-            onError = { failure -> error.value = safeAuthorityError(failure) },
-        )
-    }
+    fun enableShizukuRoot() = authorityActions.enableShizukuRoot()
 
     fun openRootManager() {
-        error.value = RootChannelEntryActions.openRootManagerMessage { authorityPort.openRootManager() }
+        error.value = RootChannelEntryActions.openRootManagerMessage(
+            open = { authorityPort.openRootManager() },
+            failureMessage = app.getString(R.string.root_manager_unavailable_message),
+        )
     }
 
     /**
@@ -297,25 +300,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
      * user choices in a visible order. Live Binder state never implies intent
      * or selection, and a failure stops the remaining mutations.
      */
-    fun enableShizuku() {
-        try {
-            authorityState.value = authorityPort.setUserIntent(Authority.SHIZUKU, true)
-            authorityState.value = authorityPort.selectAuthority(Authority.SHIZUKU)
-            if (authorityState.value.shizuku.platformGrant != runtime.mobileagent.skills.tooling.PlatformGrant.GRANTED) {
-                authorityState.value = authorityPort.requestShizukuPermission()
-            }
-            error.value = null
-        } catch (failure: Exception) {
-            error.value = safeAuthorityError(failure)
-        }
-    }
+    fun enableShizuku() = authorityActions.enableShizuku()
 
     fun openShizuku() {
-        if (!authorityPort.openShizuku()) {
-            error.value = "无法打开 Shizuku 管理器；请稍后重试。"
-        } else {
-            error.value = null
-        }
+        error.value = RootChannelEntryActions.openRootManagerMessage(
+            open = { authorityPort.openShizuku() },
+            failureMessage = "无法打开 Shizuku 管理器；请稍后重试。",
+        )
     }
 
     @Deprecated("Use the foreground pairing flow")
@@ -445,49 +436,66 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         grantFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
     ) {
         if (uri == null) return
-        mutateAuthority { authorityPort.authorizeSaf(uri, grantFlags) }
+        authorityActions.mutate { authorityPort.authorizeSaf(uri, grantFlags) }
     }
 
     fun revokeSaf() {
-        mutateAuthority { authorityPort.revokeSaf() }
+        authorityActions.mutate { authorityPort.revokeSaf() }
     }
 
     /** The Settings UI displays and obtains explicit confirmation before this call. */
     fun setDangerousMode(value: String) {
         val mode = runCatching { DangerousMode.valueOf(value) }.getOrNull() ?: run {
-            error.value = "不支持的危险模式。"
+            error.value = app.getString(R.string.root_authority_unsupported_dangerous_mode)
             return
         }
-        val result = runCatching { authorityPort.setDangerousMode(mode, confirmed = true) }
-            .getOrElse { failure ->
-                error.value = safeAuthorityError(failure)
-                return
-            }
-        authorityState.value = result.snapshot
-        error.value = if (result.accepted) null else authorityReason(result.reason)
+        applyDangerousMode(mode)
     }
 
-    fun disableDangerousMode() {
-        val result = runCatching { authorityPort.setDangerousMode(DangerousMode.DISABLED, confirmed = true) }
-            .getOrElse { failure ->
-                error.value = safeAuthorityError(failure)
-                return
-            }
-        authorityState.value = result.snapshot
-        error.value = if (result.accepted) null else authorityReason(result.reason)
-    }
+    fun disableDangerousMode() = applyDangerousMode(DangerousMode.DISABLED)
+
+    private fun applyDangerousMode(mode: DangerousMode) = authorityActions.setDangerousMode(mode)
 
     fun setRootShellConsent(value: String, enabled: Boolean, confirmed: Boolean = true) {
-        applySettingsRootShellConsent(
-            port = authorityPort,
-            authorityValue = value,
-            enabled = enabled,
-            confirmed = confirmed,
-            onSnapshot = { authorityState.value = it },
-            onError = { error.value = it },
-            reasonMapper = ::authorityReason,
-            errorMapper = ::safeAuthorityError,
-        )
+        val authority = when (value.trim().uppercase(Locale.ROOT)) {
+            "ROOT_DIRECT", "ROOT-DIRECT", "ROOT DIRECT" -> Authority.ROOT_DIRECT
+            "SHIZUKU_ROOT", "SHIZUKU-ROOT", "SHIZUKU ROOT" -> Authority.SHIZUKU_ROOT
+            else -> null
+        } ?: run {
+            error.value = "不支持的权限通道。"
+            return
+        }
+        authorityActions.setRootShellConsent(authority, enabled, confirmed)
+    }
+
+    /**
+     * Explicit foreground confirmation of an unconfirmed Root outcome (accepted `M5` entry).
+     *
+     * The runtime integration owns the coordinator call; until it implements
+     * [RootRecoveryAuthorityPort] this reports a precise reason and changes nothing. Recovery is
+     * never implied by a reconnect, a refresh or a channel selection, and nothing is replayed.
+     */
+    fun acknowledgeRootRecovery(authorityValue: String) {
+        val authority = parseAuthority(authorityValue)?.takeIf { it.isRootAuthority } ?: run {
+            error.value = app.getString(R.string.root_authority_unsupported_channel)
+            return
+        }
+        val recovery = authorityPort as? RootRecoveryAuthorityPort ?: run {
+            error.value = app.getString(R.string.root_recovery_adapter_unavailable)
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) { recovery.acknowledgeRootRecovery(authority) }
+                authorityState.value = result.snapshot
+                error.value = if (result.accepted) null else app.getString(R.string.root_recovery_restart_required)
+                refreshRuntimeFacts()
+            } catch (cancel: kotlinx.coroutines.CancellationException) {
+                throw cancel
+            } catch (failure: Exception) {
+                error.value = safeAuthorityError(failure)
+            }
+        }
     }
 
     private fun publishWiredPairingState() {
@@ -548,36 +556,33 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         reason?.contains("EXPIRED", ignoreCase = true) == true ||
             reason?.contains("TIMEOUT", ignoreCase = true) == true
 
-    private fun mutateAuthority(update: () -> SettingsAuthoritySnapshot) {
-        runCatching { update() }
-            .onSuccess {
-                authorityState.value = it
-                error.value = null
-            }
-            .onFailure { error.value = safeAuthorityError(it) }
-    }
-
-    private fun parseAuthority(value: String): Authority? = when (value.trim().uppercase(Locale.ROOT)) {
-        "NONE", "APP_PRIVATE" -> Authority.NONE
-        "SHIZUKU", "SHIZUKU_BINDER" -> Authority.SHIZUKU
-        "WIRED_ADB", "WIRED-ADB", "WIRED ADB" -> Authority.WIRED_ADB
-        "ROOT_DIRECT", "ROOT-DIRECT", "ROOT DIRECT" -> Authority.ROOT_DIRECT
-        "SHIZUKU_ROOT", "SHIZUKU-ROOT", "SHIZUKU ROOT" -> Authority.SHIZUKU_ROOT
-        else -> null
+    /**
+     * Parses an explicit channel id and reports the shared "unsupported channel" copy for an unknown
+     * one; callers keep working with the nullable result instead of repeating the same guard.
+     */
+    private fun parseAuthority(value: String): Authority? {
+        val authority = authorityChannelIds[value.trim().uppercase(Locale.ROOT)]
+        if (authority == null) error.value = app.getString(R.string.root_authority_unsupported_channel)
+        return authority
     }
 
     private fun safeAuthorityError(failure: Throwable): String =
-        "权限状态未更新：${authorityReason(failure.message)}"
+        app.getString(R.string.root_permission_update_failed, authorityReason(failure.message))
 
     private fun authorityReason(reason: String?): String = when (reason) {
-        "DANGEROUS_MODE_BUILD_DENIED" -> "当前构建不允许开启危险模式；debug 或未知构建会安全关闭。"
-        "DANGEROUS_MODE_CONFIRMATION_REQUIRED" -> "请先确认危险模式风险。"
-        "DANGEROUS_MODE_ADAPTER_UNAVAILABLE" -> "危险模式适配器尚未接入；Shell 保持关闭。"
-        "AUTHORITY_ADAPTER_UNAVAILABLE" -> "权限适配器尚未接入；设置未保存。"
+        "ROOT_RECOVERY_RESTART_REQUIRED" -> app.getString(R.string.root_recovery_restart_required)
+        "ROOT_SHIZUKU_STATE_UNKNOWN" -> app.getString(R.string.root_shizuku_state_unknown)
+        "ROOT_SHIZUKU_NOT_RUNNING" -> app.getString(R.string.root_shizuku_not_running)
+        "ROOT_SHIZUKU_UID_NOT_ROOT" -> app.getString(R.string.root_shizuku_uid_not_root)
+        "ROOT_SHIZUKU_VERSION_UNSUPPORTED" -> app.getString(R.string.root_shizuku_version_unsupported)
+        "ROOT_SHIZUKU_PERMISSION_REQUEST_REJECTED" -> app.getString(R.string.root_shizuku_permission_rejected)
+        "DANGEROUS_MODE_BUILD_DENIED" -> app.getString(R.string.root_authority_build_denied)
+        "DANGEROUS_MODE_CONFIRMATION_REQUIRED" -> app.getString(R.string.root_authority_confirmation_required)
+        "DANGEROUS_MODE_ADAPTER_UNAVAILABLE" -> app.getString(R.string.root_authority_adapter_unavailable)
+        "AUTHORITY_ADAPTER_UNAVAILABLE" -> app.getString(R.string.root_authority_settings_adapter_unavailable)
         "RESIDENT_ADB_REVOKE_FAILED" -> "未能停止设备 ADB 服务，激活凭据已保留，请重试撤销。"
         "WIRED_ADB_POLICY_SAVE_FAILED" -> "设备 ADB 服务已停止，但权限配置未能保存，请刷新后重试。"
-        null, "" -> "权限状态未更新。"
-        else -> "权限状态未更新。"
+        else -> app.getString(R.string.root_permission_update_retry)
     }
 
     override fun onCleared() {
@@ -887,3 +892,36 @@ private fun SettingsSafGrantState.toUiState() =
         persisted = persisted,
         status = status.name,
     )
+
+/**
+ * Optional host capability: explicit foreground confirmation of an unconfirmed Root outcome.
+ *
+ * Required wiring (see the UI package report): `RuntimeIntegration` implements this by delegating
+ * to `RootRuntimeCoordinator.acknowledgeDegradedRecovery(authority, userConfirmed = true,
+ * authorityManager, shizukuState)` and returning the refreshed snapshot. Declared here so the
+ * settings entry can ship before the runtime side lands; when no port implements it, the action
+ * reports "not wired" and changes nothing.
+ */
+interface RootRecoveryAuthorityPort {
+    fun acknowledgeRootRecovery(authority: Authority): SettingsAuthorityMutation
+}
+
+/**
+ * Channel ids accepted from the Settings UI. Enum names are canonical; the extra spellings are the
+ * values older screens, deep links and persisted intents already send, so they stay accepted.
+ */
+private val authorityChannelIds: Map<String, Authority> = mapOf(
+    "NONE" to Authority.NONE,
+    "APP_PRIVATE" to Authority.NONE,
+    "SHIZUKU" to Authority.SHIZUKU,
+    "SHIZUKU_BINDER" to Authority.SHIZUKU,
+    "WIRED_ADB" to Authority.WIRED_ADB,
+    "WIRED-ADB" to Authority.WIRED_ADB,
+    "WIRED ADB" to Authority.WIRED_ADB,
+    "ROOT_DIRECT" to Authority.ROOT_DIRECT,
+    "ROOT-DIRECT" to Authority.ROOT_DIRECT,
+    "ROOT DIRECT" to Authority.ROOT_DIRECT,
+    "SHIZUKU_ROOT" to Authority.SHIZUKU_ROOT,
+    "SHIZUKU-ROOT" to Authority.SHIZUKU_ROOT,
+    "SHIZUKU ROOT" to Authority.SHIZUKU_ROOT,
+)

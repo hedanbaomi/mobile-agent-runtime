@@ -153,6 +153,30 @@ class ChatRunPreflightTest {
         }
     }
 
+    @Test fun rootRefusalStopsBeforeUserPersistenceAndProjection() = runBlocking {
+        withConversation { db, conversations, runs ->
+            var gateCalls = 0
+            val preflight = ChatRunPreflight(
+                runs, conversations, TransferRepository(db), null, null,
+                rootGate = ChatRootSendGate { _, _ ->
+                    gateCalls++
+                    ChatRootSendCheck.Refused(ChatRootSendRefusal.AUTHORITY_UNAVAILABLE)
+                },
+            )
+            var projected = false
+            val refusal = preflight.rootRefusal("conversation")
+            assertNotNull(refusal)
+            assertTrue(refusal is runtime.mobileagent.domain.AppException)
+            assertEquals("root-send-preflight", (refusal as runtime.mobileagent.domain.AppException).error.stage)
+            val result = preflight.prepare("conversation", "Keep this draft") { projected = true }
+            assertTrue(result is ChatPreflightResult.Failed)
+            assertFalse((result as ChatPreflightResult.Failed).userMessagePersisted)
+            assertFalse(projected)
+            assertTrue(conversations.messages("conversation").isEmpty())
+            assertEquals(2, gateCalls)
+        }
+    }
+
     @Test fun missingConversationDoesNotAppendOrProject() = runBlocking {
         withConversation { db, conversations, runs ->
             val result = ChatRunPreflight(runs, conversations, TransferRepository(db), null, null)

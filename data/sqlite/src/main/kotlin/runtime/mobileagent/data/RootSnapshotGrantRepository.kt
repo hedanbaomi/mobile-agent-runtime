@@ -39,7 +39,7 @@ class RootSnapshotGrantRepository(
             require(grant.agentId == agentId && root.matches(grant, execution))
             require(RootApprovalTools.isSupportedCapability(grant.capability))
             if (grant.capability.value == CapabilityId.SHELL_EXECUTE) {
-                require(shellConsentMatches(execution)) { "Root shell snapshot requires shell consent and active DangerousMode" }
+                require(shellConsentMatches(execution)) { "Root shell snapshot requires the channel's current shell consent" }
             }
             require(grant.isActiveFor(Instant.parse(clock()), grant.taskId, grant.sessionId))
             val origin = RootWorkspaceRepository(db).requireOrigin(root.workspaceId,execution)
@@ -172,8 +172,7 @@ class RootSnapshotGrantRepository(
         val state = requireLocalRootState(db, execution)
         state.consent.shellEnabled &&
             execution.shellConsentRevision > 0 &&
-            state.consent.shellRevision == execution.shellConsentRevision &&
-            AuthorityPolicyRepository(db).getPolicy().dangerousMode != DangerousMode.DISABLED
+            state.consent.shellRevision == execution.shellConsentRevision
     }.getOrDefault(false)
 
     private fun requireWorkspace(id: String, capability: CapabilityId): Workspace {

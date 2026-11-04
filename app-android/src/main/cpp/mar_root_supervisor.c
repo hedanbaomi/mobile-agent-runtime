@@ -2,20 +2,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 #define _GNU_SOURCE
-#include <ctype.h>
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <jni.h>
-#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -23,6 +20,9 @@
 
 #define MAR_SETTLE_BUDGET_MS 2000L
 #define MAR_MAX_PROC_SNAPSHOT 2048
+#define MAR_MAX_TIMEOUT_MS (24LL * 60LL * 60LL * 1000LL)
+#define MAR_FINAL_DRAIN_BUDGET_MS 500L
+#define MAR_NORMAL_EXIT_DRAIN_MS 300L
 
 typedef struct {
     int32_t pid;
@@ -37,6 +37,7 @@ typedef struct {
     int32_t exit_code;
     int32_t timed_out;
     int32_t cancelled;
+    /* A descendant outlived natural drain/needed cleanup, or its final census was incomplete. */
     int32_t leaked_descendants;
     int32_t settled;
     int32_t cmd_pgid;
@@ -67,10 +68,44 @@ static void close_quietly(int *fd) {
     }
 }
 
+/*
+ * Minimal unsigned decimal parser shared by the /proc readers.
+ *
+ * The supervisor keeps running in a forked multi-threaded ART process without ever calling
+ * execve(), so it may only rely on async-signal-safe primitives. strtoll/sscanf are replaced by
+ * this fixed-buffer parser; `cursor` is left on the first byte that is not a digit.
+ */
+static int parse_u64(const char **cursor, int64_t *out) {
+    const char *p = *cursor;
+    if (*p < '0' || *p > '9') return -1;
+    int64_t value = 0;
+    do {
+        if (value > (INT64_MAX - 9) / 10) return -1;
+        value = value * 10 + (int64_t)(*p - '0');
+        p++;
+    } while (*p >= '0' && *p <= '9');
+    *cursor = p;
+    *out = value;
+    return 0;
+}
+
 static int read_proc_stat(pid_t pid, mar_proc_stat_t *out) {
     if (pid <= 0 || out == NULL) return -1;
-    char path[64];
-    snprintf(path, sizeof(path), "/proc/%d/stat", (int)pid);
+    char path[32];
+    const char prefix[] = "/proc/";
+    const char suffix[] = "/stat";
+    size_t pos = sizeof(prefix) - 1;
+    memcpy(path, prefix, pos);
+    char digits[16];
+    size_t digit_count = 0;
+    int64_t remaining = (int64_t)pid;
+    do {
+        digits[digit_count++] = (char)('0' + (int)(remaining % 10));
+        remaining /= 10;
+    } while (remaining > 0);
+    while (digit_count > 0) path[pos++] = digits[--digit_count];
+    memcpy(path + pos, suffix, sizeof(suffix));
+
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return -1;
     char buf[1024];
@@ -81,32 +116,28 @@ static int read_proc_stat(pid_t pid, mar_proc_stat_t *out) {
 
     char *rparen = strrchr(buf, ')');
     if (rparen == NULL || rparen[1] != ' ') return -1;
-    char *p = rparen + 2;
+    const char *p = rparen + 2;
 
-    char state = '\0';
-    int ppid = -1;
-    int pgrp = -1;
-    if (sscanf(p, "%c %d %d", &state, &ppid, &pgrp) != 3) {
-        return -1;
-    }
-
-    // Field 3 is token 0 after ') '; field 22 (starttime) is token 19.
-    char *saveptr = NULL;
-    char *tok = strtok_r(p, " ", &saveptr);
-    int idx = 0;
+    char state = *p;
+    if (state == '\0' || state == ' ' || state == '\n') return -1;
+    p++;
+    int64_t ppid = -1;
+    int64_t pgrp = -1;
     int64_t start_ticks = -1;
-    while (tok != NULL) {
-        if (idx == 19) {
-            char *end = NULL;
-            errno = 0;
-            long long val = strtoll(tok, &end, 10);
-            if (errno == 0 && end != tok && val > 0) {
-                start_ticks = (int64_t)val;
-            }
+    if (*p == ' ') p++;
+    if (parse_u64(&p, &ppid) != 0) return -1;
+    if (*p == ' ') p++;
+    if (parse_u64(&p, &pgrp) != 0) return -1;
+
+    // Token 0 is the state; token 19 is starttime (field 22).
+    for (int token = 3; token <= 19; token++) {
+        while (*p == ' ') p++;
+        if (*p == '\0' || *p == '\n') return -1;
+        if (token == 19) {
+            if (parse_u64(&p, &start_ticks) != 0) return -1;
             break;
         }
-        tok = strtok_r(NULL, " ", &saveptr);
-        idx++;
+        while (*p != ' ' && *p != '\0' && *p != '\n') p++;
     }
     if (start_ticks <= 0) return -1;
 
@@ -131,29 +162,73 @@ static void sup_sig_handler(int sig) {
     errno = saved;
 }
 
+/*
+ * Allocation-free directory iteration.
+ *
+ * opendir/readdir allocate and take stdio/allocator locks, which the forked multi-threaded ART
+ * supervisor must not depend on. getdents64 is a raw syscall and reuses a fixed stack buffer.
+ */
+struct linux_dirent64_compat {
+    uint64_t d_ino;
+    int64_t d_off;
+    unsigned short d_reclen;
+    unsigned char d_type;
+    char d_name[];
+};
+
+typedef int (*dirent_visitor)(int dir_fd, const char *name, void *ctx);
+
+static int walk_proc_dir(const char *path, dirent_visitor visit, void *ctx) {
+    int dir_fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd < 0) return -1;
+    _Alignas(8) char buf[4096];
+    int rc = 0;
+    for (;;) {
+        long n = syscall(SYS_getdents64, dir_fd, buf, sizeof(buf));
+        if (n == 0) break;
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            rc = -1;
+            break;
+        }
+        long offset = 0;
+        while (offset < n) {
+            const struct linux_dirent64_compat *entry =
+                (const struct linux_dirent64_compat *)(const void *)(buf + offset);
+            if (entry->d_reclen == 0) break;
+            if (visit(dir_fd, entry->d_name, ctx) != 0) {
+                rc = 1;
+                break;
+            }
+            offset += entry->d_reclen;
+        }
+        if (rc != 0) break;
+    }
+    close(dir_fd);
+    return rc;
+}
+
+typedef struct {
+    int keep[4];
+} mar_fd_keep_t;
+
+static int close_extra_fd_visitor(int dir_fd, const char *name, void *ctx) {
+    const mar_fd_keep_t *keep = (const mar_fd_keep_t *)ctx;
+    const char *cursor = name;
+    int64_t fd_value = 0;
+    if (parse_u64(&cursor, &fd_value) != 0 || *cursor != '\0') return 0;
+    if (fd_value <= 2 || fd_value == dir_fd || fd_value > INT32_MAX) return 0;
+    int fd = (int)fd_value;
+    for (int i = 0; i < 4; i++) {
+        if (fd == keep->keep[i]) return 0;
+    }
+    close(fd);
+    return 0;
+}
+
 static void close_extra_fds_keep4(int keep1, int keep2, int keep3, int keep4) {
-    DIR *dir = opendir("/proc/self/fd");
-    if (dir != NULL) {
-        int dir_fd = dirfd(dir);
-        int to_close[1024];
-        size_t count = 0;
-        struct dirent *de;
-        while ((de = readdir(dir)) != NULL) {
-            if (!isdigit((unsigned char)de->d_name[0])) continue;
-            int fd = atoi(de->d_name);
-            if (fd <= 2 || fd == dir_fd || fd == keep1 || fd == keep2 || fd == keep3 || fd == keep4) {
-                continue;
-            }
-            if (count < sizeof(to_close) / sizeof(to_close[0])) {
-                to_close[count++] = fd;
-            } else {
-                close(fd);
-            }
-        }
-        closedir(dir);
-        for (size_t i = 0; i < count; i++) {
-            close(to_close[i]);
-        }
+    mar_fd_keep_t keep = {.keep = {keep1, keep2, keep3, keep4}};
+    if (walk_proc_dir("/proc/self/fd", close_extra_fd_visitor, &keep) == 0) {
         return;
     }
     long max_fd = sysconf(_SC_OPEN_MAX);
@@ -178,12 +253,10 @@ static int is_descendant_of_sup(
     int idx,
     const mar_proc_stat_t *snap,
     size_t count,
-    pid_t sup_pid,
-    pid_t cmd_pgid
+    pid_t sup_pid
 ) {
     int cur_ppid = snap[idx].ppid;
     if (cur_ppid == (int)sup_pid) return 1;
-    if (cmd_pgid > 1 && snap[idx].pgrp == (int)cmd_pgid) return 1;
     for (int depth = 0; depth < 32 && cur_ppid > 1; depth++) {
         if (cur_ppid == (int)sup_pid) return 1;
         int found = 0;
@@ -199,14 +272,42 @@ static int is_descendant_of_sup(
     return 0;
 }
 
-static void signal_supervisor_tree(
+typedef struct {
+    pid_t sup_pid;
+    pid_t skip_pid;
+    size_t count;
+} mar_proc_scan_t;
+
+static int collect_proc_stat_visitor(int dir_fd, const char *name, void *ctx) {
+    (void)dir_fd;
+    mar_proc_scan_t *scan = (mar_proc_scan_t *)ctx;
+    const char *cursor = name;
+    int64_t pid_value = 0;
+    if (parse_u64(&cursor, &pid_value) != 0 || *cursor != '\0') return 0;
+    if (pid_value <= 1 || pid_value > INT32_MAX) return 0;
+    pid_t pid = (pid_t)pid_value;
+    if (pid == scan->sup_pid || pid == scan->skip_pid) return 0;
+    if (scan->count >= MAR_MAX_PROC_SNAPSHOT) return 1;
+    if (read_proc_stat(pid, &g_proc_snap[scan->count]) == 0) {
+        scan->count++;
+    } else {
+        /* A process that exited between readdir and stat is harmless; a still-live but unreadable
+         * PID makes the ancestry census incomplete, so callers must fail closed. */
+        int kill_result = kill(pid, 0);
+        if (kill_result == 0 || errno != ESRCH) return 1;
+    }
+    return 0;
+}
+
+static int signal_supervisor_tree(
     pid_t sup_pid,
     pid_t parent_pid,
     pid_t cmd_pid,
     int64_t cmd_start_ticks,
     int sig,
     int32_t *out_survivor_pid,
-    int64_t *out_survivor_ticks
+    int64_t *out_survivor_ticks,
+    int *out_survivor_count
 ) {
     pid_t sup_pgrp = getpgrp();
     if (cmd_pid > 1 && cmd_start_ticks > 0) {
@@ -219,27 +320,18 @@ static void signal_supervisor_tree(
         }
     }
 
-    size_t count = 0;
-    DIR *dir = opendir("/proc");
-    if (dir != NULL) {
-        struct dirent *de;
-        while ((de = readdir(dir)) != NULL && count < MAR_MAX_PROC_SNAPSHOT) {
-            if (!isdigit((unsigned char)de->d_name[0])) continue;
-            pid_t pid = (pid_t)atoi(de->d_name);
-            if (pid <= 1 || pid == sup_pid || pid == parent_pid) continue;
-            if (read_proc_stat(pid, &g_proc_snap[count]) == 0) {
-                count++;
-            }
-        }
-        closedir(dir);
-    }
+    mar_proc_scan_t scan = {.sup_pid = sup_pid, .skip_pid = parent_pid, .count = 0};
+    int scan_result = walk_proc_dir("/proc", collect_proc_stat_visitor, &scan);
+    size_t count = scan.count;
 
     int survivor_count = 0;
     int32_t single_pid = 0;
     int64_t single_ticks = 0;
+    int outside_cmd_group = 0;
 
     for (size_t i = 0; i < count; i++) {
-        if (!is_descendant_of_sup((int)i, g_proc_snap, count, sup_pid, cmd_pid)) continue;
+        /* Parent ancestry is authoritative; a bare pgrp match can belong to a reused cmd PID. */
+        if (!is_descendant_of_sup((int)i, g_proc_snap, count, sup_pid)) continue;
         pid_t target_pid = (pid_t)g_proc_snap[i].pid;
         mar_proc_stat_t verify_st;
         if (read_proc_stat(target_pid, &verify_st) != 0) continue;
@@ -250,6 +342,9 @@ static void signal_supervisor_tree(
                 single_pid = verify_st.pid;
                 single_ticks = verify_st.start_ticks;
             }
+            if (cmd_pid > 1 && verify_st.pgrp != (int32_t)cmd_pid) {
+                outside_cmd_group = 1;
+            }
         }
         if (verify_st.pgrp > 1 && verify_st.pgrp != (int32_t)sup_pgrp) {
             kill(-verify_st.pgrp, sig);
@@ -257,16 +352,28 @@ static void signal_supervisor_tree(
         kill(target_pid, sig);
     }
 
+    if (out_survivor_count != NULL) {
+        *out_survivor_count = survivor_count;
+    }
     if (out_survivor_pid != NULL && out_survivor_ticks != NULL) {
-        if (survivor_count == 1) {
+        /*
+         * Quiescence can only carry one (pid, start_ticks) plus the command pgid. Report a
+         * representative when it proves something:
+         *  - a single survivor is tracked exactly;
+         *  - several survivors are safe only when every one of them is inside the command
+         *    process group, because the group census then covers the rest;
+         *  - multiple setsid escapees outside the group cannot be represented, so fail closed.
+         */
+        if (scan_result == 0 && (survivor_count == 1 ||
+            (survivor_count > 1 && cmd_pid > 1 && !outside_cmd_group))) {
             *out_survivor_pid = single_pid;
             *out_survivor_ticks = single_ticks;
         } else {
-            // 0 observed due to race or >1 survivors outside cmd_pgid: fail closed (0).
             *out_survivor_pid = 0;
             *out_survivor_ticks = 0;
         }
     }
+    return scan_result;
 }
 
 static void drain_sig_pipe(int fd) {
@@ -278,8 +385,7 @@ static void drain_sig_pipe(int fd) {
 static int reap_available_children(
     pid_t cmd_pid,
     int *leader_exited,
-    int *leader_exit_code,
-    int *leaked_descendants
+    int *leader_exit_code
 ) {
     while (1) {
         int wstatus = 0;
@@ -290,9 +396,13 @@ static int reap_available_children(
                     *leader_exited = 1;
                     *leader_exit_code = decode_wait_status(wstatus);
                 }
-            } else {
-                *leaked_descendants = 1;
             }
+            /*
+             * An adopted descendant that is reapable has already exited normally. That is not a
+             * leak: the "left processes behind" signal is the live-tree check after the leader
+             * exits. Flagging every reaped orphan made ordinary subshell/pipe/background exits
+             * degrade a clean `exit 0`.
+             */
             continue;
         }
         if (wpid == 0) {
@@ -305,6 +415,48 @@ static int reap_available_children(
             return 1; // Subreaper tree is completely empty
         }
         return -1;
+    }
+}
+
+static void consume_control_byte(
+    int ctrl_read_fd,
+    int *timed_out,
+    int *cancelled,
+    int *terminate_triggered,
+    int *parent_died
+) {
+    char ctrl_byte = 0;
+    ssize_t nr = read(ctrl_read_fd, &ctrl_byte, 1);
+    if (nr == 1) {
+        if (ctrl_byte == 'T') {
+            *timed_out = 1;
+        } else {
+            *cancelled = 1;
+        }
+        *terminate_triggered = 1;
+    } else if (nr == 0) {
+        *parent_died = 1;
+        *cancelled = 1;
+        *terminate_triggered = 1;
+    } else if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+        /* An unreadable control channel cannot establish that the caller is still present. */
+        *parent_died = 1;
+        *cancelled = 1;
+        *terminate_triggered = 1;
+    }
+}
+
+static void consume_control_if_ready(
+    int ctrl_read_fd,
+    int *timed_out,
+    int *cancelled,
+    int *terminate_triggered,
+    int *parent_died
+) {
+    struct pollfd pfd = {.fd = ctrl_read_fd, .events = POLLIN};
+    if (poll(&pfd, 1, 0) > 0 && (pfd.revents & (POLLIN | POLLHUP | POLLERR))) {
+        consume_control_byte(
+            ctrl_read_fd, timed_out, cancelled, terminate_triggered, parent_died);
     }
 }
 
@@ -368,6 +520,7 @@ static void run_supervisor_process(
         _exit(123);
     }
 
+    pid_t sup_pid = getpid();
     pid_t cmd_pid = fork();
     if (cmd_pid < 0) {
         _exit(124);
@@ -386,22 +539,24 @@ static void run_supervisor_process(
         sigemptyset(&empty);
         sigprocmask(SIG_SETMASK, &empty, NULL);
 
-        prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+        if (prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) != 0 || getppid() != sup_pid) {
+            _exit(125);
+        }
         if (setsid() < 0) {
             _exit(125);
         }
-        if (cwd != NULL && cwd[0] != '\0') {
-            if (chdir(cwd) != 0) {
-                _exit(126);
-            }
+        if (dup2(stdout_write_fd, STDOUT_FILENO) < 0 || dup2(stderr_write_fd, STDERR_FILENO) < 0) {
+            _exit(125);
         }
         int devnull = open("/dev/null", O_RDONLY | O_CLOEXEC);
         if (devnull < 0 || dup2(devnull, STDIN_FILENO) < 0) {
             _exit(125);
         }
         if (devnull > STDIN_FILENO) close(devnull);
-        if (dup2(stdout_write_fd, STDOUT_FILENO) < 0 || dup2(stderr_write_fd, STDERR_FILENO) < 0) {
-            _exit(125);
+        if (cwd != NULL && cwd[0] != '\0' && chdir(cwd) != 0) {
+            static const char message[] = "Root shell: working directory is unavailable\n";
+            (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+            _exit(126);
         }
         close_extra_fds_keep4(-1, -1, -1, -1);
 
@@ -423,7 +578,7 @@ static void run_supervisor_process(
     int leader_exit_code = -1;
     int timed_out = 0;
     int cancelled = 0;
-    int leaked_descendants = 0;
+    int descendants_observed = 0;
     int terminate_triggered = 0;
     int parent_died = 0;
 
@@ -435,7 +590,7 @@ static void run_supervisor_process(
             break;
         }
         int empty_now = reap_available_children(
-            cmd_pid, &leader_exited, &leader_exit_code, &leaked_descendants);
+            cmd_pid, &leader_exited, &leader_exit_code);
         if (leader_exited || empty_now == 1) {
             break;
         }
@@ -452,81 +607,140 @@ static void run_supervisor_process(
                 drain_sig_pipe(sig_pipe[0]);
             }
             if (pfds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
-                char ctrl_byte = 0;
-                ssize_t nr = read(ctrl_read_fd, &ctrl_byte, 1);
-                if (nr == 1) {
-                    if (ctrl_byte == 'T') {
-                        timed_out = 1;
-                    } else {
-                        cancelled = 1;
-                    }
-                    terminate_triggered = 1;
-                } else if (nr == 0) {
-                    parent_died = 1;
-                    cancelled = 1;
-                    terminate_triggered = 1;
-                }
+                consume_control_byte(
+                    ctrl_read_fd, &timed_out, &cancelled, &terminate_triggered, &parent_died);
             }
         }
     }
 
     // Reap anything already exited when leader exited or terminate triggered.
     int tree_empty = reap_available_children(
-        cmd_pid, &leader_exited, &leader_exit_code, &leaked_descendants);
-
-    if (leader_exited && !terminate_triggered && tree_empty != 1) {
-        // Leader exited, yet at least one descendant in the subreaper tree is still alive!
-        leaked_descendants = 1;
-    }
+        cmd_pid, &leader_exited, &leader_exit_code);
 
     int32_t d_state_pid = 0;
     int64_t d_state_ticks = 0;
-    pid_t sup_pid = getpid();
 
-    if (tree_empty != 1) {
-        // Phase 1: SIGTERM + grace period (skipped if parent died).
-        if (!parent_died && grace_ms > 0) {
-            signal_supervisor_tree(sup_pid, parent_pid, cmd_pid, cmd_start_ticks, SIGTERM, NULL, NULL);
-            int64_t grace_deadline = now_monotonic_ms() + grace_ms;
-            while (now_monotonic_ms() < grace_deadline) {
-                if (g_parent_term_received) {
-                    parent_died = 1;
-                    break;
-                }
-                tree_empty = reap_available_children(
-                    cmd_pid, &leader_exited, &leader_exit_code, &leaked_descendants);
-                if (tree_empty == 1) break;
-                struct pollfd pfd = {.fd = sig_pipe[0], .events = POLLIN};
-                if (poll(&pfd, 1, 20) > 0) {
-                    drain_sig_pipe(sig_pipe[0]);
+    /*
+     * A normal leader exit can precede a short-lived pipeline/background child. Give it the
+     * already-clamped grace interval to finish on its own before sending any signal. This wait is
+     * bounded and continues to observe caller cancellation/deadline and service death.
+     *
+     * Nothing seen inside this window is evidence of a leak. Latching `descendants_observed` at
+     * T+0 (or on every poll of this loop) turned `cmd | head` and short-lived backgrounded helpers
+     * that exit in a few milliseconds into `leaked_descendants = 1`, which made the caller report
+     * UNKNOWN_OUTCOME and discard the captured output. Only a descendant that outlives the whole
+     * window, or a census that cannot be completed, is reported as leaked below.
+     */
+    int natural_drain_expired = 0;
+    if (leader_exited && !terminate_triggered && tree_empty == 0) {
+        /* Zero termination grace still receives a short natural drain window after normal exit. */
+        const int64_t natural_grace_ms = (grace_ms > 0) ? grace_ms : MAR_NORMAL_EXIT_DRAIN_MS;
+        const int64_t natural_deadline = now_monotonic_ms() + natural_grace_ms;
+        while (tree_empty == 0 && now_monotonic_ms() < natural_deadline) {
+            if (g_parent_term_received) {
+                parent_died = 1;
+                cancelled = 1;
+                terminate_triggered = 1;
+                break;
+            }
+            consume_control_if_ready(
+                ctrl_read_fd, &timed_out, &cancelled, &terminate_triggered, &parent_died);
+            if (terminate_triggered) break;
+
+            tree_empty = reap_available_children(
+                cmd_pid, &leader_exited, &leader_exit_code);
+            if (tree_empty != 0) break;
+
+            const int64_t remaining = natural_deadline - now_monotonic_ms();
+            const int wait_ms = (remaining < 20L) ? (int)remaining : 20;
+            struct pollfd pfds[2];
+            pfds[0].fd = ctrl_read_fd;
+            pfds[0].events = POLLIN;
+            pfds[1].fd = sig_pipe[0];
+            pfds[1].events = POLLIN;
+            int pr = poll(pfds, 2, wait_ms > 0 ? wait_ms : 1);
+            if (pr > 0) {
+                if (pfds[1].revents & POLLIN) drain_sig_pipe(sig_pipe[0]);
+                if (pfds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
+                    consume_control_byte(
+                        ctrl_read_fd, &timed_out, &cancelled, &terminate_triggered, &parent_died);
                 }
             }
         }
+        /*
+         * The window only proves "no leak" when it ended because the tree emptied. Reaching the
+         * deadline leaves descendants alive; a termination request during the window means they
+         * were still running when the caller asked to stop, so the later cleanup stages decide.
+         */
+        if (tree_empty == 0 && !terminate_triggered) {
+            natural_drain_expired = 1;
+        }
+    }
+    if (leader_exited && natural_drain_expired) {
+        descendants_observed = 1;
+    }
 
-        // Phase 2: SIGKILL + settle budget until waitpid(-1) == -1 && errno == ECHILD.
-        if (tree_empty != 1) {
-            int64_t kill_deadline = now_monotonic_ms() + MAR_SETTLE_BUDGET_MS;
-            while (1) {
-                signal_supervisor_tree(
-                    sup_pid, parent_pid, cmd_pid, cmd_start_ticks, SIGKILL, &d_state_pid, &d_state_ticks);
-                tree_empty = reap_available_children(
-                    cmd_pid, &leader_exited, &leader_exit_code, &leaked_descendants);
-                if (tree_empty == 1) break;
-                if (now_monotonic_ms() >= kill_deadline) break;
-                struct pollfd pfd = {.fd = sig_pipe[0], .events = POLLIN};
-                if (poll(&pfd, 1, 15) > 0) {
-                    drain_sig_pipe(sig_pipe[0]);
-                }
+    // Phase 1: SIGTERM + grace period (skipped if parent died).
+    if (tree_empty != 1 && !parent_died && grace_ms > 0) {
+        (void)signal_supervisor_tree(
+            sup_pid, parent_pid, cmd_pid, cmd_start_ticks, SIGTERM, NULL, NULL, NULL);
+        int64_t grace_deadline = now_monotonic_ms() + grace_ms;
+        while (now_monotonic_ms() < grace_deadline) {
+            if (g_parent_term_received) {
+                parent_died = 1;
+                break;
+            }
+            tree_empty = reap_available_children(
+                cmd_pid, &leader_exited, &leader_exit_code);
+            if (tree_empty == 0 && leader_exited) descendants_observed = 1;
+            if (tree_empty == 1) break;
+            struct pollfd pfd = {.fd = sig_pipe[0], .events = POLLIN};
+            if (poll(&pfd, 1, 20) > 0) {
+                drain_sig_pipe(sig_pipe[0]);
             }
         }
     }
 
-    if (tree_empty != 1) {
-        // Final check and record any surviving D-state or un-reaped descendant.
-        signal_supervisor_tree(
-            sup_pid, parent_pid, cmd_pid, cmd_start_ticks, SIGKILL, &d_state_pid, &d_state_ticks);
-        tree_empty = reap_available_children(
-            cmd_pid, &leader_exited, &leader_exit_code, &leaked_descendants);
+    /* Final census must be complete and empty as well as waitpid(-1) reporting ECHILD. */
+    int final_survivor_count = 0;
+    int final_scan_result = 1;
+    if (tree_empty == 1) {
+        final_scan_result = signal_supervisor_tree(
+            sup_pid, parent_pid, cmd_pid, cmd_start_ticks, 0,
+            &d_state_pid, &d_state_ticks, &final_survivor_count);
+        if (final_survivor_count > 0 && leader_exited) descendants_observed = 1;
+    }
+
+    if (tree_empty != 1 || final_scan_result != 0 || final_survivor_count != 0) {
+        // Keep signaling/reaping until both the subreaper tree and a complete /proc census are empty.
+        const int64_t kill_deadline = now_monotonic_ms() + MAR_SETTLE_BUDGET_MS;
+        while (1) {
+            final_scan_result = signal_supervisor_tree(
+                sup_pid, parent_pid, cmd_pid, cmd_start_ticks, SIGKILL,
+                &d_state_pid, &d_state_ticks, &final_survivor_count);
+            if (final_survivor_count > 0 && leader_exited) descendants_observed = 1;
+            tree_empty = reap_available_children(
+                cmd_pid, &leader_exited, &leader_exit_code);
+            if (tree_empty == 0 && leader_exited) descendants_observed = 1;
+            if (tree_empty == 1 && final_scan_result == 0 && final_survivor_count == 0) break;
+            if (now_monotonic_ms() >= kill_deadline) break;
+            struct pollfd pfd = {.fd = sig_pipe[0], .events = POLLIN};
+            if (poll(&pfd, 1, 15) > 0) drain_sig_pipe(sig_pipe[0]);
+        }
+    }
+
+    consume_control_if_ready(
+        ctrl_read_fd, &timed_out, &cancelled, &terminate_triggered, &parent_died);
+
+    /*
+     * A completed /proc census is part of the evidence, not an optimisation. When it could not be
+     * completed after the leader exited (walk failure, an unreadable live PID, or a truncated
+     * snapshot) "there is no leaked descendant" is unproven, so fail closed instead of claiming a
+     * clean tree. This is deliberately independent of `settled`: an incomplete capture must never
+     * be silently reported as a leak-free command.
+     */
+    if (leader_exited && final_scan_result != 0) {
+        descendants_observed = 1;
     }
 
     mar_supervisor_report_t report;
@@ -535,11 +749,11 @@ static void run_supervisor_process(
     report.exit_code = leader_exit_code;
     report.timed_out = timed_out ? 1 : 0;
     report.cancelled = cancelled ? 1 : 0;
-    report.leaked_descendants = leaked_descendants ? 1 : 0;
-    report.settled = (tree_empty == 1) ? 1 : 0;
+    report.leaked_descendants = descendants_observed ? 1 : 0;
+    report.settled = (tree_empty == 1 && final_scan_result == 0 && final_survivor_count == 0) ? 1 : 0;
     report.cmd_pgid = (int32_t)cmd_pid;
-    report.unreaped_pid = (tree_empty == 1) ? 0 : d_state_pid;
-    report.unreaped_start_ticks = (tree_empty == 1) ? 0 : d_state_ticks;
+    report.unreaped_pid = (report.settled == 1) ? 0 : d_state_pid;
+    report.unreaped_start_ticks = (report.settled == 1) ? 0 : d_state_ticks;
 
     ssize_t written = write(status_write_fd, &report, sizeof(report));
     (void)written;
@@ -622,6 +836,18 @@ typedef struct {
 #define MAR_DRAIN_MAX_READS 8
 #define MAR_DRAIN_BUDGET_MS 5L
 
+static void append_bytes(mar_byte_buf_t *buf, const uint8_t *data, size_t n) {
+    size_t room = (buf->cap > buf->len) ? (buf->cap - buf->len) : 0;
+    size_t keep = (n < room) ? n : room;
+    if (keep > 0) {
+        memcpy(buf->data + buf->len, data, keep);
+        buf->len += keep;
+    }
+    if (n > room) {
+        buf->truncated = 1;
+    }
+}
+
 static int drain_pipe_nonblocking(int *fd, mar_byte_buf_t *buf) {
     if (fd == NULL || *fd < 0) return 0;
     uint8_t scratch[8192];
@@ -634,17 +860,7 @@ static int drain_pipe_nonblocking(int *fd, mar_byte_buf_t *buf) {
         attempts++;
         ssize_t n = read(*fd, scratch, sizeof(scratch));
         if (n > 0) {
-            size_t rem = (buf->cap > buf->len) ? (buf->cap - buf->len) : 0;
-            if (rem > 0) {
-                size_t to_copy = ((size_t)n < rem) ? (size_t)n : rem;
-                memcpy(buf->data + buf->len, scratch, to_copy);
-                buf->len += to_copy;
-                if ((size_t)n > to_copy) {
-                    buf->truncated = 1;
-                }
-            } else {
-                buf->truncated = 1;
-            }
+            append_bytes(buf, scratch, (size_t)n);
             /* A full buffer keeps draining (bytes must leave the pipe) but the time budget the
              * loop checks bounds this single call. */
             continue;
@@ -659,6 +875,39 @@ static int drain_pipe_nonblocking(int *fd, mar_byte_buf_t *buf) {
         return 0;
     }
     return 1;
+}
+
+/*
+ * Final bounded flush after the status pipe is closed.
+ *
+ * The supervisor process holds the only remaining stdout/stderr writers during a normal run, so
+ * EOF arrives immediately after it exits. A hard-killed supervisor or an escaped writer can keep a
+ * pipe open; the deadline bounds that case and the caller marks the capture truncated because the
+ * returned output may be incomplete.
+ */
+static int flush_pipe_to_eof(int *fd, mar_byte_buf_t *buf, int64_t deadline_ms) {
+    if (fd == NULL || *fd < 0) return 0;
+    uint8_t scratch[8192];
+    for (;;) {
+        if (now_monotonic_ms() >= deadline_ms) return 1;
+        ssize_t n = read(*fd, scratch, sizeof(scratch));
+        if (n > 0) {
+            append_bytes(buf, scratch, (size_t)n);
+            continue;
+        }
+        if (n == 0) {
+            close_quietly(fd);
+            return 0;
+        }
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            struct pollfd pfd = {.fd = *fd, .events = POLLIN};
+            (void)poll(&pfd, 1, 20);
+            continue;
+        }
+        close_quietly(fd);
+        return 0;
+    }
 }
 
 JNIEXPORT jboolean JNICALL
@@ -817,16 +1066,20 @@ Java_runtime_mobileagent_privileged_RootNativeSupervisorJni_nativeRunSupervised(
         }
     }
 
-    if (cwd_copy != NULL) {
-        struct stat st;
-        if (stat(cwd_copy, &st) != 0 || !S_ISDIR(st.st_mode) || access(cwd_copy, X_OK) != 0) {
-            free(command_copy);
-            free(cwd_copy);
-            meta[0] = -2;
-            (*env)->SetLongArrayRegion(env, out_meta, 0, 11, meta);
-            return NULL;
-        }
-    }
+    /*
+     * Do NOT validate `cwd` here.
+     *
+     * The supervised child validates it itself, immediately before it execs the command
+     * (`chdir` failure -> fixed, path-free diagnostic on the captured stderr -> _exit(126)`), so a
+     * nonexistent/unusable working directory still starts a supervised process and reports 126
+     * like any other pre-exec failure. A parent-side `stat`/`access` precheck was both a TOCTOU
+     * window and a dead-code generator: it returned `startStatus = -2` before any child existed,
+     * which made the 126 path unreachable for every real workspace path and collapsed "started,
+     * then failed before exec" into "could not start" (`OPERATION_UNAVAILABLE`, no diagnostic).
+     *
+     * Root Shell cwd is not a directory sandbox (ADR0057): no O_NOFOLLOW walk and no command
+     * blacklist is added, and workspace identity checks stay in the typed file layer.
+     */
 
     jsize env_count = (env_array != NULL) ? (*env)->GetArrayLength(env, env_array) : 0;
     if (env_count < 0 || env_count > 128) env_count = 0;
@@ -892,6 +1145,9 @@ Java_runtime_mobileagent_privileged_RootNativeSupervisorJni_nativeRunSupervised(
     }
 
     int64_t clamped_timeout = (timeout_ms < 50L) ? 50L : timeout_ms;
+    if (clamped_timeout > MAR_MAX_TIMEOUT_MS) {
+        clamped_timeout = MAR_MAX_TIMEOUT_MS;
+    }
     int64_t clamped_grace = (grace_ms < 0L) ? 0L : ((grace_ms > 5000L) ? 5000L : grace_ms);
     size_t max_bytes = (max_output_bytes < 1024) ? 1024U :
                        ((max_output_bytes > 262144) ? 262144U : (size_t)max_output_bytes);
@@ -965,6 +1221,7 @@ Java_runtime_mobileagent_privileged_RootNativeSupervisorJni_nativeRunSupervised(
     int64_t deadline_ms = now_monotonic_ms() + clamped_timeout;
     int64_t hard_kill_deadline_ms = 0;
     int ctrl_sent = 0;
+    char ctrl_reason = 0;
     mar_supervisor_report_t report;
     memset(&report, 0, sizeof(report));
     size_t report_bytes = 0;
@@ -976,6 +1233,7 @@ Java_runtime_mobileagent_privileged_RootNativeSupervisorJni_nativeRunSupervised(
             ssize_t w = write(ctrl_pipe[1], &t, 1);
             (void)w;
             ctrl_sent = 1;
+            ctrl_reason = 'T';
             hard_kill_deadline_ms = now + clamped_grace + MAR_SETTLE_BUDGET_MS + 1000L;
         }
         if (ctrl_sent && hard_kill_deadline_ms > 0 && now >= hard_kill_deadline_ms) {
@@ -1034,6 +1292,7 @@ Java_runtime_mobileagent_privileged_RootNativeSupervisorJni_nativeRunSupervised(
                     ssize_t w = write(ctrl_pipe[1], &c, 1);
                     (void)w;
                     ctrl_sent = 1;
+                    ctrl_reason = 'C';
                     hard_kill_deadline_ms = now_monotonic_ms() + clamped_grace + MAR_SETTLE_BUDGET_MS + 1000L;
                 }
             }
@@ -1064,8 +1323,20 @@ Java_runtime_mobileagent_privileged_RootNativeSupervisorJni_nativeRunSupervised(
         }
     }
 
-    drain_pipe_nonblocking(&stdout_pipe[0], &out_buf);
-    drain_pipe_nonblocking(&stderr_pipe[0], &err_buf);
+    /*
+     * The status report only proves that the supervisor finished; stdout/stderr may still hold
+     * buffered bytes (and a hard-killed supervisor can leave a writer alive). Drain to EOF so
+     * everything below max_output_bytes is preserved, and mark truncation when EOF was not
+     * reached within the bounded flush.
+     */
+    if (flush_pipe_to_eof(
+            &stdout_pipe[0], &out_buf, now_monotonic_ms() + MAR_FINAL_DRAIN_BUDGET_MS) != 0) {
+        out_buf.truncated = 1;
+    }
+    if (flush_pipe_to_eof(
+            &stderr_pipe[0], &err_buf, now_monotonic_ms() + MAR_FINAL_DRAIN_BUDGET_MS) != 0) {
+        err_buf.truncated = 1;
+    }
     close_quietly(&stdout_pipe[0]);
     close_quietly(&stderr_pipe[0]);
     close_quietly(&ctrl_pipe[1]);
@@ -1093,8 +1364,8 @@ Java_runtime_mobileagent_privileged_RootNativeSupervisorJni_nativeRunSupervised(
         meta[0] = -3;
         meta[1] = 0;
         meta[2] = -1;
-        meta[3] = ctrl_sent ? 1 : 0;
-        meta[4] = 0;
+        meta[3] = (ctrl_reason == 'T') ? 1 : 0;
+        meta[4] = (ctrl_reason == 'C') ? 1 : 0;
         meta[5] = 1;
         meta[6] = 0;
         meta[7] = out_buf.truncated ? 1 : 0;

@@ -5,7 +5,6 @@ package runtime.mobileagent.privileged
 
 import android.content.Context
 import java.io.File
-import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.concurrent.ConcurrentHashMap
 import runtime.mobileagent.SettingsAuthorityProviderState
@@ -13,6 +12,7 @@ import runtime.mobileagent.SettingsAuthoritySnapshot
 import runtime.mobileagent.SettingsSafGrantState
 import runtime.mobileagent.data.AuthorityPolicyRepository
 import runtime.mobileagent.data.RootAuthorityRepository
+import runtime.mobileagent.data.RootReceiptRecoveryCoordinator
 import runtime.mobileagent.data.RootDispatchRepository
 import runtime.mobileagent.data.RootToolExposureGate
 import runtime.mobileagent.data.SqlConnection
@@ -33,13 +33,10 @@ import runtime.mobileagent.domain.RootChannelUiStatus
 import runtime.mobileagent.domain.RootControlPlaneBoundary
 import runtime.mobileagent.domain.RootExecutionBudget
 import runtime.mobileagent.domain.RootExecutionStamp
-import runtime.mobileagent.domain.RootFileMetadataSnapshot
-import runtime.mobileagent.domain.RootFileOperationResult
 import runtime.mobileagent.domain.RootHostControlGate
 import runtime.mobileagent.domain.RootServiceLifecycleCoordinator
 import runtime.mobileagent.domain.RootServiceSession
 import runtime.mobileagent.domain.RootTypedArguments
-import runtime.mobileagent.domain.RootWorkspaceFileExecutor
 import runtime.mobileagent.domain.isRootAuthority
 import runtime.mobileagent.security.AndroidAppInstanceIdStoreFactory
 import runtime.mobileagent.shizuku.ShizukuAuthorityState
@@ -50,12 +47,7 @@ import runtime.mobileagent.skills.tooling.ElevatedAuthority
 import runtime.mobileagent.skills.tooling.FullDeviceFilesGrantStore
 import runtime.mobileagent.skills.tooling.PlatformGrant
 import runtime.mobileagent.skills.tooling.PrivilegedWorkspaceProvider
-import runtime.mobileagent.skills.tooling.ShellExecRequest
-import runtime.mobileagent.skills.tooling.ShellExecResult
-import runtime.mobileagent.skills.tooling.ShellExecutionStatus
 import runtime.mobileagent.skills.tooling.ShellExecutor
-import runtime.mobileagent.skills.tooling.ToolError
-import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.skills.tooling.WorkspaceBackend
 import runtime.mobileagent.tooling.AuthorityManager
 
@@ -68,7 +60,6 @@ class RootRuntimeCoordinator(
     private val db: SqlConnection,
     private val fdOps: PosixFdOperations = AndroidOsPosixFdOperations(),
     private val sessionConnector: RootSessionConnector = AndroidRootSessionConnector(context),
-    private val shellRunner: RootShellCommandRunner = Uid0ProcessGroupShellRunner(),
     private val controlPlaneBoundaryOverride: RootControlPlaneBoundary? = null,
     private val locatorCipher: RootLocatorCipher = AndroidRootLocatorCipher(),
 ) : AutoCloseable {
@@ -116,7 +107,7 @@ class RootRuntimeCoordinator(
         private set
 
     /**
-     * Bound authorization observation for the live session. Only a GRANTED value may allow
+     * Bound authorization observation for the live session. Only a granted manager or authenticated generic session may allow
      * dispatch; every other state (unknown, unsupported, unreadable, mismatched identity) blocks
      * new work and retires the session.
      */
@@ -164,7 +155,7 @@ class RootRuntimeCoordinator(
         hostGate = { activeSessions[Authority.SHIZUKU_ROOT]?.hostControlGate },
         markDegraded = { revision, epoch ->
             runCatching {
-                rootAuthorityRepository.markDegraded(Authority.SHIZUKU_ROOT, revision, epoch)
+                markDegradedIfWorkUncertain(Authority.SHIZUKU_ROOT, revision, epoch)
             }
         },
         detach = { reason -> detachSession(Authority.SHIZUKU_ROOT, reason) },
@@ -195,17 +186,13 @@ class RootRuntimeCoordinator(
                 ) {
                     return@synchronized false
                 }
-                if (decision == RootManagerAuthorization.GRANTED) {
-                    managerAuthorization.set(RootManagerAuthorization.GRANTED)
+                if (decision.permitsSession) {
+                    managerAuthorization.set(decision)
                     return@synchronized true
                 }
                 managerAuthorization.set(null)
                 runCatching {
-                    rootAuthorityRepository.markDegraded(
-                        Authority.ROOT_DIRECT,
-                        live.revision,
-                        live.identityEpoch,
-                    )
+                    markDegradedIfWorkUncertain(Authority.ROOT_DIRECT, live.revision, live.identityEpoch)
                 }
                 detachSession(Authority.ROOT_DIRECT, "manager_authorization_${reason.take(32)}")
                 false
@@ -252,19 +239,8 @@ class RootRuntimeCoordinator(
         val excluded = rootDispatchRepository.activePermitRequestIds()
         val recovered = rootToolExposureGate.reconcileStartupUncertainPermits(excluded)
         lastRecoveredRequestIds = recovered
+        RootReceiptRecoveryCoordinator(db).pruneSettledReceipts(excluded)
         return recovered
-    }
-
-    fun registerBackends(
-        shellBackends: MutableMap<ElevatedAuthority, ShellExecutor>,
-        workspaceBackends: MutableMap<ElevatedAuthority, WorkspaceBackend>,
-        privilegedWorkspaceProviders: MutableMap<Authority, PrivilegedWorkspaceProvider>,
-        fullDeviceGrantStore: FullDeviceFilesGrantStore,
-    ) {
-        // Production admission is intentionally closed. OS-pinned bootstrap, retained
-        // workspace FD lifecycle, atomic mutation and Run/approval UI must be wired and
-        // reviewed together before these adapters can enter the tool factory.
-        // Keep the isolated adapters available to deterministic regression tests only.
     }
 
     fun setUserIntent(
@@ -278,6 +254,11 @@ class RootRuntimeCoordinator(
         // The manager's intent CAS advances the policy version, so it must run before the consent is
         // bound; otherwise the fresh consent immediately references a stale policy version and the
         // execution stamp silently becomes null.
+        if (enabled && rootAuthorityRepository.get(authority).degraded) {
+            check(acknowledgeDegradedRecovery(authority, true, authorityManager, shizukuState, enableAfterRecovery = true) != null) {
+                "ROOT_RECOVERY_RESTART_REQUIRED"
+            }
+        }
         val elevated = toElevatedRoot(authority)
         check(authorityManager.setUserIntent(elevated, enabled))
         val policyVersion = authorityPolicyRepository.getPolicy().policyVersion
@@ -360,6 +341,13 @@ class RootRuntimeCoordinator(
 
     /** Only an explicit foreground request for this channel may acquire a new service. */
     fun requestSessionFromForeground(authority: Authority, shizukuState: ShizukuAuthorityState?): Boolean {
+        synchronized(this) {
+            activeSessions[authority]?.takeIf { !it.transport.isAlive() }?.let {
+                val record = rootAuthorityRepository.get(authority)
+                markDegradedIfWorkUncertain(authority, record.revision, record.identityEpoch)
+                detachSession(authority, "service_disconnected")
+            }
+        }
         val acquisition = RootForegroundAcquisition(
             connector = sessionConnector,
             currentRecord = { rootAuthorityRepository.get(authority) },
@@ -373,6 +361,7 @@ class RootRuntimeCoordinator(
                 synchronized(this) {
                     if (acquisitionsClosed || acquisitionGenerations[authority] != generation ||
                         !rootAuthorityRepository.get(authority).consent.enabled ||
+                        !RootReceiptRecoveryCoordinator(db).recordSessionBoot(authority, acquired.kernelBootId, acquired.kernelElapsedRealtimeMs) ||
                         !sessionConnector.completeAcquisition(authority, acquired.attemptToken)
                     ) {
                         false
@@ -387,7 +376,6 @@ class RootRuntimeCoordinator(
                     }
                 }
             },
-            abort = { acquired -> sessionConnector.abortAcquisition(authority, acquired.attemptToken) },
             verifyAuthorization = { observeManagerAuthorizationBound() },
         )
         return acquisition.request(authority, appInstanceId, shizukuState)
@@ -403,10 +391,7 @@ class RootRuntimeCoordinator(
     ): RootServiceSession? {
         if (acquisitionsClosed) return null
         require(authority.isRootAuthority) { "Expected Root authority: $authority" }
-        if (identity.authority != authority || identity.privilegeTier != PrivilegeTier.ROOT || identity.serviceUid != 0) {
-            return null
-        }
-        if (!caller.matches(identity) || identity.protocolVersion != PrivilegedSessionIdentity.ROOT_PROTOCOL_VERSION) return null
+        if (!RootCoordinatorReadiness.matchesRootCaller(authority, identity, caller)) return null
         val resolvedTransport = transport ?: return null
         val boundary = observedBoundary ?: observeControlPlaneBoundary() ?: return null
         val record = rootAuthorityRepository.get(authority)
@@ -446,6 +431,18 @@ class RootRuntimeCoordinator(
         return session
     }
 
+    /**
+     * Disconnecting an idle authenticated service is not an uncertain execution. Fence first,
+     * then inspect the dispatch journal; attempted or unreadable obligations remain degraded.
+     */
+    private fun markDegradedIfWorkUncertain(authority: Authority, revision: Long, epoch: Long) {
+        activeSessions[authority]?.hostControlGate?.markRevoked()
+        val drain = runtime.mobileagent.data.RootPendingDrainRepository(db).load(authority)
+        if (drain !is runtime.mobileagent.data.RootPendingDrainLoad.Missing ||
+            rootDispatchRepository.hasUnconfirmedRemoteWork(authority)
+        ) rootAuthorityRepository.markDegraded(authority, revision, epoch)
+    }
+
     fun detachSession(authority: Authority, reason: String) {
         if (authority == Authority.ROOT_DIRECT) managerAuthorization.set(null)
         invalidateAcquisitions(authority)
@@ -465,21 +462,41 @@ class RootRuntimeCoordinator(
         userConfirmed: Boolean,
         authorityManager: AuthorityManager? = null,
         shizukuState: ShizukuAuthorityState? = null,
+        enableAfterRecovery: Boolean = false,
     ): RootAuthorityRecord? {
+        if (!userConfirmed) return null
         val recovered = RootCoordinatorQuiescenceSupport.acknowledgeDegradedRecovery(
-            db = db,
-            authority = authority,
-            userConfirmed = userConfirmed,
-            activeSessions = activeSessions,
-            retiringSessions = retiringSessions,
-            dispatchBridge = dispatchBridge,
-            dispatchRepository = rootDispatchRepository,
-            authorityRepository = rootAuthorityRepository,
-        )
+            db, authority, userConfirmed, activeSessions, retiringSessions, dispatchBridge,
+            rootDispatchRepository, rootAuthorityRepository,
+        ) ?: recoverAfterDeviceRestart(authority, shizukuState, enableAfterRecovery)
         if (recovered != null && authorityManager != null) {
             syncAuthorityManagerStates(authorityManager, shizukuState)
         }
         return recovered
+    }
+
+    /** The recovery helper owns its candidate transport; the coordinator retains the state lock. */
+    private fun recoverAfterDeviceRestart(
+        authority: Authority, shizukuState: ShizukuAuthorityState?, enableAfterRecovery: Boolean,
+    ): RootAuthorityRecord? = RootCoordinatorQuiescenceSupport.acquireAfterDeviceRestart(
+        db, authority, appInstanceId, sessionConnector, shizukuState, enableAfterRecovery,
+        stateLock = this,
+        captureState = { recoveryProbeState(authority) },
+        resolveBoundary = ::observeControlPlaneBoundary,
+        enableConsent = { enableConsentInRepo(authority, authorityPolicyRepository.getPolicy().policyVersion) },
+        attach = { acquired, boundary ->
+            attachVerifiedRootSession(authority, acquired.identity, acquired.caller, acquired.transport, boundary) != null
+        },
+        observeAuthorization = ::observeManagerAuthorizationBound,
+    )
+
+    /** Called under the coordinator lock; the record and acquisition generation fence the probe. */
+    private fun recoveryProbeState(authority: Authority): Pair<RootAuthorityRecord, Long?>? {
+        if (acquisitionsClosed || activeSessions[authority] != null || retiringSessions[authority] != null ||
+            rootDispatchRepository.hasActivePermitsForAuthority(authority)
+        ) return null
+        val record = rootAuthorityRepository.get(authority)
+        return if (record.degraded) record to acquisitionGenerations[authority] else null
     }
 
     /**
@@ -543,81 +560,6 @@ class RootRuntimeCoordinator(
         )
     }
 
-    internal fun executeReceiptedFileGetMetadata(
-        authority: Authority,
-        workspaceRootPath: Path,
-        args: RootTypedArguments.FileGetMetadata,
-        invocationId: String? = null,
-    ): RootFileOperationResult<RootFileMetadataSnapshot>? {
-        return invocationId?.takeIf { it.isNotBlank() }?.let { exactInvocation ->
-        val resp = dispatchFileOperation(
-            authority = authority,
-            invocationId = exactInvocation,
-            typedArgs = args,
-            budget = RootExecutionBudget(),
-            payloadBytes = ByteArray(0),
-        ) ?: return@let null
-        RootCoordinatorPresentation.normalizeFileResultWorkspaceId(resp.toFileResult(), args.workspaceId)
-        }
-    }
-
-    internal fun executeReceiptedFileWriteText(
-        authority: Authority,
-        workspaceRootPath: Path,
-        args: RootTypedArguments.FileWriteText,
-        utf8Bytes: ByteArray,
-        invocationId: String? = null,
-    ): RootFileOperationResult<RootFileMetadataSnapshot>? {
-        return invocationId?.takeIf { it.isNotBlank() }?.let { exactInvocation ->
-        val resp = dispatchFileOperation(
-            authority = authority,
-            invocationId = exactInvocation,
-            typedArgs = args,
-            budget = RootExecutionBudget(),
-            payloadBytes = utf8Bytes,
-        ) ?: return@let null
-        RootCoordinatorPresentation.normalizeFileResultWorkspaceId(resp.toFileResult(), args.workspaceId)
-        }
-    }
-
-    fun executeControlledShell(
-        authority: Authority,
-        request: ShellExecRequest,
-    ): ShellExecResult {
-        val startedAt = System.currentTimeMillis()
-        val budget = RootExecutionBudget(
-            timeoutMs = request.timeoutMs.coerceIn(100L, 120_000L),
-            maxOutputBytes = request.maxOutputBytes.toInt().coerceIn(1024, 262_144),
-        )
-        val resp = dispatchShellOperation(authority, request, budget)
-        val outcome = resp?.shellOutcome?.toOutcome() ?: return ShellExecResult(
-            status = ShellExecutionStatus.FAILED,
-            authority = authority,
-            requestId = request.requestId,
-            error = ToolError(ToolErrorCode.AUTHORITY_NOT_GRANTED),
-        )
-        val duration = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
-        return ShellExecResult(
-            status = outcome.status,
-            exitCode = outcome.exitCode,
-            stdout = outcome.stdout,
-            stderr = outcome.stderr,
-            stdoutTruncated = outcome.stdoutTruncated,
-            stderrTruncated = outcome.stderrTruncated,
-            timedOut = outcome.timedOut,
-            cancelled = outcome.cancelled,
-            authority = authority,
-            durationMs = duration,
-            requestId = request.requestId,
-            error = mapShellOutcomeError(outcome.status),
-        )
-    }
-
-    fun cancelControlledShell(authority: Authority, requestId: String): Boolean {
-        val execution = rootDispatchRepository.executionForInvocation(authority, requestId) ?: return false
-        return cancellationRoute(execution)(requestId)
-    }
-
     internal fun cancellationRoute(execution: RootExecutionStamp): (String) -> Boolean {
         val active = activeSessions[execution.identity.authority]
         return RootCancelInvocationRequest.dispatchCancellationRoute(
@@ -643,6 +585,36 @@ class RootRuntimeCoordinator(
             RootForegroundAdmissionController(db, locatorCipher, dispatchBridge::rememberConfirmedWorkspace)
                 .admit(execution, active.transport, path, writable, metadata, shell, agentId)
         }
+    }
+
+    fun browseDirectoryFromForeground(
+        authority: Authority, path: String, cursor: String? = null,
+    ): RootDirectoryBrowsePage? {
+        val active = synchronized(this) {
+            if (authorityPolicyRepository.getPolicy().selectedAuthority != authority ||
+                !isAuthorityReadyForDispatch(authority)) return null
+            activeSessions[authority]
+        } ?: return null
+        val id = active.session.identity
+        val request = RootServiceWorkspaceSelectionRequest("BROWSE", id.serviceInstanceId, id.sessionId,
+            id.identityEpoch, workspaceRootPath = path, cursor = cursor)
+        val page = active.transport.bindWorkspace(RootPrivilegedServiceEngine.json.encodeToString(
+            RootServiceWorkspaceSelectionRequest.serializer(), request))?.takeIf { it.accepted }?.directoryPage
+        return synchronized(this) {
+            page.takeIf { activeSessions[authority] === active &&
+                authorityPolicyRepository.getPolicy().selectedAuthority == authority && isAuthorityReadyForDispatch(authority) }
+        }
+    }
+
+    @Synchronized
+    fun updateWorkspacePermissionsFromForeground(
+        authority: Authority, workspaceId: String, agentId: String,
+        writable: Boolean, metadata: Boolean, shell: Boolean,
+    ): List<CapabilityGrant>? {
+        if (authorityPolicyRepository.getPolicy().selectedAuthority != authority) return null
+        val execution = resolveExecutionStamp(authority, requireShellConsent = shell) ?: return null
+        return RootForegroundAdmissionController(db, locatorCipher, dispatchBridge::rememberConfirmedWorkspace)
+            .updatePermissions(execution, workspaceId, agentId, writable, metadata, shell)
     }
 
     @Synchronized
@@ -671,32 +643,6 @@ class RootRuntimeCoordinator(
         )
     }
 
-    fun approveShellInvocation(
-        authority: Authority,
-        runId: String,
-        request: ShellExecRequest,
-        grantId: String,
-        workspaceId: String,
-    ): RootApprovalBinding? = resolveExecutionStamp(authority, requireShellConsent = true)?.let { execution ->
-        val typedArgs = RootTypedArguments.ShellExec(
-            workspaceId = workspaceId,
-            command = request.command,
-            cwdRelativePath = null,
-        )
-        runCatching {
-            dispatchBridge.approveToolInvocation(
-                execution = execution,
-                runId = runId,
-                invocationId = request.requestId,
-                callId = request.callId,
-                snapshotId = request.snapshotId,
-                grantId = grantId,
-                typedArgs = typedArgs,
-                configSnapshotHash = request.configSnapshotHash,
-            )
-        }.getOrNull()
-    }
-
     fun approveFileInvocation(
         authority: Authority,
         runId: String,
@@ -723,25 +669,6 @@ class RootRuntimeCoordinator(
         }.getOrNull()
     }
 
-    fun createWorkspaceFileExecutor(
-        workspaceRootPath: Path,
-        confirmedMountIds: Set<Long> = emptySet(),
-    ): RootWorkspaceFileExecutor? {
-        val boundary = observeControlPlaneBoundary() ?: return null
-        val rootIdentity = fdOps.inspectDirectoryIdentityNoFollow(workspaceRootPath) ?: return null
-        if (!rootIdentity.isDirectory || rootIdentity.isSymlink) return null
-        val driver = AndroidRootPosixFileDriver(
-            workspaceRootPath = workspaceRootPath,
-            fdOps = fdOps,
-        )
-        return RootWorkspaceFileExecutor(
-            workspaceRootIdentity = rootIdentity,
-            controlPlane = boundary,
-            driver = driver,
-            confirmedMountIds = confirmedMountIds,
-        )
-    }
-
     private fun resolveExecutionStamp(
         authority: Authority,
         requireShellConsent: Boolean,
@@ -751,26 +678,8 @@ class RootRuntimeCoordinator(
         loadRecord = rootAuthorityRepository::get,
         policy = authorityPolicyRepository.getPolicy(),
         requireShellConsent = requireShellConsent,
+        live = RootLiveAuthorizationFacts(managerAuthorization.get(), shizukuDenialFence.lastDenies()),
     )
-
-    private fun dispatchShellOperation(
-        authority: Authority,
-        request: ShellExecRequest,
-        budget: RootExecutionBudget,
-    ): RootServiceExecuteResponse? = activeSessions[authority]?.let { active ->
-        resolveExecutionStamp(authority, requireShellConsent = true)?.let { execution ->
-            dispatchBridge.claimApprovedShellDispatch(execution, active.transport, request, budget)?.let { prepared ->
-                dispatchBridge.submitAndSettle(
-                    prepared = prepared,
-                    hostGate = active.hostControlGate,
-                    transport = active.transport,
-                    liveIdentity = active.session.identity,
-                    payloadBytes = ByteArray(0),
-                    onDegradeRequired = { markDegradedUncertainDescendants(authority) },
-                )
-            }
-        }
-    }
 
     /** Invocation identity comes only from Runtime routing, never from model arguments. */
     internal fun executeFileInvocation(
@@ -930,7 +839,5 @@ class RootRuntimeCoordinator(
             else -> error("Expected Root authority: $authority")
         }
 
-        private fun mapShellOutcomeError(status: ShellExecutionStatus): ToolError? =
-            RootCoordinatorPresentation.mapShellOutcomeError(status)
     }
 }

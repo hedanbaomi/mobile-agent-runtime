@@ -182,7 +182,75 @@ class ExecutionAuthoritiesUiTest {
         composeRule.onNodeWithTag("settings.dangerous_mode.risk_dialog").assertIsDisplayed()
         composeRule.onNodeWithText(composeRule.activity.getString(SettingsR.string.ui_enable_8eeb2a71)).performClick()
         assert(selected == DangerousMode.ENABLED_AUTONOMOUS.name)
-        composeRule.onNodeWithText("危险模式：已开启 · Shell：当前不可用").performScrollTo().assertIsDisplayed()
+        val expected = composeRule.activity.getString(
+            SettingsR.string.sett_dangerous_mode_enabled_shell_state,
+            composeRule.activity.getString(SettingsR.string.sett_root_shell_state_unavailable),
+        )
+        composeRule.onNodeWithText(expected).performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun nonRootShellStateRequiresDangerousModeForBothPeerChannels() {
+        val readyShizuku = AuthorityUiState(
+            "SHIZUKU", userIntentEnabled = true, platformGrant = "GRANTED",
+            availability = "READY", connection = "CONNECTED", configured = true,
+        )
+        var state by mutableStateOf(SettingsUiState(
+            language = "zh-CN", selectedAuthority = "SHIZUKU",
+            shizukuAuthority = readyShizuku,
+            wiredAdbAuthority = readyShizuku.copy(authority = "WIRED_ADB"),
+            dangerousModeBuildAllowed = true,
+        ))
+        composeRule.setContent { SettingsScreen(state) }
+        for (channel in listOf("SHIZUKU", "WIRED_ADB")) {
+            for (mode in listOf(DangerousMode.DISABLED, DangerousMode.ENABLED_AUTONOMOUS)) {
+                composeRule.runOnIdle {
+                    state = state.copy(selectedAuthority = channel, dangerousMode = mode.name)
+                }
+                val expected = composeRule.activity.getString(
+                    if (mode == DangerousMode.DISABLED) SettingsR.string.sett_root_shell_state_unavailable
+                    else SettingsR.string.sett_root_shell_state_available,
+                )
+                composeRule.onNodeWithTag("settings.dangerous_mode.shell_state")
+                    .performScrollTo().assertTextContains(expected, substring = true)
+            }
+        }
+    }
+
+    @Test
+    fun rootShellStateUsesOwnConsentIndependentlyOfAdbDangerousMode() {
+        val readyRoot = AuthorityUiState(
+            "ROOT_DIRECT", userIntentEnabled = true, platformGrant = "GRANTED",
+            availability = "READY", connection = "CONNECTED", configured = true,
+        )
+        var state by mutableStateOf(SettingsUiState(
+            language = "zh-CN", selectedAuthority = "ROOT_DIRECT",
+            rootDirectAuthority = readyRoot,
+            shizukuRootAuthority = readyRoot.copy(authority = "SHIZUKU_ROOT"),
+            dangerousModeBuildAllowed = true,
+        ))
+        composeRule.setContent { SettingsScreen(state) }
+        for (channel in listOf("ROOT_DIRECT", "SHIZUKU_ROOT")) {
+            for (consented in listOf(false, true)) {
+                for (mode in listOf(DangerousMode.DISABLED, DangerousMode.ENABLED_AUTONOMOUS)) {
+                    composeRule.runOnIdle {
+                        state = state.copy(
+                            selectedAuthority = channel, dangerousMode = mode.name,
+                            rootDirectAuthority = readyRoot.copy(rootShellConsentEnabled = consented),
+                            shizukuRootAuthority = readyRoot.copy(
+                                authority = "SHIZUKU_ROOT", rootShellConsentEnabled = consented,
+                            ),
+                        )
+                    }
+                    val expected = composeRule.activity.getString(
+                        if (consented) SettingsR.string.sett_root_shell_state_available
+                        else SettingsR.string.sett_root_shell_state_unavailable,
+                    )
+                    composeRule.onNodeWithTag("settings.dangerous_mode.shell_state")
+                        .performScrollTo().assertTextContains(expected, substring = true)
+                }
+            }
+        }
     }
 
     @Test

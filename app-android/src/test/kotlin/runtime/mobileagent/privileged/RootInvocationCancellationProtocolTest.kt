@@ -240,7 +240,11 @@ class RootInvocationCancellationProtocolTest {
         private fun node(inode: Long) = RootFdNodeIdentity(1, inode, 77, true, false, false, 2, 448, 10148, 10148, "label")
         private val boundary = RootControlPlaneBoundary("/data/user/0/runtime.mobileagent", node(9001),
             "/data/user_de/0/runtime.mobileagent", node(9002))
-        val engine = RootPrivilegedServiceEngine(shellRunner = runner, serviceUidProvider = { 0 },
+        val engine = RootPrivilegedServiceEngine(
+            selectionPathResolver = { java.nio.file.Paths.get(it) },
+            mountPolicyProvider = { b -> runtime.mobileagent.domain.RootTrustedMountRoots.directoryTree(
+                setOf(b.credentialEncryptedIdentity.mountId, b.deviceProtectedIdentity.mountId)) },
+shellRunner = runner, serviceUidProvider = { 0 },
             controlPlaneOverride = boundary).pinTestHost(boundary, signing)
         private val clientOutput = PipedOutputStream()
         private val serverInput = PipedInputStream(clientOutput, 65_536)

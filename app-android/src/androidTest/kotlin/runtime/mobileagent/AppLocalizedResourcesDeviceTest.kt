@@ -94,6 +94,36 @@ class AppLocalizedResourcesDeviceTest {
         }
     }
 
+    @Test fun rootChatRefusalsUseAppLanguageAndKeepPreSendCopySeparate() {
+        val app = compose.activity.application
+        val preferences = app.getSharedPreferences(ActivityLocaleConfiguration.PREFERENCES, Context.MODE_PRIVATE)
+        val original = preferences.getString(ActivityLocaleConfiguration.KEY, null)
+        try {
+            preferences.edit().putString(ActivityLocaleConfiguration.KEY, "en-US").commit()
+            val send = ChatRootErrors.unavailable(ChatRootErrors.SEND_STAGE, "send").error
+            val newThread = ChatRootErrors.unavailable(ChatRootErrors.NEW_THREAD_STAGE, "new").error
+            val binding = ChatRootSendRefusal.BINDING_INVALID.asException("send").error
+            val check = ChatRootErrors.checkFailed("send").error
+            fun message(error: runtime.mobileagent.domain.AppError) =
+                app.rootChatMessage(requireNotNull(ChatRootErrors.preflightMessageResource(error)))
+            assertTrue(message(send).contains("not sent") && message(send).contains("draft is kept"))
+            assertTrue(message(newThread).contains("No new conversation was created"))
+            assertTrue(message(binding).contains("snapshot is invalid"))
+            assertTrue(message(check).contains("could not be verified"))
+            assertTrue(app.rootChatMessage(R.string.root_authority_temporarily_unavailable).contains("message is saved"))
+            preferences.edit().putString(ActivityLocaleConfiguration.KEY, "zh-CN").commit()
+            assertTrue(message(send).contains("消息未发送") && message(send).contains("草稿已保留"))
+            assertTrue(message(newThread).contains("未创建新会话"))
+            assertTrue(message(binding).contains("快照已失效"))
+            assertTrue(message(check).contains("无法验证"))
+        } finally {
+            preferences.edit().apply {
+                if (original == null) remove(ActivityLocaleConfiguration.KEY)
+                else putString(ActivityLocaleConfiguration.KEY, original)
+            }.commit()
+        }
+    }
+
     private fun showDialogWithActivityLocale(preference: LocalePreference, language: String) {
         val previous = compose.activity
         val mirrored = previous.getSharedPreferences(ActivityLocaleConfiguration.PREFERENCES, Context.MODE_PRIVATE)

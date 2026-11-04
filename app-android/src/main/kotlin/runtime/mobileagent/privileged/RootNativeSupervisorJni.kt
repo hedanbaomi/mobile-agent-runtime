@@ -117,6 +117,10 @@ internal object RootNativeSupervisorJni {
     @JvmStatic
     external fun nativeLinkAtEmptyPath(parentFd: Int, sourceFd: Int, name: String): Int
 
+    /** Atomic no-clobber entry move on retained parent FDs. Returns 0 or negative errno. */
+    @JvmStatic
+    external fun nativeRenameAtNoReplace(srcParentFd: Int, srcName: String, dstParentFd: Int, dstName: String): Int
+
     /** `unlinkat(AT_REMOVEDIR)` for the protected staging directory. 0 or negative errno. */
     @JvmStatic
     external fun nativeRemoveDirectoryAt(parentFd: Int, name: String): Int

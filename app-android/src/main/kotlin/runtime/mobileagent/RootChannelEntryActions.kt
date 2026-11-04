@@ -4,6 +4,7 @@
 package runtime.mobileagent
 
 import runtime.mobileagent.domain.Authority
+import runtime.mobileagent.domain.DangerousMode
 
 /**
  * Explicit foreground entry actions for the two Root channels.
@@ -37,9 +38,36 @@ internal object RootChannelEntryActions {
         }
     }
 
-    /** Opens the manager UI and returns the user-facing error message, or null on success. */
-    fun openRootManagerMessage(open: () -> Boolean): String? =
-        if (open()) null else "无法打开 Root 管理器；请先安装并打开管理器后再授权。"
+    /**
+     * Opens the manager UI and returns the caller-localized failure message, or null on success.
+     * The copy lives in the caller's resources so this action object owns no UI text.
+     */
+    fun openRootManagerMessage(open: () -> Boolean, failureMessage: String): String? =
+        if (open()) null else failureMessage
+
+    /**
+     * One confirmed dangerous-mode change: publish the returned snapshot, then report the durable
+     * reason. A thrown failure is reported through [onError] instead of escaping, and the reason
+     * table stays with the caller that owns the localized copy.
+     *
+     * The explicit `set` and `disable` entries share this, so the order "apply, publish snapshot,
+     * report reason" exists once instead of once per entry point.
+     */
+    fun applyDangerousMode(
+        mode: DangerousMode,
+        apply: (DangerousMode) -> SettingsAuthorityMutation,
+        onSnapshot: (SettingsAuthoritySnapshot) -> Unit,
+        onError: (String?) -> Unit,
+        reasonMapper: (String?) -> String,
+        errorMapper: (Throwable) -> String,
+    ) {
+        val result = runCatching { apply(mode) }.getOrElse { failure ->
+            onError(errorMapper(failure))
+            return
+        }
+        onSnapshot(result.snapshot)
+        onError(if (result.accepted) null else reasonMapper(result.reason))
+    }
 
     /** The intent toggle only changes intent; it never selects the channel. */
     fun applyIntent(setIntent: () -> Unit) = setIntent()

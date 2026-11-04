@@ -81,6 +81,7 @@ object AgentTestTags {
     const val GRANT_LIFETIME_CONTEXT = "agents.editor.grants.lifetime.context"
     const val GRANT_SHELL = "agents.editor.grants.shell.execute"
     const val SKIP_TOOL_CONFIRMATIONS = "agents.editor.skip_tool_confirmations"
+    const val SKIP_ROOT_READ_CONFIRMATIONS = "agents.editor.skip_root_read_confirmations"
     const val WORKSPACE_PRESET = "agents.editor.workspace_preset"
     const val WORKSPACE_PRESET_SELECTOR = "agents.editor.workspace_preset.workspace"
     const val WORKSPACE_PRESET_READ_ONLY = "agents.editor.workspace_preset.read_only"
@@ -234,8 +235,19 @@ data class AgentWorkspaceAccessUi(
     val availableWorkspaceCount: Int = 0,
     val canChooseSaf: Boolean = false,
     val canBrowsePrivileged: Boolean = false,
+    /**
+     * The selected privileged channel is a Root channel, so the entry does not open a directory
+     * browser: it asks for an absolute device path that is attached as a Root workspace. The host
+     * sets this from the selected Authority; the label below must match the real behaviour.
+     */
+    val privilegedEntryIsRoot: Boolean = false,
     val fullDeviceFilesEnabled: Boolean = false,
     val fullDeviceFilesEligible: Boolean = false,
+    /**
+     * Present only when the Agent's current workspace is an attached Root directory. The host fills
+     * it from the live canonical grants so the edit dialog never starts from a guess.
+     */
+    val rootPermissions: RootWorkspacePermissionsUiState? = null,
     val status: String = "",
 )
 
@@ -258,6 +270,12 @@ data class AgentEditorUi(
     val resourceBindings: List<AgentResourceBindingUi> = emptyList(),
     val retrievalMode: String = "explicit",
     val skipToolConfirmations: Boolean = false,
+    /**
+     * Root read-only opt-in, stored as its own metadata key. It is separate from
+     * [skipToolConfirmations] because the global switch must never authorize a Root read, and it
+     * only affects conversations started after the edit (snapshots freeze their own settings).
+     */
+    val skipRootReadConfirmations: Boolean = false,
     val webSearchEnabled: Boolean = false,
     val snapshotLabel: String = "",
     val revision: Int = 0,
@@ -319,6 +337,8 @@ data class AgentsActions(
     val onSetDefaultWorkspace: (String?) -> Unit = {},
     val onChooseSafWorkspace: () -> Unit = {},
     val onBrowsePrivilegedWorkspace: () -> Unit = {},
+    /** Opens the in-place permission editor for an already attached Root workspace. */
+    val onEditRootWorkspacePermissions: () -> Unit = {},
     val onToggleFullDeviceFiles: (Boolean) -> Unit = {},
     val onImportCharacter: () -> Unit = {},
     val onCharacterImportChange: (CharacterCardImportUi) -> Unit = {},
@@ -676,7 +696,26 @@ private fun AgentWorkspaceAccessCard(
                     onClick = actions.onBrowsePrivilegedWorkspace,
                     enabled = access.canBrowsePrivileged,
                     modifier = Modifier.weight(1f).testTag(AgentTestTags.WORKSPACE_ACCESS_PRIVILEGED),
-                ) { Text(stringResource(R.string.ui_browse_device_directory_865b3714), maxLines = 2) }
+                ) { Text(
+                    if (access.privilegedEntryIsRoot) {
+                        stringResource(R.string.root_workspace_attach)
+                    } else {
+                        stringResource(R.string.ui_browse_device_directory_865b3714)
+                    },
+                    maxLines = 2,
+                ) }
+            }
+            access.rootPermissions?.let { root ->
+                OutlinedButton(
+                    onClick = actions.onEditRootWorkspacePermissions,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                        .testTag(RootWorkspaceTestTags.PERMISSIONS_ENTRY),
+                ) {
+                    Text(
+                        "${stringResource(R.string.agents_root_permissions_title)} · ${root.displayName}",
+                        maxLines = 2,
+                    )
+                }
             }
             if (access.fullDeviceFilesEligible || access.fullDeviceFilesEnabled) {
                 Row(
@@ -857,6 +896,19 @@ private fun AgentEditorFields(
                         Text(stringResource(R.string.ui_skip_tool_run_confirmations_e4481e04))
                         Text(
                             stringResource(R.string.ui_new_conversations_can_run_tools_without_a6129257),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+                Row(Modifier.fillMaxWidth().testTag(AgentTestTags.SKIP_ROOT_READ_CONFIRMATIONS), verticalAlignment = Alignment.CenterVertically) {
+                    Switch(
+                        checked = editor.skipRootReadConfirmations,
+                        onCheckedChange = { actions.onEditorChange(editor.copy(skipRootReadConfirmations = it)) },
+                    )
+                    Column(Modifier.padding(start = 12.dp)) {
+                        Text(stringResource(R.string.agents_root_read_skip_label))
+                        Text(
+                            stringResource(R.string.agents_root_read_skip_hint),
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -1253,11 +1305,22 @@ private fun AgentGrantEditor(
                 )
             }
             if (ordinaryWorkspaces.none { it.enabled }) {
-                Text(
-                    stringResource(R.string.ui_no_workspace_is_available_choose_a_67498e4c),
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                // A Root-only Agent is not broken. Root grants are bound to a device directory in
+                // the explicit foreground Root flow, so this ordinary-workspace preset cannot list
+                // one; saying "no workspace is available" here would be a false error state.
+                val rootWorkspaces = editor.workspaces.filter { it.isRoot && it.enabled }
+                if (rootWorkspaces.isEmpty()) {
+                    Text(
+                        stringResource(R.string.ui_no_workspace_is_available_choose_a_67498e4c),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                } else {
+                    Text(
+                        stringResource(R.string.root_workspace_only, rootWorkspaces.joinToString(", ") { it.displayName }),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),

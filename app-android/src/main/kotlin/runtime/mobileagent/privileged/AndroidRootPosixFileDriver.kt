@@ -21,10 +21,9 @@ import runtime.mobileagent.domain.RootDirectoryScan
 /**
  * FD-based [RootPosixFileDriver] backing [runtime.mobileagent.domain.RootWorkspaceFileExecutor].
  *
- * Writes are only accepted inside a proven UID0-exclusive directory chain; the staged temporary
- * FD is bound to the committed dev/inode and full-content digest. Generic `rename(2)` has no
- * target-inode CAS, so non-exclusive ranges are refused before any side effect instead of being
- * reported as success after a repeated `stat`.
+ * POSIX replacements bind staged bytes to the committed FD. Emulated storage uses ordinary
+ * FD writes with filesystem-managed permissions. Conditional writes require a proven UID0
+ * exclusive domain; neither strategy claims kernel compare-and-swap semantics.
  */
 class AndroidRootPosixFileDriver(
     private val workspaceRootPath: Path,

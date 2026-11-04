@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+
+<!--
+  Root-channel copy for the settings screen. A dedicated file keeps the shared strings.xml files
+  untouched, so other work packages never conflict with these keys.
+-->
+<resources>
+    <string name="sett_root_shell_state_available" formatted="false">Shell: available</string>
+    <string name="sett_root_shell_state_unavailable" formatted="false">Shell: currently unavailable</string>
+    <string name="sett_root_shell_independent_hint" formatted="false">Root Shell consent is independent of ADB-level Dangerous Mode: enabling one never enables the other.</string>
+    <string name="sett_root_recovery_required" formatted="false">Root recovery required</string>
+    <string name="sett_root_recovery_hint" formatted="false">This channel recorded a Root outcome that could not be confirmed. Confirm recovery before dispatching again; nothing is replayed.</string>
+    <string name="sett_root_recovery_action" formatted="false">Confirm recovery</string>
+    <string name="sett_dangerous_mode_enabled_shell_state">Dangerous Mode: enabled · %1$s</string>
+</resources>

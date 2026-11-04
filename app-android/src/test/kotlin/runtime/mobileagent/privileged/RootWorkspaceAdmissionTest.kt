@@ -5,6 +5,8 @@ package runtime.mobileagent.privileged
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -92,6 +94,32 @@ class RootWorkspaceAdmissionTest {
     }
 
     @Test
+    fun serviceResolvedAliasIsUsedByTheSealedLocator() = database { db ->
+        val service = FakeRootWorkspaceService().apply { resolvedPathOverride = "/data/data/foreign.app/files" }
+        val admission = RootWorkspaceAdmission(db, service, TestRootLocatorCipher())
+        val proposed = admission.propose(RootWorkspaceSelection("Foreign files", "/data/user/0/foreign.app/files"), execution)
+        assertTrue(proposed is RootWorkspaceProposeOutcome.Proposed)
+        val proposal = (proposed as RootWorkspaceProposeOutcome.Proposed).proposal
+        assertEquals("/data/data/foreign.app/files", proposal.selection.rootPath)
+        val committed = admission.commit(proposal, execution)
+        assertTrue(committed is RootWorkspaceAdmissionOutcome.Admitted, committed.toString())
+        assertEquals("/data/data/foreign.app/files", RootRecoveryLocatorCodec.decode(service.lastLocatorBytes!!)!!.absoluteRootPath)
+    }
+
+    @Test
+    fun invalidResolvedPathReleasesProvisionalHandleWithoutLocalRows() = database { db ->
+        val service = FakeRootWorkspaceService().apply { resolvedPathOverride = "relative/not-a-root" }
+        val admission = RootWorkspaceAdmission(db, service, TestRootLocatorCipher())
+        val outcome = admission.propose(RootWorkspaceSelection("Data", "/sdcard/Download"), execution)
+        assertTrue(outcome is RootWorkspaceProposeOutcome.Refused)
+        assertEquals(listOf("PROPOSE", "RELEASE"), service.phases)
+        val release = Json.parseToJsonElement(service.requests.last()).jsonObject
+        assertTrue(release.getValue("provisionalHandle").jsonPrimitive.content.startsWith("ws-prov-"))
+        assertTrue(release["workspaceSessionHandle"]?.jsonPrimitive?.content.orEmpty().isEmpty())
+        db.assertNoRootWorkspaceRows()
+    }
+
+    @Test
     fun proposeCreatesNothingLocalAndAbortOnlyAddressesTheProvisionalHandle() = database { db ->
         val service = FakeRootWorkspaceService()
         val admission = RootWorkspaceAdmission(db, service, TestRootLocatorCipher())
@@ -105,6 +133,9 @@ class RootWorkspaceAdmissionTest {
         val released = admission.abort((proposed as RootWorkspaceProposeOutcome.Proposed).proposal)
         assertEquals(RootWorkspaceRelease.ACCEPTED, released.release)
         assertEquals(listOf("PROPOSE", "RELEASE"), service.phases)
+        val release = Json.parseToJsonElement(service.requests.last()).jsonObject
+        assertTrue(release.getValue("provisionalHandle").jsonPrimitive.content.startsWith("ws-prov-"))
+        assertTrue(release["workspaceSessionHandle"]?.jsonPrimitive?.content.orEmpty().isEmpty())
         db.assertNoRootWorkspaceRows()
     }
 
@@ -244,6 +275,7 @@ private class FakeRootWorkspaceService : RootWorkspaceAdmissionTransport {
     var omitLocator = false
     var tokenOverride: String? = null
     var locatorPathOverride: String? = null
+    var resolvedPathOverride: String? = null
     var stageInodeOverride: Long? = null
     var omitPhase = false
     var observedOrigin: RootWorkspaceOrigin? = null
@@ -262,9 +294,9 @@ private class FakeRootWorkspaceService : RootWorkspaceAdmissionTransport {
         }
         return when (request.phase) {
             "PROPOSE" -> {
-                rootPath = request.workspaceRootPath
+                rootPath = resolvedPathOverride ?: request.workspaceRootPath
                 rootKind = RootWorkspaceRootKind.valueOf(request.rootKindName)
-                accepted().copy(phase = "PROPOSE", provisionalHandle = PROVISIONAL_HANDLE)
+                accepted().copy(phase = "PROPOSE", provisionalHandle = PROVISIONAL_HANDLE, resolvedRootPath = resolvedPathOverride)
             }
             "STAGE" -> {
                 val origin = requireNotNull(request.origin)

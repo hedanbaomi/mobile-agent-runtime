@@ -344,9 +344,9 @@ class WorkspaceVersionToolFlowTest {
     /** Keep the JsonElement itself for the next request; only validate its wire shape here. */
     private fun version(result: ToolExecution): JsonElement {
         val value = json(result).getValue("version")
-        assertFalse(value.jsonPrimitive.isString)
+        assertTrue(value.jsonPrimitive.isString, "schema v4 carries version tokens as strings without JSON-number rounding")
         val number = value.jsonPrimitive.longOrNull
-        assertTrue(number != null && number >= 0L, "version must be a non-negative JSON integer")
+        assertTrue(number != null && number >= 0L, "the ordinary backend token must preserve its full non-negative Long value")
         return value
     }
 

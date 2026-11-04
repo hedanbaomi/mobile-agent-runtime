@@ -40,7 +40,6 @@ import runtime.mobileagent.domain.RootWorkspaceRootKind
 import runtime.mobileagent.domain.RunStatus
 import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.domain.canonicalSha256
-import runtime.mobileagent.skills.tooling.ShellExecRequest
 import runtime.mobileagent.skills.tooling.ShellExecutionStatus
 
 internal data class PreparedRootDispatch(
@@ -77,28 +76,6 @@ internal class RootCoordinatorDispatchBridge(
     fun forgetSession(sessionId: String) {
         confirmedWorkspaceHandles.keys.removeAll { it.startsWith("$sessionId:") }
     }
-
-    fun claimApprovedShellDispatch(
-        execution: RootExecutionStamp,
-        transport: RootChannelTransport,
-        request: ShellExecRequest,
-        budget: RootExecutionBudget,
-    ): PreparedRootDispatch? = runCatching {
-        val binding = findUnconsumedShellApproval(execution, request) ?: return@runCatching null
-        val effectiveArgs = RootTypedArguments.ShellExec(
-            workspaceId = binding.workspaceId,
-            command = request.command,
-            cwdRelativePath = null,
-        )
-        claimVerifiedBinding(
-            execution = execution,
-            transport = transport,
-            binding = binding,
-            effectiveArgs = effectiveArgs,
-            budget = budget,
-            callerRequestId = request.requestId,
-        )
-    }.getOrNull()
 
     fun claimApprovedFileDispatch(
         execution: RootExecutionStamp,
@@ -194,37 +171,6 @@ internal class RootCoordinatorDispatchBridge(
         )
     }
 
-    private fun findUnconsumedShellApproval(
-        execution: RootExecutionStamp,
-        request: ShellExecRequest,
-    ): RootApprovalBinding? {
-        val rows = db.query(
-            "SELECT b.approval_id, b.binding_json FROM root_approval_bindings b " +
-                "JOIN approval_records a ON a.approval_id = b.approval_id " +
-                "WHERE b.binding_version = 1 AND a.decision = ?",
-            listOf(ApprovalDecision.APPROVED.name),
-        )
-        val cmdHash = RootPrivilegedServiceEngine.sha256Hex(request.command)
-        val expectedConfigHash = normalizeSha256(request.configSnapshotHash)
-        for (row in rows) {
-            val stored = decodeStoredBinding(row.string("binding_json")) ?: continue
-            val current = approvalRepository.getCurrent(stored.approval.approvalId, stored.request) ?: continue
-            val idMatches = current.request.invocationId == request.requestId &&
-                current.approval.callId == request.callId
-            val contextMatches = idMatches &&
-                current.invocationName == "shell_exec" &&
-                current.approval.agentId == request.agentId &&
-                current.request.snapshotId == request.snapshotId &&
-                current.approval.selectedAuthority == execution.identity.authority &&
-                current.request.execution == execution &&
-                current.request.execution.policyVersion == request.policyVersion &&
-                current.request.configSnapshotHash == expectedConfigHash &&
-                current.request.commandHash == cmdHash
-            if (contextMatches) return current
-        }
-        return null
-    }
-
     private fun findUnconsumedFileApproval(
         execution: RootExecutionStamp,
         rawArgs: RootTypedArguments,
@@ -306,7 +252,7 @@ internal class RootCoordinatorDispatchBridge(
         }
         if (!wireSendAttempted) {
             dispatchRepository.abortClaimBeforeAttempt(permit)
-            return buildUnknownDegradedResponse(null)
+            return buildUnknownDegradedResponse(null, remoteQuiescent = true)
         }
         val envelope = requireNotNull(sentEnvelope)
         if (submitResponse == null) {
@@ -314,7 +260,7 @@ internal class RootCoordinatorDispatchBridge(
                 transport, liveIdentity, permit.requestId, envelope.invocationId,
             )
             settleUnknownAndDegrade(permit, quiescent, onDegradeRequired)
-            return buildUnknownDegradedResponse(null)
+            return buildUnknownDegradedResponse(null, quiescent)
         }
         if (submitResponse.submitStage == "REJECTED_BEFORE_ACCEPTED" && submitResponse.rejectedProof != null) {
             val settled = runCatching {
@@ -337,7 +283,7 @@ internal class RootCoordinatorDispatchBridge(
                 transport, liveIdentity, permit.requestId, envelope.invocationId,
             )
             settleUnknownAndDegrade(permit, quiescent, onDegradeRequired)
-            return buildUnknownDegradedResponse(submitResponse.acceptedStatus)
+            return buildUnknownDegradedResponse(submitResponse.acceptedStatus, quiescent)
         }
         if (!RootCoordinatorQuiescenceSupport.acknowledgeIfStillActive(dispatchRepository, permit)) {
             return buildUnknownDegradedResponse(null)
@@ -354,7 +300,7 @@ internal class RootCoordinatorDispatchBridge(
                     transport, liveIdentity, permit.requestId, envelope.invocationId,
                 )
             settleUnknownAndDegrade(permit, quiescent, onDegradeRequired)
-            return buildUnknownDegradedResponse(submitResponse.acceptedStatus)
+            return buildUnknownDegradedResponse(submitResponse.acceptedStatus, quiescent)
         }
         val outcome = when (rpcResponse.terminalOutcome) {
             RootServiceTerminalOutcome.SUCCEEDED -> RootDispatchOutcome.SUCCEEDED
@@ -363,20 +309,31 @@ internal class RootCoordinatorDispatchBridge(
         }
         return synchronized(dispatchRepository) {
             val current = dispatchRepository.getReceipt(permit.requestId)
-            if (current == null || current.closed) return@synchronized buildUnknownDegradedResponse(null)
-            if (current.stage == runtime.mobileagent.domain.RootDispatchStage.TERMINAL) {
+            if (current == null) return@synchronized buildUnknownDegradedResponse(null, rpcResponse.remoteQuiescent)
+            if (current.closed || current.stage == runtime.mobileagent.domain.RootDispatchStage.TERMINAL) {
                 if (rpcResponse.remoteQuiescent) dispatchRepository.markRemoteAttemptQuiescent(permit.requestId)
-                return@synchronized buildUnknownDegradedResponse(submitResponse.acceptedStatus)
+                return@synchronized buildUnknownDegradedResponse(submitResponse.acceptedStatus, rpcResponse.remoteQuiescent)
             }
             val finalOutcome = if (rpcResponse.remoteQuiescent) outcome else RootDispatchOutcome.UNKNOWN_OUTCOME
-            dispatchRepository.finish(permit, finalOutcome, rpcResponse.resultSha256)
-            if (rpcResponse.requiresDegradedEpoch || finalOutcome == RootDispatchOutcome.UNKNOWN_OUTCOME) {
+            dispatchRepository.finish(permit, finalOutcome, rpcResponse.resultSha256, remoteQuiescent = rpcResponse.remoteQuiescent)
+            if (rpcResponse.requiresDegradedEpoch || !rpcResponse.remoteQuiescent) {
                 if (rpcResponse.remoteQuiescent) dispatchRepository.closePermit(permit, disclosed = false)
                 onDegradeRequired()
-                return@synchronized buildUnknownDegradedResponse(submitResponse.acceptedStatus)
+                return@synchronized buildUnknownDegradedResponse(submitResponse.acceptedStatus,
+                    rpcResponse.remoteQuiescent, requiresDegradedEpoch = true)
+            }
+            if (finalOutcome == RootDispatchOutcome.UNKNOWN_OUTCOME) {
+                dispatchRepository.closePermit(permit, disclosed = false)
+                return@synchronized rpcResponse
             }
             val canDisclose = dispatchRepository.authorizeDisclosure(permit)
-            if (deferDisclosure && finalOutcome == RootDispatchOutcome.SUCCEEDED) {
+            // A settled nonzero shell exit is still a complete observed result, not a transport
+            // failure. It therefore needs the same two-stage deferred disclosure as SUCCEEDED:
+            // the permit stays open until job_output's first page releases it, and any later
+            // page must revalidate the released receipt. The receipt outcome itself stays FAILED.
+            val settledDeferredResult = finalOutcome == RootDispatchOutcome.SUCCEEDED ||
+                finalOutcome == RootDispatchOutcome.FAILED
+            if (deferDisclosure && settledDeferredResult) {
                 dispatchRepository.markRemoteWorkerDrainedKeepPermitOpen(permit.requestId)
                 if (!canDisclose) {
                     dispatchRepository.closePermit(permit, disclosed = false)
@@ -395,27 +352,30 @@ internal class RootCoordinatorDispatchBridge(
         onDegradeRequired: () -> Unit,
     ) {
         runCatching {
-            dispatchRepository.finish(permit, RootDispatchOutcome.UNKNOWN_OUTCOME)
+            dispatchRepository.finish(permit, RootDispatchOutcome.UNKNOWN_OUTCOME, remoteQuiescent = remoteQuiescent)
             if (remoteQuiescent) {
                 dispatchRepository.markRemoteAttemptQuiescent(permit.requestId)
                 dispatchRepository.closePermit(permit, disclosed = false)
             }
         }
-        onDegradeRequired()
+        if (!remoteQuiescent) onDegradeRequired()
     }
 
     private fun buildUnknownDegradedResponse(
         acceptedStatus: runtime.mobileagent.domain.RootControlStatusSnapshot?,
+        remoteQuiescent: Boolean = false,
+        requiresDegradedEpoch: Boolean = !remoteQuiescent,
     ): RootServiceExecuteResponse = RootServiceExecuteResponse(
         submitStage = "ACCEPTED",
         acceptedStatus = acceptedStatus,
         terminalOutcome = RootServiceTerminalOutcome.UNKNOWN_OUTCOME,
-        requiresDegradedEpoch = true,
+        remoteQuiescent = remoteQuiescent,
+        requiresDegradedEpoch = requiresDegradedEpoch,
         shellOutcome = RootShellOutcomePayload(
             statusName = ShellExecutionStatus.UNKNOWN_OUTCOME.name,
             cancelled = true,
             terminalOutcomeName = RootServiceTerminalOutcome.UNKNOWN_OUTCOME.name,
-            requiresDegradedEpoch = true,
+            requiresDegradedEpoch = requiresDegradedEpoch,
         ),
     )
 

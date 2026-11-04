@@ -46,6 +46,8 @@ interface PosixKernelBridge {
     fun lstat(path: String): PosixRawStat
     fun readlink(path: String): String
     fun readMountId(fdNumber: Int): Long?
+    fun readFileSystemType(fdNumber: Int): String? = null
+    fun truncate(rawFd: FileDescriptor, length: Long): Unit = throw PosixOpException("EOPNOTSUPP")
     fun getxattr(path: String, name: String): ByteArray
     fun setxattr(path: String, name: String, value: ByteArray, flags: Int)
     fun listxattr(path: String): List<String> = emptyList()
@@ -80,6 +82,18 @@ interface PosixKernelBridge {
 
     fun renameAt(srcParentFdNumber: Int, srcName: String, dstParentFdNumber: Int, dstName: String): Unit =
         throw PosixOpException("EOPNOTSUPP")
+
+    /**
+     * `renameat2(..., RENAME_NOREPLACE)` on the retained parent FDs. A missing native symbol, an
+     * old kernel or a filesystem that does not implement the flag fails with
+     * `EOPNOTSUPP`/`ENOSYS`/`EINVAL`; it is never retried as a name lookup.
+     */
+    fun renameAtNoReplace(
+        srcParentFdNumber: Int,
+        srcName: String,
+        dstParentFdNumber: Int,
+        dstName: String,
+    ): Unit = throw PosixOpException("EOPNOTSUPP")
 
     fun linkAt(srcParentFdNumber: Int, srcName: String, dstParentFdNumber: Int, dstName: String): Unit =
         throw PosixOpException("EOPNOTSUPP")
@@ -138,6 +152,10 @@ object AndroidOsKernelBridge : PosixKernelBridge {
         val mntLine = lines.firstOrNull { it.startsWith("mnt_id:") } ?: return null
         return mntLine.substringAfter("mnt_id:").trim().toLongOrNull()?.takeIf { it > 0L }
     }
+
+    override fun readFileSystemType(fdNumber: Int): String? = readMountId(fdNumber)?.let(RootMountBoundary::fileSystemType)
+
+    override fun truncate(rawFd: FileDescriptor, length: Long) = Os.ftruncate(rawFd, length)
 
     override fun getxattr(path: String, name: String): ByteArray = Os.getxattr(path, name)
 
@@ -219,11 +237,22 @@ object AndroidOsKernelBridge : PosixKernelBridge {
     override fun renameAt(srcParentFdNumber: Int, srcName: String, dstParentFdNumber: Int, dstName: String): Unit =
         PosixKernelMutations.renameAt(srcParentFdNumber, srcName, dstParentFdNumber, dstName)
 
+    override fun renameAtNoReplace(
+        srcParentFdNumber: Int,
+        srcName: String,
+        dstParentFdNumber: Int,
+        dstName: String,
+    ): Unit = PosixKernelMutations.renameAtNoReplace(srcParentFdNumber, srcName, dstParentFdNumber, dstName)
+
     override fun linkAt(srcParentFdNumber: Int, srcName: String, dstParentFdNumber: Int, dstName: String): Unit =
         PosixKernelMutations.linkAt(srcParentFdNumber, srcName, dstParentFdNumber, dstName)
 }
 
 interface PosixFdOperations {
+    /** Kernel mount type, not a user path or a retry after a permission failure. */
+    fun usesEmulatedStoragePermissions(fd: PosixRetainedFd): Boolean = false
+    fun openWritableFd(fd: PosixRetainedFd): PosixRetainedFd = throw PosixOpException("EOPNOTSUPP")
+    fun truncate(fd: PosixRetainedFd, length: Long): Unit = throw PosixOpException("EOPNOTSUPP")
     fun openDirectoryAbsoluteNoFollow(absolutePath: String): PosixRetainedFd?
     fun openDirectoryWithAncestorsNoFollow(
         absolutePath: String,
@@ -272,6 +301,26 @@ interface PosixFdOperations {
         throw PosixOpException("EOPNOTSUPP")
 
     fun renameAt(
+        srcParentFd: PosixRetainedFd,
+        srcName: String,
+        dstParentFd: PosixRetainedFd,
+        dstName: String,
+    ): Unit = throw PosixOpException("EOPNOTSUPP")
+
+    /**
+     * Atomic entry rename that never replaces an existing destination entry
+     * (`renameat2(..., RENAME_NOREPLACE)` semantics), addressed through the retained parent FDs.
+     *
+     * This is the commit for every no-replace move and for every directory move: an entry that
+     * appears between the caller's check and this call makes the kernel fail instead of being
+     * destroyed, so this is not a check-then-rename.
+     *
+     * The default implementation fails closed with `EOPNOTSUPP`. [AndroidOsPosixFdOperations]
+     * overrides it with the shipped supervisor library's `nativeRenameAtNoReplace`; when that
+     * symbol, the kernel or the filesystem does not provide the flag, the caller reports an
+     * explicit unsupported result (no retry, no degraded channel) instead of guessing.
+     */
+    fun renameAtNoReplace(
         srcParentFd: PosixRetainedFd,
         srcName: String,
         dstParentFd: PosixRetainedFd,
@@ -342,6 +391,20 @@ class AndroidOsPosixFdOperations(
         return openRawHandle("/", flags, 0)
     }
 
+    override fun usesEmulatedStoragePermissions(fd: PosixRetainedFd): Boolean =
+        RootStorageMountTypes.isEmulatedStorage(kernel.readFileSystemType(requireOpenHandle(fd).fdNumber))
+
+    override fun openWritableFd(fd: PosixRetainedFd): PosixRetainedFd {
+        val handle = requireOpenHandle(fd)
+        // This follows only our retained descriptor, never an untrusted directory entry.
+        return openRawOrThrow("/proc/self/fd/${handle.fdNumber}", OsConstants.O_RDWR or O_CLOEXEC_FLAG, 0)
+    }
+
+    override fun truncate(fd: PosixRetainedFd, length: Long) {
+        val handle = requireOpenHandle(fd)
+        runOsOrThrow { kernel.truncate(handle.rawFd, length) }
+    }
+
     internal fun inspectOwnAppDirectoryIdentityNoFollow(path: Path): RootFdNodeIdentity? =
         PosixXattrAndAncestorSupport.inspectOwnAppDirectoryIdentity(this, kernel, path)
 
@@ -388,7 +451,7 @@ class AndroidOsPosixFdOperations(
         val mountId = kernel.readMountId(handle.fdNumber) ?: return null
         val resolvedPath = readFdResolvedPath(handle) ?: return null
         val selinuxLabel = readFdSelinuxLabel(handle.fdNumber, resolvedPath) ?: return null
-        if (st.deviceId <= 0L || st.inode <= 0L || mountId <= 0L || st.hardlinkCount < 0L) return null
+        if (st.deviceId <= 0L || st.inode < 0L || mountId <= 0L || st.hardlinkCount < 0L) return null
         return RootFdNodeIdentity(
             deviceId = st.deviceId,
             inode = st.inode,
@@ -578,6 +641,17 @@ class AndroidOsPosixFdOperations(
         val src = requireOpenHandle(srcParentFd)
         val dst = requireOpenHandle(dstParentFd)
         runOsOrThrow { kernel.renameAt(src.fdNumber, srcName, dst.fdNumber, dstName) }
+    }
+
+    override fun renameAtNoReplace(
+        srcParentFd: PosixRetainedFd,
+        srcName: String,
+        dstParentFd: PosixRetainedFd,
+        dstName: String,
+    ) {
+        val src = requireOpenHandle(srcParentFd)
+        val dst = requireOpenHandle(dstParentFd)
+        runOsOrThrow { kernel.renameAtNoReplace(src.fdNumber, srcName, dst.fdNumber, dstName) }
     }
 
     override fun linkAtNoReplace(

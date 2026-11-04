@@ -752,7 +752,10 @@ class AgentsViewModel(
                 retrievalMode = editor.retrievalMode, revision = (previous?.revision ?: 0) + 1,
                 parameterOverridesJson = parameters.toString(), contextPolicyJson = contextPolicyJson,
                 permissionSettingsJson = AgentSearchPermission.update(
-                    AgentToolConfirmation.update(previous?.permissionSettingsJson, editor.skipToolConfirmations),
+                    AgentToolConfirmation.updateRootReadConfirmations(
+                        AgentToolConfirmation.update(previous?.permissionSettingsJson, editor.skipToolConfirmations),
+                        editor.skipRootReadConfirmations,
+                    ),
                     editor.webSearchEnabled,
                 ),
             )
@@ -1020,6 +1023,7 @@ class AgentsViewModel(
             workspacePresetWorkspaceId = RootAgentGrantGuards.defaultOrdinaryPresetWorkspaceId(grantData.workspaces),
             retrievalMode = agent?.retrievalMode ?: "explicit",
             skipToolConfirmations = AgentToolConfirmation.skip(agent?.permissionSettingsJson),
+            skipRootReadConfirmations = AgentToolConfirmation.skipRootReadConfirmations(agent?.permissionSettingsJson),
             webSearchEnabled = AgentSearchPermission.enabled(agent?.permissionSettingsJson),
             snapshotLabel = "用此智能体新建会话时会冻结当前配置和能力授权；现有会话不会新增工具，撤权仍立即生效。",
             contextPolicyJson = agent?.contextPolicyJson ?: "{}",

@@ -180,6 +180,20 @@ fun WorkspacePickerScreen(
     modifier: Modifier = Modifier,
     showPageTitle: Boolean = true,
     chinese: Boolean = true,
+    /**
+     * Foreground Root directory browser owned by the host's state holder. Null (or a state with
+     * [RootDirectoryBrowserUiState.browsable] false) keeps the manual path flow unchanged.
+     */
+    rootBrowse: RootDirectoryBrowserUiState? = null,
+    onBrowseRootDirectory: (String) -> Unit = {},
+    onBrowseRootEntry: (String) -> Unit = {},
+    onBrowseRootParent: () -> Unit = {},
+    onBrowseRootMore: () -> Unit = {},
+    /** False when the connected Root channel has not enabled its independent Shell consent. */
+    rootShellConsentEnabled: Boolean = true,
+    rootShellSettingsHint: String? = null,
+    rootShellSettingsLabel: String? = null,
+    onOpenRootShellSettings: (() -> Unit)? = null,
 ) {
     val zh = chinese
     CompositionLocalProvider(LocalWorkspaceChinese provides chinese) {
@@ -283,7 +297,20 @@ fun WorkspacePickerScreen(
             }
         }
 
-        rootDirectorySelectionItem(state, actions, zh)
+        rootDirectorySelectionItem(
+            state,
+            actions,
+            zh,
+            browse = rootBrowse,
+            onBrowseRootDirectory = onBrowseRootDirectory,
+            onBrowseRootEntry = onBrowseRootEntry,
+            onBrowseRootParent = onBrowseRootParent,
+            onBrowseRootMore = onBrowseRootMore,
+            shellConsentEnabled = rootShellConsentEnabled,
+            shellSettingsHint = rootShellSettingsHint,
+            shellSettingsLabel = rootShellSettingsLabel,
+            onOpenShellSettings = onOpenRootShellSettings,
+        )
 
         if (state.showsDirectoryBrowser()) {
             item(key = "locations-title") {

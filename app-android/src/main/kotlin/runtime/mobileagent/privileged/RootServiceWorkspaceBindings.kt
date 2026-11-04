@@ -35,6 +35,7 @@ internal object RootServiceWorkspaceBindings {
         boundary: RootControlPlaneBoundary,
         fdOps: PosixFdOperations,
         workspaceExecutors: ConcurrentHashMap<String, BoundWorkspaceExecutor>,
+        mountPolicyProvider: (RootControlPlaneBoundary) -> runtime.mobileagent.domain.RootTrustedMountRoots? = RootMountBoundary::read,
     ): RootServiceBindWorkspaceResponse {
         val id = session.identity
         if (!caller.matches(id) || req.targetServiceInstanceId != id.serviceInstanceId ||
@@ -47,10 +48,11 @@ internal object RootServiceWorkspaceBindings {
         if (rootIdentity == null || !rootIdentity.isDirectory || rootIdentity.isSymlink) {
             return rejected("workspace_root_invalid")
         }
-        if (boundary.isProtected(req.workspaceRootPath, rootIdentity)) {
+        val mounts = mountPolicyProvider(boundary) ?: return rejected("mountinfo_unavailable")
+        if (rootIdentity.mountId !in mounts.mountIds || boundary.isProtected(req.workspaceRootPath, rootIdentity)) {
             return rejected("control_plane_protected")
         }
-        if (req.expectedRootDeviceId <= 0L || req.expectedRootInode <= 0L || req.expectedRootMountId <= 0L ||
+        if (req.expectedRootDeviceId <= 0L || req.expectedRootInode < 0L || req.expectedRootMountId <= 0L ||
             req.expectedRootDeviceId != rootIdentity.deviceId || req.expectedRootInode != rootIdentity.inode ||
             req.expectedRootMountId != rootIdentity.mountId) {
             return rejected("workspace_root_identity_mismatch")
@@ -73,6 +75,7 @@ internal object RootServiceWorkspaceBindings {
             val bound = BoundWorkspaceExecutor(req.workspaceRootPath, driver, RootWorkspaceFileExecutor(
                 workspaceRootIdentity = rootIdentity, controlPlane = boundary, driver = driver,
                 confirmedMountIds = emptySet(),
+                trustedMountRoots = mounts,
             ))
             val result = session.reattachWorkspace(
                 caller, req.targetServiceInstanceId, req.targetSessionId, req.targetIdentityEpoch,

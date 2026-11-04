@@ -36,7 +36,8 @@ fun RootWorkspaceOrigin.canonicalSha256(): String = RootRecoveryLocatorCodec.len
 /**
  * OS-level FD and stat identity observed directly on an opened file or directory descriptor.
  * `mountId` comes from `/proc/self/fdinfo/<fd>` or `statx(STATX_MNT_ID)`; `<= 0` means
- * mount identity is unavailable and must fail closed.
+ * mount identity is unavailable and must fail closed. Inode zero is a real value on Android
+ * FUSE mount roots; unavailable observations are null, never a fabricated zero inode.
  */
 data class RootFdNodeIdentity(
     val deviceId: Long,
@@ -52,7 +53,7 @@ data class RootFdNodeIdentity(
     val selinuxLabel: String? = null,
 ) {
     val hasValidKernelIdentity: Boolean
-        get() = deviceId != 0L && inode > 0L && mountId > 0L
+        get() = deviceId != 0L && inode >= 0L && mountId > 0L
 
     fun sameKernelObjectAs(other: RootFdNodeIdentity): Boolean =
         hasValidKernelIdentity &&
@@ -90,8 +91,8 @@ data class RootRecoveryLocatorPayload(
         if (rootKind == RootWorkspaceRootKind.DEVICE_ROOT) {
             require(absoluteRootPath == "/") { "DEVICE_ROOT locator must bind '/'" }
         }
-        require(rootDeviceId != 0L && rootInode > 0L && rootMountId > 0L) {
-            "Root locator requires non-zero deviceId, inode, and mountId"
+        require(rootDeviceId != 0L && rootInode >= 0L && rootMountId > 0L) {
+            "Root locator requires non-zero deviceId, positive mountId, and non-negative inode"
         }
     }
 

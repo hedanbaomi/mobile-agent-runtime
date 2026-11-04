@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+
+
+
+<!--
+  Root workspace browsing and in-place permission editing copy. A dedicated file keeps the shared
+  strings.xml files untouched, so other work packages never conflict with these keys.
+-->
+<resources>
+    <string name="agents_root_shell_settings_hint" formatted="false">此通道未启用 Root Shell；请到设置开启“独立确认 Root Shell”。</string>
+    <string name="agents_root_read_skip_label" formatted="false">跳过 Root 只读工具的逐次确认</string>
+    <string name="agents_root_read_skip_hint" formatted="false">仅对新会话生效：通过 Root 工作区的读取不再逐次弹窗。Root 写入与 Shell 仍需确认，已有会话保留其冻结的设置。</string>
+    <string name="agents_root_browse_title" formatted="false">浏览设备目录</string>
+    <string name="agents_root_browse_start" formatted="false">浏览</string>
+    <string name="agents_root_browse_parent" formatted="false">上级目录</string>
+    <string name="agents_root_browse_more" formatted="false">加载更多</string>
+    <string name="agents_root_browse_empty" formatted="false">该目录下没有可授权绑定的子目录。</string>
+    <string name="agents_root_browse_loading" formatted="false">正在读取目录…</string>
+    <string name="agents_root_browse_failed" formatted="false">无法读取该目录。请检查路径与 Root 通道后重试。</string>
+    <string name="agents_root_browse_manual_hint" formatted="false">仍可在下方直接输入绝对路径。</string>
+    <string name="agents_root_permissions_title" formatted="false">编辑已绑定的 Root 目录</string>
+    <string name="agents_root_permissions_write" formatted="false">允许写入、创建、移动和删除</string>
+    <string name="agents_root_permissions_metadata" formatted="false">读取权限、属主与 SELinux 标签（不依赖写入）；修改它们需要开启写入</string>
+    <string name="agents_root_permissions_shell" formatted="false">允许此工作区使用 Root Shell</string>
+    <string name="agents_root_permissions_loading" formatted="false">正在读取当前权限…</string>
+    <string name="agents_root_permissions_apply" formatted="false">更新权限</string>
+    <string name="agents_root_permissions_new_chat_only" formatted="false">仅对新会话生效；已有会话保留其冻结的授权。</string>
+    <string name="agents_root_permissions_failed" formatted="false">权限更新被拒绝，未做任何更改；请重新连接 Root 通道后重试。</string>
+</resources>

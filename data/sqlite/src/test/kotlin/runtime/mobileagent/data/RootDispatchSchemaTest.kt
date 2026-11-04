@@ -22,10 +22,11 @@ class RootDispatchSchemaTest {
             db.execute("DROP TRIGGER root_dispatch_transition")
             db.execute("CREATE TRIGGER root_dispatch_transition BEFORE UPDATE ON root_dispatch_receipts BEGIN SELECT 1; END")
             val unsupported=sql(db,"root_dispatch_transition")
-            assertThrows(IllegalStateException::class.java) { Migrations.apply(db) }
+            assertEquals(runtime.mobileagent.domain.ErrorCode.SCHEMA_UNSUPPORTED,
+                assertThrows(runtime.mobileagent.domain.AppException::class.java) { Migrations.apply(db) }.error.code)
             assertEquals(unsupported,sql(db,"root_dispatch_transition"))
             assertEquals(before,repo.getReceipt(permit.requestId))
-            assertEquals(40L,db.query("SELECT version FROM schema_version").single().long("version"))
+            assertEquals(Migrations.VERSION.toLong(),db.query("SELECT version FROM schema_version").single().long("version"))
         }
     }
 
@@ -42,7 +43,8 @@ class RootDispatchSchemaTest {
                 assertNotEquals(original,unsupported)
                 db.execute("DROP TABLE root_dispatch_receipts")
                 db.execute(unsupported)
-                assertThrows(IllegalStateException::class.java) { Migrations.apply(db) }
+                assertEquals(runtime.mobileagent.domain.ErrorCode.SCHEMA_UNSUPPORTED,
+                assertThrows(runtime.mobileagent.domain.AppException::class.java) { Migrations.apply(db) }.error.code)
                 assertEquals(unsupported,sql(db,"root_dispatch_receipts"))
             }
         }
@@ -58,7 +60,8 @@ class RootDispatchSchemaTest {
                 if(name.startsWith("idx_")) db.execute("DROP INDEX idx_root_dispatch_invocation")
                 db.execute(declaration)
                 val unsupported=sql(db,name)
-                assertThrows(IllegalStateException::class.java) { Migrations.apply(db) }
+                assertEquals(runtime.mobileagent.domain.ErrorCode.SCHEMA_UNSUPPORTED,
+                assertThrows(runtime.mobileagent.domain.AppException::class.java) { Migrations.apply(db) }.error.code)
                 assertEquals(unsupported,sql(db,name))
             }
         }
@@ -76,6 +79,26 @@ class RootDispatchSchemaTest {
             Migrations.apply(db)
             assertTrue(sql(db,"root_dispatch_initial").contains("Root receipt must start"))
             assertTrue(sql(db,"idx_root_dispatch_approval").contains("UNIQUE"))
+            assertTrue(db.query("PRAGMA foreign_key_check").isEmpty())
+        }
+    }
+
+    @Test fun existingV40ReceiptsSurviveAdditiveQueryIndexes() {
+        JdbcSqlConnection().use { db ->
+            val fixture = RootApprovalFixture()
+            fixture.setup(db)
+            val approvals = RootApprovalRepository(db, clock = { fixture.now })
+            val approved = approvals.approve(approvals.createPending(fixture.request()).approval.approvalId)
+            val repository = RootDispatchRepository(db) { fixture.now }
+            val permit = repository.claim(approved.approval.approvalId, approved.request)
+            val before = repository.getReceipt(permit.requestId)
+            val indexes = listOf("idx_root_dispatch_open", "idx_root_dispatch_authority_epoch", "idx_root_dispatch_unknown")
+            indexes.forEach { db.execute("DROP INDEX $it") }
+            db.execute("UPDATE schema_version SET version=40")
+            Migrations.apply(db)
+            indexes.forEach { assertTrue(sql(db, it).contains("root_dispatch_receipts")) }
+            assertEquals(before, repository.getReceipt(permit.requestId))
+            assertEquals(Migrations.VERSION.toLong(), db.query("SELECT version FROM schema_version").single().long("version"))
             assertTrue(db.query("PRAGMA foreign_key_check").isEmpty())
         }
     }

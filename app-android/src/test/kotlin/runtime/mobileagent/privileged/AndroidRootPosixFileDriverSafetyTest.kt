@@ -23,6 +23,8 @@ private data class N(
     var mount: Long = 77,
     var stamp: String = "1",
     var selinux: String = "u:object_r:app_data_file:s0",
+    /** A symlink entry: `bytes` holds the link text and the kernel never follows it implicitly. */
+    var symlink: Boolean = false,
     val xattrs: MutableMap<String, ByteArray> = linkedMapOf(),
 )
 
@@ -40,17 +42,53 @@ private class Ops : PosixFdOperations {
     var onOpen: (() -> Unit)? = null
     var onRename: (() -> Unit)? = null
     var onAfterRename: (() -> Unit)? = null
+    /** Injects a destination entry that appears inside the `rename(2)` window. */
+    var onBeforeRename: (() -> Unit)? = null
     var swapTempNameOnCommit = false
     var failLabel = false
     var failSetXattrName: String? = null
     var failCleanup = false
     var failFsync = false
     var failWrite = false
+    var failWriteBeforeBytes = false
+    var failTruncate = false
     var failRead = false
     var failMkdir = false
     var closedDriverDuringWrite: (() -> Unit)? = null
+    /** Mount-type switch: the same in-memory tree served as FUSE/sdcardfs. */
+    var emulated = false
+    /** FUSE/sdcardfs synthesize directory owner/mode/label; nothing may force them afterwards. */
+    var fuseDirectoryMode = 0b111_111_000
+    var fuseDirectoryGid = 9997
+    var fuseDirectoryLabel = "u:object_r:fuse:s0"
+    var onAfterMkdir: (() -> Unit)? = null
+    /**
+     * `renameat2(RENAME_NOREPLACE)` is a kernel/filesystem capability, not a mount-type proxy; the
+     * shipped supervisor library provides it, so the default models a kernel that supports it.
+     */
+    var atomicNoReplaceRenameSupported = true
+    var onBeforeNoReplaceRename: (() -> Unit)? = null
+    /** Errno a directory fsync reports instead of succeeding (`EINVAL`/`ENOSYS`/`EIO`, ...). */
+    var failFsyncErrno: String? = null
+    var afterWrite: (() -> Unit)? = null
+    var writableOpens = 0
+    var truncates = 0
+    var writeCalls = 0
+    var stageCalls = 0
+    var renameCalls = 0
+    var renameAtNoReplaceCalls = 0
+    var linkCalls = 0
+    var unlinkCalls = 0
+    var chmodCalls = 0
+    var chownCalls = 0
+    var labelCalls = 0
 
-    inner class F(val node: N, val openPath: String = node.path) : PosixRetainedFd {
+    inner class F(
+        val node: N,
+        val openPath: String = node.path,
+        /** True for a descriptor from [openWritableFd]: writes do not shorten the file by themselves. */
+        val inPlace: Boolean = false,
+    ) : PosixRetainedFd {
         override val fdNumber = ++opened
         override var isOpen = true
         override fun close() {
@@ -62,12 +100,12 @@ private class Ops : PosixFdOperations {
     }
 
     fun identity(n: N) = RootFdNodeIdentity(
-        1, n.inode, n.mount, n.dir, !n.dir, false, n.links, n.mode, n.uid, n.gid,
+        1, n.inode, n.mount, n.dir, !n.dir && !n.symlink, n.symlink, n.links, n.mode, n.uid, n.gid,
         n.selinux,
     )
 
     fun add(name: String, text: String = "old!") {
-        nodes[name] = N(serial++, false, "${parent.path}/$name", text.toByteArray(), uid = parent.uid.takeIf { it != 0 } ?: 10100, gid = parent.gid.takeIf { it != 0 } ?: 10100, selinux = parent.selinux)
+        nodes[name] = N(serial++, false, "${parent.path}/$name", text.toByteArray(), uid = parent.uid, gid = parent.gid, selinux = parent.selinux)
     }
 
     fun addDir(name: String) {
@@ -108,6 +146,23 @@ private class Ops : PosixFdOperations {
 
     override fun fstatVersionStamp(fd: PosixRetainedFd) = (fd as F).node.stamp
 
+    override fun usesEmulatedStoragePermissions(fd: PosixRetainedFd) = emulated
+
+    /** Reopens the retained descriptor itself, never a directory entry, for in-place writes. */
+    override fun openWritableFd(fd: PosixRetainedFd): PosixRetainedFd {
+        writableOpens++
+        val source = fd as F
+        return F(source.node, source.openPath, inPlace = true)
+    }
+
+    /** ftruncate(2) on the existing file: the old tail is gone before the first byte is written. */
+    override fun truncate(fd: PosixRetainedFd, length: Long) {
+        truncates++
+        if (failTruncate) throw PosixOpException("EROFS")
+        val node = (fd as F).node
+        node.bytes = node.bytes.copyOf(minOf(length, node.bytes.size.toLong()).toInt())
+    }
+
     override fun fstatContentDigest(fd: PosixRetainedFd) = sha((fd as F).node.bytes.toString(Charsets.ISO_8859_1))
 
     override fun readFdRange(fd: PosixRetainedFd, offsetBytes: Long, maxBytes: Int): ByteArray {
@@ -122,11 +177,13 @@ private class Ops : PosixFdOperations {
     override fun readFdResolvedPath(fd: PosixRetainedFd) = (fd as F).openPath
 
     override fun fchmod(fd: PosixRetainedFd, modeOctal: Int) {
+        chmodCalls++
         (fd as F).node.mode = modeOctal
         fd.node.stamp += "c"
     }
 
     override fun fchown(fd: PosixRetainedFd, ownerUid: Int, ownerGid: Int) {
+        chownCalls++
         val node = (fd as F).node
         node.uid = ownerUid
         node.gid = ownerGid
@@ -136,6 +193,7 @@ private class Ops : PosixFdOperations {
     }
 
     override fun fsetSelinuxLabel(fd: PosixRetainedFd, selinuxLabel: String) {
+        labelCalls++
         if (failLabel) throw PosixOpException("EOPNOTSUPP", unsupportedAttribute = "security.selinux")
         (fd as F).node.selinux = selinuxLabel
     }
@@ -154,24 +212,40 @@ private class Ops : PosixFdOperations {
     }
 
     override fun createSiblingTempAt(parentFd: PosixRetainedFd, tempName: String, modeOctal: Int): PosixRetainedFd {
+        stageCalls++
         onStage?.invoke()
+        // O_CREAT | O_EXCL: an entry that appeared after inspection is never overwritten.
+        if (nodes.containsKey(tempName)) throw PosixOpException("EEXIST")
         val node = N(serial++, false, "${(parentFd as F).node.path}/$tempName", mode = modeOctal)
         nodes[tempName] = node
         return F(node, "${(parentFd as F).openPath}/$tempName")
     }
 
     override fun writeAllAndFsync(fd: PosixRetainedFd, bytes: ByteArray) {
-        (fd as F).node.bytes = bytes.copyOf()
-        (fd as F).node.stamp += "w"
+        writeCalls++
+        if (failWriteBeforeBytes) throw PosixOpException("EIO")
+        val handle = fd as F
+        if (handle.inPlace) {
+            // pwrite(2) at offset 0 of an existing file: only truncate(2) may shorten it.
+            val merged = handle.node.bytes.copyOf(maxOf(handle.node.bytes.size, bytes.size))
+            bytes.copyInto(merged)
+            handle.node.bytes = merged
+        } else {
+            handle.node.bytes = bytes.copyOf()
+        }
+        handle.node.stamp += "w"
         closedDriverDuringWrite?.invoke()
+        afterWrite?.invoke()
         if (failWrite) throw PosixOpException("EIO")
     }
 
     override fun fsyncDirectory(dirFd: PosixRetainedFd) {
         if (failFsync) throw PosixOpException("EIO")
+        failFsyncErrno?.let { throw PosixOpException(it) }
     }
 
     override fun renameReplaceAt(parentFd: PosixRetainedFd, tempName: String, targetName: String) {
+        renameCalls++
         onRename?.invoke()
         if (swapTempNameOnCommit) {
             nodes[tempName] = N(serial++, false, "${(parentFd as F).node.path}/$tempName", "EVIL".toByteArray())
@@ -191,6 +265,7 @@ private class Ops : PosixFdOperations {
 
     /** FD-pinned link: commits the inode the descriptor refers to, never a staged name. */
     override fun linkAtFdNoReplace(parentFd: PosixRetainedFd, sourceFd: PosixRetainedFd, leafName: String) {
+        linkCalls++
         if (swapTempNameOnCommit) {
             nodes.keys.filter { it.startsWith(".mar-root-") }.toList().forEach { name ->
                 nodes.remove(name)?.let { it.links = maxOf(0, it.links - 1) }
@@ -213,6 +288,7 @@ private class Ops : PosixFdOperations {
     }
 
     override fun unlinkAt(parentFd: PosixRetainedFd, childName: String): Boolean {
+        unlinkCalls++
         if (failCleanup || !parentFd.isOpen) return false
         val node = nodes.remove(childName) ?: return false
         node.links = maxOf(0, node.links - 1)
@@ -223,7 +299,7 @@ private class Ops : PosixFdOperations {
         if (failMkdir) throw PosixOpException("EPERM")
         if (nodes.containsKey(childName)) throw PosixOpException("EEXIST")
         val parentNode = (parentFd as F).node
-        nodes[childName] = N(
+        val node = N(
             serial++,
             true,
             "${parentNode.path}/$childName",
@@ -234,18 +310,62 @@ private class Ops : PosixFdOperations {
             links = 2,
             selinux = parentNode.selinux,
         )
+        if (emulated) {
+            // FUSE/sdcardfs synthesize the directory attributes; chmod/chown/chcon are refused.
+            node.mode = fuseDirectoryMode
+            node.gid = fuseDirectoryGid
+            node.selinux = fuseDirectoryLabel
+        }
+        nodes[childName] = node
+        onAfterMkdir?.invoke()
     }
 
+    /**
+     * `renameat2(..., RENAME_NOREPLACE)`: never replaces an existing destination entry, and the
+     * kernel removes the source name as part of the same atomic step.
+     */
+    override fun renameAtNoReplace(
+        srcParentFd: PosixRetainedFd,
+        srcName: String,
+        dstParentFd: PosixRetainedFd,
+        dstName: String,
+    ) {
+        renameAtNoReplaceCalls++
+        if (!atomicNoReplaceRenameSupported) throw PosixOpException("EOPNOTSUPP")
+        onBeforeNoReplaceRename?.invoke()
+        if (nodes.containsKey(dstName)) throw PosixOpException("EEXIST")
+        val node = nodes.remove(srcName) ?: throw PosixOpException("ENOENT")
+        nodes[dstName] = node
+    }
+
+    /**
+     * POSIX `rename(2)`: replaces the destination *entry* itself (a symlink is replaced, never
+     * followed) and lets the kernel refuse incompatible types — a non-directory source cannot
+     * replace a directory (`EISDIR`), a directory source cannot replace a file (`ENOTDIR`), and a
+     * non-empty directory destination is refused (`ENOTEMPTY`).
+     */
     override fun renameAt(
         srcParentFd: PosixRetainedFd,
         srcName: String,
         dstParentFd: PosixRetainedFd,
         dstName: String,
     ) {
-        // POSIX renameat(2) replaces an existing destination entry.
-        val node = nodes.remove(srcName) ?: throw PosixOpException("ENOENT")
-        nodes[dstName] = node
+        renameCalls++
+        onBeforeRename?.invoke()
+        val source = nodes[srcName] ?: throw PosixOpException("ENOENT")
+        val destination = nodes[dstName]
+        if (destination != null) {
+            if (destination.dir && !source.dir) throw PosixOpException("EISDIR")
+            if (!destination.dir && source.dir) throw PosixOpException("ENOTDIR")
+            if (destination.dir && destination.children().isNotEmpty()) throw PosixOpException("ENOTEMPTY")
+        }
+        nodes.remove(srcName)
+        nodes[dstName] = source
+        source.path = "${(dstParentFd as F).node.path}/$dstName"
     }
+
+    private fun N.children(): List<N> =
+        nodes.values.filter { it !== this && it.path.startsWith(path.trimEnd('/') + "/") }
 
     override fun linkAtNoReplace(
         srcParentFd: PosixRetainedFd,
@@ -253,6 +373,7 @@ private class Ops : PosixFdOperations {
         dstParentFd: PosixRetainedFd,
         dstName: String,
     ) {
+        linkCalls++
         if (nodes.containsKey(dstName)) throw PosixOpException("EEXIST")
         val node = nodes[srcName] ?: throw PosixOpException("ENOENT")
         nodes[dstName] = node
@@ -287,6 +408,9 @@ private class Env {
         text.toByteArray(),
     )
 }
+
+/** [Env] whose workspace is served by emulated storage (FUSE/sdcardfs mount semantics). */
+private fun fuseEnv() = Env().also { it.ops.emulated = true }
 
 private fun assertUnknown(r: RootFileOperationResult<*>) {
     assertTrue(r is RootFileOperationResult.PostMutationFailure, "expected post-mutation failure, got $r")
@@ -595,7 +719,7 @@ class AndroidRootPosixFileDriverSafetyTest {
 
     // ---- Round 1: non-UID0 parent refuses before creating a temp or touching the target ----
     @Test
-    fun round1NonUid0ExclusiveParentRejectsWriteBeforeAnySideEffect() {
+    fun sharedParentRejectsConditionalWriteBeforeAnySideEffect() {
         val e = Env()
         e.ops.root = N(1000, true, "/workspace", mode = 448, links = 2, uid = 10_100, gid = 10_100)
         e.ops.parent = e.ops.root
@@ -603,11 +727,11 @@ class AndroidRootPosixFileDriverSafetyTest {
         val exe = RootWorkspaceFileExecutor(e.ops.identity(e.ops.root), boundary(), driver)
         val serialBefore = e.ops.serial
         val result = exe.executeAtomicWriteText(
-            RootTypedArguments.FileWriteText("ws", "file", sha("NEW!"), 4, true),
+            RootTypedArguments.FileWriteText("ws", "file", sha("NEW!"), 4, true, e.version()),
             "NEW!".toByteArray(),
         )
         assertTrue(result is RootFileOperationResult.Rejected, "got $result")
-        assertTrue((result as RootFileOperationResult.Rejected).reason.contains("unsupported_uid0_exclusive_write_domain"))
+        assertEquals(RootConfinementRejection.WRITE_DOMAIN_VERSION_UNSUPPORTED, (result as RootFileOperationResult.Rejected).rejection)
         assertEquals("old!", e.ops.nodes["file"]!!.bytes.toString(Charsets.UTF_8))
         assertEquals(serialBefore, e.ops.serial, "no temp file may be created before the write-domain refusal")
         driver.close()
@@ -623,7 +747,7 @@ class AndroidRootPosixFileDriverSafetyTest {
         val exe = RootWorkspaceFileExecutor(e.ops.identity(e.ops.root), boundary(), driver)
         e.ops.onRename = { e.ops.add("file", "RACE") }
         val result = exe.executeAtomicWriteText(
-            RootTypedArguments.FileWriteText("ws", "file", sha("NEW!"), 4, true),
+            RootTypedArguments.FileWriteText("ws", "file", sha("NEW!"), 4, true, e.version()),
             "NEW!".toByteArray(),
         )
         assertTrue(result is RootFileOperationResult.Rejected)
@@ -805,6 +929,28 @@ class AndroidRootPosixFileDriverSafetyTest {
         val r = exe.executeGetMetadata(RootTypedArguments.FileGetMetadata("ws", "subdir/secret"))
         assertTrue(r is RootFileOperationResult.Rejected, "got $r")
         driver.close()
+    }
+
+    @Test
+    fun productionWalkKeepsKernelInodeZeroForFuseAncestors() {
+        val kernel = object : MemoryKernel() {
+            override fun fstat(rawFd: java.io.FileDescriptor, fdNumber: Int): PosixRawStat {
+                val observed = super.fstat(rawFd, fdNumber)
+                return if (readlink("/proc/self/fd/$fdNumber") == "/") observed.copy(inode = 0L) else observed
+            }
+        }
+        kernel.files["/workspace/file"] = "fuse seed".toByteArray()
+        val ops = AndroidOsPosixFdOperations(kernel = kernel)
+        val walk = ops.openDirectoryWithAncestorsNoFollow("/workspace")!!
+        assertEquals(0L, walk.second.single().inode)
+        assertTrue(walk.second.single().hasValidKernelIdentity)
+        walk.first.use { parent ->
+            ops.openTargetAt(parent, "file", false, false).use { fd ->
+                assertEquals("fuse seed", String(ops.readFdRange(fd, 0, 64), Charsets.UTF_8))
+            }
+        }
+        assertTrue(RootServiceRootIdentity(23L, 0L, 48L, 0, RootWorkspaceRootKind.DIRECTORY).isValidKernelObject)
+        assertFalse(RootServiceRootIdentity(23L, -1L, 48L, 0, RootWorkspaceRootKind.DIRECTORY).isValidKernelObject)
     }
 
     @Test
@@ -1007,7 +1153,7 @@ class AndroidRootPosixFileDriverSafetyTest {
         assertEquals(0, ops.nodes.keys.count { it.startsWith(".mar-root-tmp-") })
         ops.failSetXattrName = null
 
-        // 4. Untrusted UID 2000 ancestor above workspace root causes write-domain rejection before side effects.
+        // 4. A writable ancestor above the verified workspace root does not remove ordinary Root write access.
         ops.ancestorsAboveRoot = listOf(
             RootFdNodeIdentity(1, 99, 77, true, false, false, 2, 505, 2000, 2000, "u:object_r:shell_data_file:s0"),
         )
@@ -1021,8 +1167,8 @@ class AndroidRootPosixFileDriverSafetyTest {
             ),
             "{\"v\":4}".toByteArray(Charsets.UTF_8),
         )
-        assertTrue(rejectedAncestorWrite is RootFileOperationResult.Rejected)
-        assertEquals("{\"v\":2}", ops.nodes["config.json"]!!.bytes.toString(Charsets.UTF_8))
+        assertTrue(rejectedAncestorWrite is RootFileOperationResult.Succeeded)
+        assertEquals("{\"v\":4}", ops.nodes["config.json"]!!.bytes.toString(Charsets.UTF_8))
 
         // 5. Control-plane ancestor above workspace root causes immediate walk rejection.
         ops.ancestorsAboveRoot = listOf(
@@ -1249,8 +1395,11 @@ class AndroidRootPosixFileDriverSafetyTest {
             acceptedStatus = statusSnap,
             payloadBytes = ByteArray(0),
         )
-        assertEquals(RootServiceTerminalOutcome.FAILED, oversizedReadResp.terminalOutcome)
-        assertEquals("result_exceeds_budget", oversizedReadResp.errorReason)
+        assertEquals(RootServiceTerminalOutcome.SUCCEEDED, oversizedReadResp.terminalOutcome)
+        val page = requireNotNull(oversizedReadResp.fileResultJson)
+        assertTrue(page.toByteArray(Charsets.UTF_8).size <= RootExecutionBudget.MAX_OUTPUT_BYTES)
+        assertTrue(page.contains("\"eof\":false"))
+        assertTrue(page.contains("\"next_offset_bytes\":"))
 
         // 5. Subdirectory file_glob and file_list pagination cursor preservation.
         e.ops.addDir("sub")
@@ -1282,6 +1431,570 @@ class AndroidRootPosixFileDriverSafetyTest {
             RootTypedArguments.FileGlob(workspaceId = "ws", relativePath = "", pattern = "*.md"),
         )
         assertTrue(closedGlob is RootFileOperationResult.Rejected)
+    }
+
+    // --- FUSE/sdcardfs ordinary writes: bound FD only, no staging, no rename ---------------------
+
+    /**
+     * Emulated storage cannot carry a UID0 0700 stage or a hardlink commit, so an ordinary create
+     * uses the exclusive bound-FD create: an entry that appears between the parent inspection and the
+     * create is never overwritten and never removed.
+     */
+    @Test
+    fun fuseCreateIsExclusiveAndNeverOverwritesATargetThatAppearsLate() {
+        val e = fuseEnv()
+        e.ops.onStage = {
+            e.ops.nodes["fresh.txt"] = N(e.ops.serial++, false, "/workspace/fresh.txt", "ARRIVED".toByteArray())
+        }
+        val text = "created"
+        val result = e.exe.executeAtomicWriteText(
+            RootTypedArguments.FileWriteText("ws", "fresh.txt", sha(text), text.toByteArray().size, false, null),
+            text.toByteArray(),
+        )
+        assertTrue(result is RootFileOperationResult.Rejected, "O_EXCL create must reject an appearing target, got $result")
+        assertEquals(
+            RootConfinementRejection.RENAME_RACE_DETECTED,
+            (result as RootFileOperationResult.Rejected).rejection,
+        )
+        assertEquals("ARRIVED", e.ops.nodes["fresh.txt"]!!.bytes.toString(Charsets.UTF_8))
+        assertEquals(0, e.ops.writeCalls, "the appearing target must never be written through")
+        assertEquals(0, e.ops.unlinkCalls, "and must never be removed")
+        e.driver.close()
+    }
+
+    /** The new status carries the difference instead of claiming a permission-preserving replace. */
+    @Test
+    fun fuseBoundFdReplaceReportsInPlaceAndCreateReportsFilesystemDefaults() {
+        val created = fuseEnv()
+        val parent = requireNotNull(created.driver.inspectParentForCreate("ws", "fresh.txt"))
+        val createStatus = created.driver.createNewRegularFile(parent, "fresh.txt", "fresh".toByteArray())
+        assertTrue(createStatus is DriverWriteStatus.Replaced, "expected bound-FD create, got $createStatus")
+        createStatus as DriverWriteStatus.Replaced
+        assertFalse(createStatus.inPlace)
+        assertTrue(createStatus.createdWithFilesystemDefaults)
+        assertEquals("fresh", created.ops.nodes["fresh.txt"]!!.bytes.toString(Charsets.UTF_8))
+        assertEquals(1, created.ops.stageCalls)
+        assertEquals(0, created.ops.renameCalls, "no rename-based staging on emulated storage")
+        assertEquals(0, created.ops.linkCalls, "no hardlink-based commit on emulated storage")
+        created.driver.close()
+
+        val replaced = fuseEnv()
+        val target = requireNotNull(replaced.driver.inspectOpenedTarget("ws", "file", false))
+        val replaceStatus = replaced.driver.writeAtomicSiblingAndReplace(
+            target = target,
+            utf8Bytes = "NEW!".toByteArray(),
+            preserveModeOctal = 384,
+            preserveOwnerUid = 10100,
+            preserveOwnerGid = 10100,
+            preserveSelinuxLabel = "u:object_r:app_data_file:s0",
+        )
+        assertTrue(replaceStatus is DriverWriteStatus.Replaced, "expected bound-FD replace, got $replaceStatus")
+        replaceStatus as DriverWriteStatus.Replaced
+        assertTrue(replaceStatus.inPlace)
+        assertFalse(replaceStatus.createdWithFilesystemDefaults)
+        assertEquals("NEW!", replaced.ops.nodes["file"]!!.bytes.toString(Charsets.UTF_8))
+        assertEquals(1, replaced.ops.writableOpens)
+        assertEquals(0, replaced.ops.stageCalls, "an in-place replace must not stage a sibling")
+        assertEquals(0, replaced.ops.renameCalls)
+        replaced.driver.close()
+    }
+
+    /**
+     * A shorter content must truncate the bound descriptor: writing alone would leave the old tail
+     * and the post-write size check would fail. Owner, mode and label stay untouched.
+     */
+    @Test
+    fun fuseShortWriteTruncatesTheBoundFdAndPreservesOwnerModeLabel() {
+        val e = fuseEnv()
+        val label = "u:object_r:app_data_file:s0:c200,c256,c512,c768"
+        e.ops.nodes["file"]!!.apply {
+            bytes = "0123456789abcdef".toByteArray()
+            mode = 416 // 0640
+            uid = 10200
+            gid = 10200
+            selinux = label
+        }
+        val text = "short"
+        val result = e.exe.executeAtomicWriteText(
+            RootTypedArguments.FileWriteText("ws", "file", sha(text), text.toByteArray().size, true, null),
+            text.toByteArray(),
+        )
+        assertTrue(result is RootFileOperationResult.Succeeded, "bound-fd replace must succeed, got $result")
+        val snapshot = (result as RootFileOperationResult.Succeeded).value
+        assertEquals(text, e.ops.nodes["file"]!!.bytes.toString(Charsets.UTF_8), "a short write must not keep the old tail")
+        assertEquals(text.toByteArray().size.toLong(), snapshot.sizeBytes)
+        assertEquals(10200, snapshot.ownerUid)
+        assertEquals(10200, snapshot.ownerGid)
+        assertEquals(416, snapshot.modeOctal)
+        assertEquals(label, snapshot.selinuxLabel)
+        assertEquals(1, e.ops.truncates, "the shorter content must truncate the existing descriptor")
+        assertEquals(1, e.ops.writableOpens)
+        assertEquals(0, e.ops.stageCalls, "emulated replace must not stage a sibling file")
+        e.driver.close()
+    }
+
+    /** A failed or interrupted bound-FD write is UNKNOWN: never SUCCESS, never cleaned up, never retried. */
+    @Test
+    fun fuseWriteFailureOrServiceLossIsUnknownWithoutCleanupOrRetry() {
+        for (loseService in listOf(false, true)) {
+            val e = fuseEnv()
+            if (loseService) e.ops.closedDriverDuringWrite = { e.driver.close() } else e.ops.failWrite = true
+            val result = e.write()
+            assertUnknown(result)
+            assertEquals(1, e.ops.writeCalls, "loseService=$loseService: a failed write must not be retried")
+            assertEquals(0, e.ops.unlinkCalls, "loseService=$loseService: nothing may be removed after a partial write")
+            assertEquals(0, e.ops.renameCalls, "loseService=$loseService: no replace may follow a failed write")
+            e.driver.close()
+        }
+    }
+
+    /** A target replaced after inspection is caught before any write (last-window race). */
+    @Test
+    fun fuseTargetSwapAfterInspectionIsRejectedWithoutTouchingTheSwappedTarget() {
+        val e = fuseEnv()
+        val target = requireNotNull(e.driver.inspectOpenedTarget("ws", "file", false))
+        e.ops.nodes["file"] = N(e.ops.serial++, false, "/workspace/file", "IMPOSTOR".toByteArray())
+        val status = e.driver.writeAtomicSiblingAndReplace(
+            target = target,
+            utf8Bytes = "NEW!".toByteArray(),
+            preserveModeOctal = 384,
+            preserveOwnerUid = 10100,
+            preserveOwnerGid = 10100,
+            preserveSelinuxLabel = null,
+        )
+        assertEquals(DriverWriteStatus.RaceDetectedTempCleanedUp, status)
+        assertEquals("IMPOSTOR", e.ops.nodes["file"]!!.bytes.toString(Charsets.UTF_8))
+        assertEquals(0, e.ops.writableOpens, "the stale handle must be dropped before the write")
+        assertEquals(0, e.ops.writeCalls)
+        assertEquals(0, e.ops.unlinkCalls)
+        e.driver.close()
+    }
+
+    /** A target that drifts after the write is an UNKNOWN post-commit outcome, not a success. */
+    @Test
+    fun fuseTargetDriftAfterTheWriteIsUnknownAndNeverSuccess() {
+        val e = fuseEnv()
+        e.ops.afterWrite = {
+            e.ops.nodes["file"] = N(e.ops.serial++, false, "/workspace/file", "DRIFTED".toByteArray())
+        }
+        assertUnknown(e.write())
+        assertEquals(1, e.ops.writeCalls, "a drifted post-write observation must not be retried")
+        assertEquals(0, e.ops.unlinkCalls)
+        e.driver.close()
+    }
+
+    /** expected_version and patch read-then-replace stay refused in a shared directory, with no write. */
+    @Test
+    fun fuseConditionalVersionAndPatchAreRejectedBeforeAnyWrite() {
+        val e = fuseEnv()
+        val version = e.version()
+        val conditional = e.write(version)
+        assertTrue(conditional is RootFileOperationResult.Rejected, "expected_version must be refused, got $conditional")
+        assertEquals(
+            RootFileOperationReason.WRITE_DOMAIN_VERSION_UNSUPPORTED,
+            (conditional as RootFileOperationResult.Rejected).reason,
+        )
+        assertEquals("old!", e.ops.nodes["file"]!!.bytes.toString(Charsets.UTF_8))
+        assertEquals(0, e.ops.writeCalls)
+        assertEquals(0, e.ops.writableOpens)
+
+        val patchPayload = """{"search":"old","replace":"new"}""".toByteArray(Charsets.UTF_8)
+        val patch = e.exe.executeApplyPatch(
+            RootTypedArguments.FileApplyPatch(
+                workspaceId = "ws",
+                relativePath = "file",
+                patchSha256 = sha(String(patchPayload)),
+                patchByteLength = patchPayload.size,
+                expectedVersion = version,
+                format = "search_replace",
+            ),
+            patchPayload,
+        )
+        assertTrue(patch is RootFileOperationResult.Rejected, "patch must be refused, got $patch")
+        assertEquals(
+            RootFileOperationReason.WRITE_DOMAIN_VERSION_UNSUPPORTED,
+            (patch as RootFileOperationResult.Rejected).reason,
+        )
+        assertEquals(0, e.ops.writeCalls, "the refused patch must not write")
+        assertEquals("old!", e.ops.nodes["file"]!!.bytes.toString(Charsets.UTF_8))
+        e.driver.close()
+    }
+
+    // --- post-mutation status: only a visible change may become UNKNOWN ---------------------------
+
+    /**
+     * A truncate refused before any byte is written is a permission failure, not an UNKNOWN outcome:
+     * nothing changed on disk, so the caller may report the real errno.
+     */
+    @Test
+    fun fuseTruncateRejectionBeforeMutationIsPermissionDeniedWithOldBytesIntact() {
+        val e = fuseEnv()
+        e.ops.failTruncate = true
+        val result = e.write()
+        assertTrue(result is RootFileOperationResult.PermissionDenied, "expected permission denial, got $result")
+        result as RootFileOperationResult.PermissionDenied
+        assertEquals("EROFS", result.errnoName)
+        assertFalse(result.selinuxConfirmed)
+        assertEquals("old!", e.ops.nodes["file"]!!.bytes.toString(Charsets.UTF_8))
+        assertEquals(1, e.ops.truncates)
+        assertEquals(0, e.ops.writeCalls, "no byte may be written after a refused truncate")
+        assertEquals(0, e.ops.unlinkCalls)
+        assertEquals(0, e.ops.renameCalls)
+        e.driver.close()
+    }
+
+    /** The truncate already shortened the file, so a following write failure is UNKNOWN, not denied. */
+    @Test
+    fun fuseWriteFailureAfterSuccessfulTruncateIsUnknownBecauseTheChangeIsVisible() {
+        val e = fuseEnv()
+        e.ops.failWriteBeforeBytes = true
+        assertUnknown(e.write())
+        assertEquals(0, e.ops.nodes["file"]!!.bytes.size, "the successful truncate is already visible")
+        assertEquals(1, e.ops.truncates)
+        assertEquals(1, e.ops.writeCalls)
+        assertEquals(0, e.ops.unlinkCalls, "an UNKNOWN outcome must not be cleaned up by name")
+        assertEquals(0, e.ops.renameCalls)
+        e.driver.close()
+    }
+
+    // --- emulated storage: directory creation, no-replace move, directory durability --------------
+
+    /**
+     * FUSE/`sdcardfs` own the attributes of a new directory (synthesized 0770 plus a `:fuse`
+     * label); forcing 0700 with `fchown`/`chcon` afterwards used to turn every
+     * `file_create_directory` into `UNKNOWN` and poisoned the Root channel. The filesystem result
+     * must be reported as-is, with no attribute syscalls at all.
+     */
+    @Test
+    fun fuseCreateDirectoryKeepsFilesystemAttributesAndNeverDegrades() {
+        val e = fuseEnv()
+        val result = e.exe.executeCreateDirectory(RootTypedArguments.FileCreateDirectory("ws", "newdir"))
+        assertTrue(result is RootFileOperationResult.Succeeded, "emulated mkdir must succeed, got $result")
+        val snapshot = (result as RootFileOperationResult.Succeeded).value
+        assertEquals(0b111_111_000, snapshot.modeOctal, "the FUSE-synthesized mode must be reported unchanged")
+        assertEquals(9997, snapshot.ownerGid, "the filesystem owner must not be overwritten")
+        assertEquals("u:object_r:fuse:s0", snapshot.selinuxLabel)
+        assertEquals(0, e.ops.chmodCalls, "no fchmod(0700) on emulated storage")
+        assertEquals(0, e.ops.chownCalls, "no fchown on emulated storage")
+        assertEquals(0, e.ops.labelCalls, "no security.selinux attribute on emulated storage")
+        assertTrue(e.ops.nodes["newdir"]!!.dir)
+        e.driver.close()
+    }
+
+    /** A directory that appeared but can no longer be observed stays UNKNOWN; nothing is removed. */
+    @Test
+    fun fuseCreateDirectoryObservationFailureIsUnknownWithoutCleanup() {
+        val e = fuseEnv()
+        e.ops.onAfterMkdir = { e.ops.nodes.remove("newdir") }
+        assertUnknown(e.exe.executeCreateDirectory(RootTypedArguments.FileCreateDirectory("ws", "newdir")))
+        assertEquals(0, e.ops.unlinkCalls, "an UNKNOWN mkdir must not be cleaned up by name")
+        e.driver.close()
+    }
+
+    /**
+     * `file_move` defaults to no-replace. Emulated storage has no hard links, so the commit needs
+     * `renameat2(RENAME_NOREPLACE)`; a kernel or filesystem without that flag must produce an
+     * explicit unsupported result with no side effect — never a check-then-rename, a hard-link
+     * attempt or a degraded channel.
+     */
+    @Test
+    fun fuseMoveWithoutReplaceIsExplicitlyUnsupportedAndTouchesNothing() {
+        for (occupied in listOf(false, true)) {
+            val e = fuseEnv()
+            if (occupied) e.ops.add("moved.txt", "OCCUPANT")
+            e.ops.atomicNoReplaceRenameSupported = false
+            val result = e.exe.executeMove(RootTypedArguments.FileMove("ws", "file", "moved.txt"))
+            if (occupied) {
+                assertTrue(result is RootFileOperationResult.Rejected, "got $result")
+                assertEquals(
+                    RootConfinementRejection.RENAME_RACE_DETECTED,
+                    (result as RootFileOperationResult.Rejected).rejection,
+                )
+                assertEquals("OCCUPANT", e.ops.nodes["moved.txt"]!!.bytes.toString(Charsets.UTF_8))
+                assertEquals(0, e.ops.renameAtNoReplaceCalls, "an occupied destination is refused before the commit")
+            } else {
+                assertEquals(
+                    RootFileOperationResult.UnsupportedAttributePreservation("atomic_no_replace_rename"),
+                    result,
+                    "a missing no-replace rename primitive must be reported explicitly",
+                )
+                assertEquals(1, e.ops.renameAtNoReplaceCalls)
+                assertNull(e.ops.nodes["moved.txt"])
+            }
+            assertEquals("old!", e.ops.nodes["file"]!!.bytes.toString(Charsets.UTF_8), "occupied=$occupied")
+            assertEquals(0, e.ops.linkCalls, "emulated storage must not attempt a hard link")
+            assertEquals(0, e.ops.unlinkCalls)
+            e.driver.close()
+        }
+    }
+
+    @Test
+    fun invalidRenameRelationshipIsNotMisreportedAsMissingKernelPrimitive() {
+        for (directory in listOf(false, true)) {
+            val e = Env()
+            if (directory) e.ops.addDir("source-dir")
+            val source = if (directory) "source-dir" else "file"
+            val inode = e.ops.nodes.getValue(source).inode
+            e.ops.onBeforeNoReplaceRename = { throw PosixOpException("EINVAL") }
+            val result = e.exe.executeMove(RootTypedArguments.FileMove("ws", source, "new-name"))
+            assertEquals(RootFileOperationResult.PermissionDenied(false, "EINVAL"), result)
+            assertEquals(DriverMutationStatus.Denied("EINVAL"), RootPosixMoveCommit.refusal(PosixOpException("EINVAL")))
+            assertEquals(inode, e.ops.nodes.getValue(source).inode)
+            assertNull(e.ops.nodes["new-name"])
+            assertEquals(1, e.ops.renameAtNoReplaceCalls)
+            assertEquals(0, e.ops.renameCalls)
+            assertEquals(0, e.ops.unlinkCalls)
+            e.driver.close()
+        }
+    }
+
+    /** With the atomic primitive present the move commits in one step and keeps the inode. */
+    @Test
+    fun fuseMoveWithoutReplaceUsesAtomicRenameWhenThePrimitiveExists() {
+        val e = fuseEnv()
+        val inode = e.ops.nodes["file"]!!.inode
+        e.ops.atomicNoReplaceRenameSupported = true
+        val result = e.exe.executeMove(RootTypedArguments.FileMove("ws", "file", "moved.txt"))
+        assertTrue(result is RootFileOperationResult.Succeeded, "got $result")
+        assertEquals(inode, (result as RootFileOperationResult.Succeeded).value.snapshot.inode)
+        assertNull(e.ops.nodes["file"])
+        assertEquals("old!", e.ops.nodes["moved.txt"]!!.bytes.toString(Charsets.UTF_8))
+        assertEquals(1, e.ops.renameAtNoReplaceCalls)
+        assertEquals(0, e.ops.linkCalls)
+        assertEquals(0, e.ops.unlinkCalls, "renameat2 already removed the source name")
+        e.driver.close()
+    }
+
+    /** An entry that appears inside the rename window makes the primitive fail; it is never replaced. */
+    @Test
+    fun fuseMoveWithoutReplaceNeverClobbersADestinationThatAppearsInsideTheCommit() {
+        val e = fuseEnv()
+        e.ops.atomicNoReplaceRenameSupported = true
+        e.ops.onBeforeNoReplaceRename = {
+            e.ops.nodes["moved.txt"] = N(e.ops.serial++, false, "/workspace/moved.txt", "ARRIVED".toByteArray())
+        }
+        val result = e.exe.executeMove(RootTypedArguments.FileMove("ws", "file", "moved.txt"))
+        assertTrue(result is RootFileOperationResult.Rejected, "got $result")
+        assertEquals(
+            RootConfinementRejection.RENAME_RACE_DETECTED,
+            (result as RootFileOperationResult.Rejected).rejection,
+        )
+        assertEquals("ARRIVED", e.ops.nodes["moved.txt"]!!.bytes.toString(Charsets.UTF_8))
+        assertEquals("old!", e.ops.nodes["file"]!!.bytes.toString(Charsets.UTF_8), "the source must stay in place")
+        assertEquals(0, e.ops.unlinkCalls, "the appearing entry must never be removed")
+        e.driver.close()
+    }
+
+    /**
+     * A no-replace POSIX move is now one atomic `renameat2(RENAME_NOREPLACE)`: no `linkat` step and
+     * therefore no window in which a swapped source name could be unlinked.
+     */
+    @Test
+    fun posixMoveWithoutReplaceIsOneAtomicRename() {
+        val e = Env()
+        val inode = e.ops.nodes["file"]!!.inode
+        val result = e.exe.executeMove(RootTypedArguments.FileMove("ws", "file", "moved.txt"))
+        assertTrue(result is RootFileOperationResult.Succeeded, "got $result")
+        assertEquals(inode, (result as RootFileOperationResult.Succeeded).value.snapshot.inode)
+        assertNull(e.ops.nodes["file"])
+        assertEquals("old!", e.ops.nodes["moved.txt"]!!.bytes.toString(Charsets.UTF_8))
+        assertEquals(1, e.ops.renameAtNoReplaceCalls)
+        assertEquals(0, e.ops.linkCalls, "the two-phase linkat+unlinkat commit is gone")
+        assertEquals(0, e.ops.unlinkCalls, "nothing may be deleted by name")
+        assertEquals(0, e.ops.renameCalls)
+        e.driver.close()
+    }
+
+    /**
+     * A source name swapped inside the commit window is what the namespace moves (rename follows
+     * the *name*, not our descriptor). The post-commit identity check must turn that into UNKNOWN,
+     * and this request must never delete the swapped entry.
+     */
+    @Test
+    fun noReplaceMoveDetectsASourceNameSwapAtCommitAndNeverDeletesIt() {
+        val e = Env()
+        val originalInode = e.ops.nodes["file"]!!.inode
+        e.ops.onBeforeNoReplaceRename = {
+            e.ops.nodes["file"] = N(e.ops.serial++, false, "/workspace/file", "IMPOSTOR".toByteArray())
+        }
+        val result = e.exe.executeMove(RootTypedArguments.FileMove("ws", "file", "moved.txt"))
+        assertUnknown(result)
+        assertNull(e.ops.nodes["file"], "the source name disappeared together with the rename")
+        assertEquals("IMPOSTOR", e.ops.nodes["moved.txt"]!!.bytes.toString(Charsets.UTF_8))
+        assertNotEquals(originalInode, e.ops.nodes["moved.txt"]!!.inode)
+        assertEquals(0, e.ops.linkCalls)
+        assertEquals(0, e.ops.unlinkCalls, "a swapped source must never be deleted")
+        e.driver.close()
+    }
+
+    /** A directory move never replaces, even when `replace_existing = true` was requested. */
+    @Test
+    fun directoryMoveWithReplaceExistingStillCommitsNoReplace() {
+        val e = Env()
+        e.ops.addDir("docs")
+        val result = e.exe.executeMove(
+            RootTypedArguments.FileMove("ws", "docs", "docs2", replaceExisting = true),
+        )
+        assertTrue(result is RootFileOperationResult.Succeeded, "got $result")
+        assertNull(e.ops.nodes["docs"])
+        assertTrue(e.ops.nodes["docs2"]!!.dir)
+        assertEquals(1, e.ops.renameAtNoReplaceCalls)
+        assertEquals(0, e.ops.renameCalls, "rename(2) could replace an empty destination directory")
+        e.driver.close()
+    }
+
+    /**
+     * A requested regular-file replace is the namespace's unconditional entry replacement, the same
+     * contract as the Internal/Wired `ATOMIC_MOVE + REPLACE_EXISTING` backends: a symlink that
+     * appears inside the window is replaced as an entry and its target is never followed or
+     * modified.
+     */
+    @Test
+    fun fileReplaceReplacesASymlinkThatAppearsInTheCommitWindowWithoutFollowingIt() {
+        val e = Env()
+        e.ops.add("link-target", "TARGET")
+        e.ops.onBeforeRename = {
+            e.ops.nodes["moved.txt"] = N(
+                e.ops.serial++,
+                false,
+                "/workspace/moved.txt",
+                "/workspace/link-target".toByteArray(),
+                symlink = true,
+            )
+        }
+        val result = e.exe.executeMove(
+            RootTypedArguments.FileMove("ws", "file", "moved.txt", replaceExisting = true),
+        )
+        assertTrue(result is RootFileOperationResult.Succeeded, "got $result")
+        assertFalse(e.ops.nodes["moved.txt"]!!.symlink, "the link entry was replaced, not followed")
+        assertEquals("old!", e.ops.nodes["moved.txt"]!!.bytes.toString(Charsets.UTF_8))
+        assertEquals(
+            "TARGET",
+            e.ops.nodes["link-target"]!!.bytes.toString(Charsets.UTF_8),
+            "the symlink target stays untouched",
+        )
+        assertEquals(1, e.ops.renameCalls)
+        assertEquals(0, e.ops.renameAtNoReplaceCalls, "a requested regular-file replace uses rename(2)")
+        assertEquals(0, e.ops.unlinkCalls)
+        e.driver.close()
+    }
+
+    /**
+     * A directory that appears inside the replace window makes the kernel refuse the rename
+     * (`EISDIR`); the appearing directory survives and the source stays in place.
+     */
+    @Test
+    fun fileReplaceRefusesADirectoryThatAppearsInTheCommitWindow() {
+        val e = Env()
+        e.ops.onBeforeRename = {
+            e.ops.nodes["moved.txt"] = N(e.ops.serial++, true, "/workspace/moved.txt", mode = 448, links = 2)
+        }
+        val result = e.exe.executeMove(
+            RootTypedArguments.FileMove("ws", "file", "moved.txt", replaceExisting = true),
+        )
+        assertTrue(result is RootFileOperationResult.Rejected, "got $result")
+        assertEquals(
+            RootConfinementRejection.RENAME_RACE_DETECTED,
+            (result as RootFileOperationResult.Rejected).rejection,
+        )
+        assertTrue(e.ops.nodes["moved.txt"]!!.dir, "the appearing directory must survive")
+        assertEquals("old!", e.ops.nodes["file"]!!.bytes.toString(Charsets.UTF_8), "the source must stay")
+        assertEquals(0, e.ops.unlinkCalls)
+        e.driver.close()
+    }
+
+    /**
+     * Directory moves use the same no-replace primitive: `rename(2)` replaces an empty
+     * destination directory, which the default (`replace_existing = false`) must never do.
+     */
+    @Test
+    fun emulatedDirectoryMoveWithoutReplaceUsesAtomicRename() {
+        val e = fuseEnv()
+        e.ops.addDir("docs")
+        val result = e.exe.executeMove(RootTypedArguments.FileMove("ws", "docs", "docs2"))
+        assertTrue(result is RootFileOperationResult.Succeeded, "got $result")
+        assertNull(e.ops.nodes["docs"])
+        assertTrue(e.ops.nodes["docs2"]!!.dir)
+        assertEquals(1, e.ops.renameAtNoReplaceCalls)
+        assertEquals(0, e.ops.renameCalls, "rename(2) would replace an empty destination directory")
+        e.driver.close()
+    }
+
+    /** The same primitive covers directories on POSIX filesystems, with the FD checks intact. */
+    @Test
+    fun posixDirectoryMoveWithoutReplaceUsesAtomicRename() {
+        val e = Env()
+        e.ops.addDir("docs")
+        val result = e.exe.executeMove(RootTypedArguments.FileMove("ws", "docs", "docs2"))
+        assertTrue(result is RootFileOperationResult.Succeeded, "got $result")
+        assertNull(e.ops.nodes["docs"])
+        assertTrue(e.ops.nodes["docs2"]!!.dir)
+        assertEquals(1, e.ops.renameAtNoReplaceCalls)
+        assertEquals(0, e.ops.renameCalls)
+        e.driver.close()
+    }
+
+    /**
+     * The production bridge keeps the fail-closed shape of the other entry primitives: without the
+     * shipped native library the primitive reports `EOPNOTSUPP`, which the move path turns into an
+     * explicit unsupported result instead of guessing.
+     */
+    @Test
+    fun noReplaceRenameWithoutTheShippedLibraryFailsClosed() {
+        if (RootNativeSupervisorJni.ensureLoaded()) return
+        val failure = assertThrows(PosixOpException::class.java) {
+            PosixKernelMutations.renameAtNoReplace(1, "source", 2, "target")
+        }
+        assertEquals("EOPNOTSUPP", failure.errnoName)
+    }
+
+    /**
+     * A directory fsync the filesystem cannot express (`EINVAL`/`ENOSYS`/`EOPNOTSUPP`) is advisory
+     * because the entry is already visible and attributable; `EIO` means the kernel could not
+     * answer and keeps the outcome UNKNOWN. Nothing is retried either way.
+     */
+    @Test
+    fun fuseDirectoryFsyncUnsupportedErrnosAreAdvisoryWhileEioStaysUnknown() {
+        for (errno in listOf("EINVAL", "ENOSYS", "EOPNOTSUPP")) {
+            val e = fuseEnv()
+            e.ops.failFsyncErrno = errno
+            val text = "created-$errno"
+            val result = e.exe.executeAtomicWriteText(
+                RootTypedArguments.FileWriteText("ws", "fresh-$errno.txt", sha(text), text.toByteArray().size, false, null),
+                text.toByteArray(),
+            )
+            assertTrue(result is RootFileOperationResult.Succeeded, "$errno must be advisory, got $result")
+            assertEquals(text, e.ops.nodes["fresh-$errno.txt"]!!.bytes.toString(Charsets.UTF_8))
+            assertEquals(1, e.ops.writeCalls, "$errno must not be retried")
+            e.driver.close()
+        }
+        val e = fuseEnv()
+        e.ops.failFsyncErrno = "EIO"
+        val text = "created-eio"
+        val result = e.exe.executeAtomicWriteText(
+            RootTypedArguments.FileWriteText("ws", "fresh-eio.txt", sha(text), text.toByteArray().size, false, null),
+            text.toByteArray(),
+        )
+        assertUnknown(result)
+        assertEquals(text, e.ops.nodes["fresh-eio.txt"]!!.bytes.toString(Charsets.UTF_8), "the visible create is kept")
+        assertEquals(1, e.ops.writeCalls, "an EIO outcome must not be retried")
+        assertEquals(0, e.ops.unlinkCalls, "an UNKNOWN create must not be removed by name")
+        e.driver.close()
+    }
+
+    /**
+     * The mount-type predicate must cover the FUSE successors and the foreign block filesystems
+     * that have no POSIX attributes or hard links; a missing observation is never guessed.
+     */
+    @Test
+    fun emulatedStorageMountTypesCoverFuseSdcardfsAndForeignBlockFilesystems() {
+        for (type in listOf("fuse", "sdcardfs", "vfat", "msdos", "exfat", "texfat", "fuseblk")) {
+            assertTrue(isEmulatedMount(type), "expected $type to use emulated-storage semantics")
+        }
+        for (type in listOf("ext4", "f2fs", "tmpfs")) {
+            assertFalse(isEmulatedMount(type), "expected $type to keep POSIX semantics")
+        }
+        assertFalse(isEmulatedMount(null), "an unavailable mount type must not be guessed")
     }
 }
 
@@ -1384,4 +2097,16 @@ private open class MemoryKernel : PosixKernelBridge {
     override fun link(src: String, dst: String) = Unit
 
     override fun remove(path: String) = Unit
+}
+
+/**
+ * Runs the production mount-type predicate against a synthetic `mountinfo` observation for an
+ * already-open directory descriptor (the real predicate never looks at a path string).
+ */
+private fun isEmulatedMount(fileSystemType: String?): Boolean {
+    val kernel = object : MemoryKernel() {
+        override fun readFileSystemType(fdNumber: Int): String? = fileSystemType
+    }
+    val ops = AndroidOsPosixFdOperations(kernel = kernel)
+    return ops.openDirectoryAbsoluteNoFollow("/workspace")!!.use { ops.usesEmulatedStoragePermissions(it) }
 }

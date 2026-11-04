@@ -36,6 +36,10 @@ class RootServiceReviewRegressionTest {
         run: () -> Unit = {},
         onStop: () -> Unit = {},
     ) = RootPrivilegedServiceEngine(
+            selectionPathResolver = { java.nio.file.Paths.get(it) },
+            mountPolicyProvider = { b -> runtime.mobileagent.domain.RootTrustedMountRoots.directoryTree(
+                setOf(b.credentialEncryptedIdentity.mountId, b.deviceProtectedIdentity.mountId)) },
+
         managerAuthorizationOverride = { RootManagerAuthorization.GRANTED },
         fdOps = fdOps,
         shellRunner = object : RootShellCommandRunner {
@@ -211,6 +215,29 @@ class RootServiceReviewRegressionTest {
                 worker.interrupt()
                 worker.join(2_000L)
             }
+        }
+    }
+
+    @Test
+    fun reattachAcceptsObservedZeroInodeButRejectsMissingExpectedInode() {
+        engine(directoryOps(node(0L))).use { service ->
+            service.pinHostBootstrap(bootstrap)
+            val id = handshake(service).identity!!
+            val origin = RootWorkspaceOrigin("workspace-1", id.authority, id.appInstanceId, id.packageName,
+                id.appUid, id.androidUserId, id.signingSha256, "workspace-generation-0001")
+            val locator = RootRecoveryLocatorCodec.encode(RootRecoveryLocatorPayload(
+                originSha256 = origin.canonicalSha256(), workspaceId = origin.workspaceId,
+                workspaceGenerationId = origin.generationId, authority = origin.authority,
+                rootKind = RootWorkspaceRootKind.DIRECTORY, absoluteRootPath = "/workspace",
+                rootDeviceId = 1L, rootInode = 0L, rootMountId = 77L,
+            ))
+            val missing = RootServiceBindWorkspaceRequest(
+                id.serviceInstanceId, id.sessionId, id.identityEpoch, origin.workspaceId, origin.generationId,
+                "workspace-handle-0000001", "/workspace", expectedRootDeviceId = 1L,
+                expectedRootMountId = 77L, origin = origin, recoveryLocator = locator,
+            )
+            assertEquals("workspace_root_identity_mismatch", bind(service, missing).errorReason)
+            assertTrue(bind(service, missing.copy(expectedRootInode = 0L)).accepted)
         }
     }
 

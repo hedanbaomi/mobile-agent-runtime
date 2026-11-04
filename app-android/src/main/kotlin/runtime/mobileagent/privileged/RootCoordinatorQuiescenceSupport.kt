@@ -32,6 +32,57 @@ internal object RootCoordinatorQuiescenceSupport {
     private val verifiedQuiescenceSnapshots =
         ConcurrentHashMap<Authority, Pair<PrivilegedSessionIdentity, RootRemoteQuiescenceSnapshot>>()
 
+    /** A single authenticated acquisition proves reboot and becomes the live session on success. */
+    fun acquireAfterDeviceRestart(
+        db: SqlConnection,
+        authority: Authority,
+        appInstanceId: String,
+        sessionConnector: RootSessionConnector,
+        shizukuState: runtime.mobileagent.shizuku.ShizukuAuthorityState?,
+        enableAfterRecovery: Boolean,
+        stateLock: Any,
+        captureState: () -> Pair<RootAuthorityRecord, Long?>?,
+        resolveBoundary: () -> runtime.mobileagent.domain.RootControlPlaneBoundary?,
+        enableConsent: () -> Unit,
+        attach: (RootAcquiredSession, runtime.mobileagent.domain.RootControlPlaneBoundary) -> Boolean,
+        observeAuthorization: () -> Boolean,
+    ): RootAuthorityRecord? {
+        val captured = synchronized(stateLock) { captureState() } ?: return null
+        val acquired = sessionConnector.tryAcquireSession(
+            authority, Math.addExact(captured.first.identityEpoch, 1L), appInstanceId, shizukuState,
+        ) ?: return null
+        var attached = false
+        try {
+            val recovered = synchronized(stateLock) {
+                if (captureState() != captured ||
+                    !sessionConnector.isAcquisitionCurrent(authority, acquired.attemptToken)
+                ) return@synchronized null
+                val boundary = acquired.controlPlane ?: resolveBoundary() ?: return@synchronized null
+                if (!acquired.matchesRecoveryCandidate(authority, captured.first.identityEpoch + 1, appInstanceId) ||
+                    !sessionConnector.completeAcquisition(authority, acquired.attemptToken)
+                ) return@synchronized null
+                RootReceiptRecoveryCoordinator(db).acknowledgeDeviceRestart(
+                    authority, acquired.kernelBootId, true, captured.first.revision, acquired.kernelElapsedRealtimeMs,
+                ) ?: return@synchronized null
+                if (enableAfterRecovery) {
+                    enableConsent()
+                }
+                val current = RootAuthorityRepository(db).get(authority)
+                if (current.consent.enabled) {
+                    attached = attach(acquired, boundary)
+                }
+                current
+            }
+            if (attached && authority == Authority.ROOT_DIRECT) observeAuthorization()
+            return recovered
+        } finally {
+            if (!attached) {
+                sessionConnector.abortAcquisition(authority, acquired.attemptToken)
+                runCatching { acquired.transport?.close() }
+            }
+        }
+    }
+
     fun clearVerifiedSnapshot(authority: Authority) {
         verifiedQuiescenceSnapshots.remove(authority)
     }
@@ -108,6 +159,7 @@ internal object RootCoordinatorQuiescenceSupport {
             return
         }
         Thread({
+            try {
             runCatching {
                 val revokeSeq = removed.hostControlGate.revokeUnderLock { it }
                 removed.transport.revokeAndShutdown(revokeSeq, reason)
@@ -125,6 +177,17 @@ internal object RootCoordinatorQuiescenceSupport {
                     Thread.sleep(25L)
                 } catch (_: InterruptedException) {
                     break
+                }
+            }
+            } finally {
+                // Retain a reachable session only while its outstanding work may still report
+                // quiescence. A dead transport is not a proof and must not leak/block reboot recovery.
+                if (!removed.transport.isAlive() ||
+                    (!dispatchRepository.hasActivePermitsForAuthority(authority) &&
+                        !dispatchRepository.hasUndrainedReceiptsForAuthority(authority))
+                ) {
+                    retiringSessions.remove(authority, removed)
+                    runCatching { removed.transport.close() }
                 }
             }
         }, "mar-root-retire-${authority.name}").apply {
@@ -165,6 +228,15 @@ internal object RootCoordinatorQuiescenceSupport {
         // A damaged obligation is never read as "nothing pending".
         if (pendingLoad is RootPendingDrainLoad.Invalid) return null
         val pending = (pendingLoad as? RootPendingDrainLoad.Present)?.state
+        if (pending == null && !dispatchRepository.hasActivePermitsForAuthority(authority) &&
+            RootReceiptRecoveryCoordinator(db).allUncertainRequestsProven(authority)
+        ) {
+            val recovered = RootReceiptRecoveryCoordinator(db).rotateEpochAndAcknowledgeRecovery(authority, true, null, null)
+                ?: return null
+            detachAndRetireSession(authority, "request_drains_proven", true, activeSessions, retiringSessions,
+                dispatchBridge, dispatchRepository)
+            return recovered
+        }
         val settledPair = if (pending != null) {
             // The persisted obligation survives controller rebuild: a missing in-memory session is
             // never evidence. Only a proof bound to the recorded session may clear it.
@@ -206,6 +278,9 @@ internal object RootCoordinatorQuiescenceSupport {
                 else -> verifiedQuiescenceSnapshots[authority]
             }
         }
+        // Missing local state is not remote quiescence. Only the separate authenticated
+        // kernel-restart path may recover without a proof for the old session.
+        if (settledPair == null) return null
         if (dispatchRepository.hasActivePermitsForAuthority(authority)) return null
         // Durable receipts must be settled by the same proof; a still-open receipt means the
         // remote (or the ledger that records it) has not drained yet.
@@ -214,8 +289,8 @@ internal object RootCoordinatorQuiescenceSupport {
             RootReceiptRecoveryCoordinator(db).rotateEpochAndAcknowledgeRecovery(
                 authority = authority,
                 userConfirmed = true,
-                expectedSessionIdentity = settledPair?.first,
-                quiescenceSnapshot = settledPair?.second,
+                expectedSessionIdentity = settledPair.first,
+                quiescenceSnapshot = settledPair.second,
             )
         }.getOrNull() ?: return null
         verifiedQuiescenceSnapshots.remove(authority)

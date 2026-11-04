@@ -3,7 +3,7 @@
 
 package runtime.mobileagent.data
 
-/** Unpublished v40 addition. Unsupported definitions are rejected without rewriting evidence. */
+/** v40 receipts with v41 query indexes. Unknown definitions enter schema recovery without rewriting evidence. */
 internal object RootDispatchSchema {
     fun install(db: SqlConnection) = RootReceiptSchemaVerifier.install(db,tableSql,adjuncts)
 
@@ -42,6 +42,9 @@ internal object RootDispatchSchema {
 
     private val adjuncts = mapOf(
         "idx_root_dispatch_invocation" to """CREATE UNIQUE INDEX IF NOT EXISTS idx_root_dispatch_invocation ON root_dispatch_receipts(invocation_id)""".trimIndent(),
+        "idx_root_dispatch_open" to """CREATE INDEX IF NOT EXISTS idx_root_dispatch_open ON root_dispatch_receipts(authority,request_id) WHERE closed=0""",
+        "idx_root_dispatch_authority_epoch" to """CREATE INDEX IF NOT EXISTS idx_root_dispatch_authority_epoch ON root_dispatch_receipts(authority,identity_epoch)""",
+        "idx_root_dispatch_unknown" to """CREATE INDEX IF NOT EXISTS idx_root_dispatch_unknown ON root_dispatch_receipts(authority,identity_epoch) WHERE outcome='UNKNOWN_OUTCOME'""",
         "idx_root_dispatch_approval" to """CREATE UNIQUE INDEX IF NOT EXISTS idx_root_dispatch_approval ON root_dispatch_receipts(approval_id)""".trimIndent(),
         "root_dispatch_initial" to """CREATE TRIGGER IF NOT EXISTS root_dispatch_initial BEFORE INSERT ON root_dispatch_receipts
             WHEN NEW.stage<>'CLAIMED' OR NEW.revision<>1 OR NEW.closed<>0 OR NEW.disclosure<>'PENDING'

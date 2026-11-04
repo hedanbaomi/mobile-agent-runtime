@@ -69,7 +69,7 @@ object Migrations {
     // v38 fixes the Agent mode at creation and adds bounded per-conversation TRPG state/receipts.
     // It also repairs old API26 offset-timestamp ordering keys without rewriting messages.
     // v40 adds explicit Root consent and session epochs without inheriting prior trust.
-    const val VERSION = 40
+    const val VERSION = 41
 
     private val statements = listOf(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL PRIMARY KEY)",

@@ -5,7 +5,7 @@ package runtime.mobileagent
 
 import kotlinx.coroutines.CoroutineScope
 import runtime.mobileagent.privileged.RootChildInvocationSupport
-import runtime.mobileagent.privileged.RootToolArguments
+import runtime.mobileagent.privileged.RootToolExecutor
 import runtime.mobileagent.skills.BuiltinTools
 import runtime.mobileagent.skills.ManagedJobToolExecutor
 import runtime.mobileagent.skills.ReadBatchToolExecutor
@@ -16,6 +16,7 @@ import runtime.mobileagent.skills.ToolResult
 import runtime.mobileagent.skills.tooling.InternalRequestIds
 import runtime.mobileagent.tooling.ShellToolExecutor
 import runtime.mobileagent.tooling.UnifiedWorkspaceToolExecutor
+import runtime.mobileagent.tooling.ModelToolArguments
 import java.util.concurrent.ConcurrentHashMap
 
 /** Explicit eligible tools only: screen, HTTP, MCP, Python and mutations cannot enter a read batch. */
@@ -26,6 +27,7 @@ internal class RunProductivityTools(
     reserveCalls: (Int) -> Int,
     excludedChildTools: Set<String> = emptySet(),
     approvalRequiredChildTools: Set<String> = emptySet(),
+    rootWorkspaceIds: Set<String> = emptySet(),
 ) {
     private class ControlBinding(
         val call: ToolCall,
@@ -53,10 +55,7 @@ internal class RunProductivityTools(
         call.copy(callId = controlIds[call.callId]?.runtimeId ?: call.callId) else call
     private val exposed = core.specs.map { it.name }.toSet() - excludedChildTools
     private val reads = READ_TOOLS intersect exposed
-    private val rootReads = core.specs
-        .filter { spec -> RootToolArguments.spec(spec.name)?.inputSchema == spec.parametersJson }
-        .map { it.name }
-        .toSet() intersect reads
+    private val frozenRootWorkspaceIds = (rootWorkspaceIds + (core as? RootToolExecutor)?.workspaceIds.orEmpty()).toSet()
     private val batch = ReadBatchToolExecutor(
         delegate = core,
         liveAuthorized = liveContext,
@@ -65,7 +64,8 @@ internal class RunProductivityTools(
         eligibleTools = reads,
         deferredResultAuthorized = core::authorizeDeferredResult,
         childCallId = { outer, index, _ -> RootChildInvocationSupport.mintBatchChildCallId(outer, index) },
-        approvalRequiredTools = (approvalRequiredChildTools intersect reads) + rootReads,
+        approvalRequiredTools = approvalRequiredChildTools intersect reads,
+        approvalRequiredForCall = { call -> ModelToolArguments.workspaceId(call.argumentsJson) in frozenRootWorkspaceIds },
     )
     private val jobs = ManagedJobToolExecutor(
         delegate = batch,
@@ -149,6 +149,8 @@ internal class RunProductivityTools(
     private companion object {
         /** Side-effect-free tools that may run in a batch or a read-only job. */
         val READ_TOOLS = setOf(
+            "workspace_list",
+            "file_get_metadata",
             BuiltinTools.calculator.name,
             UnifiedWorkspaceToolExecutor.FILE_LIST,
             UnifiedWorkspaceToolExecutor.FILE_STAT,

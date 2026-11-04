@@ -81,6 +81,9 @@ data class RootServiceHandshakeResponse(
     val accepted: Boolean,
     val identity: PrivilegedSessionIdentity? = null,
     val errorReason: String? = null,
+    /** Kernel observation from this authenticated UID0 service; absent means no reboot proof. */
+    val kernelBootId: String? = null,
+    val kernelElapsedRealtimeMs: Long? = null,
 )
 
 
@@ -95,7 +98,8 @@ data class RootServiceBindWorkspaceRequest(
     val workspaceRootPath: String,
     val confirmedMountIds: Set<Long> = emptySet(),
     val expectedRootDeviceId: Long = 0L,
-    val expectedRootInode: Long = 0L,
+    // Zero is an observed FUSE inode; a missing field must remain distinguishable.
+    val expectedRootInode: Long = -1L,
     val expectedRootMountId: Long = 0L,
     @Serializable(with = RootWorkspaceOriginWireSerializer::class)
     val origin: RootWorkspaceOrigin? = null,
@@ -140,6 +144,9 @@ data class RootServiceBindWorkspaceResponse(
     val rootMountId: Long? = null,
     val rootOwnerUid: Int? = null,
     val rootKindName: String? = null,
+    val directoryPage: RootDirectoryBrowsePage? = null,
+    /** Canonical path observed by this authenticated service; retained only by the Host control plane. */
+    val resolvedRootPath: String? = null,
 ) {
     override fun toString(): String =
         "RootServiceBindWorkspaceResponse(accepted=$accepted,phase=$phase,workspaceId=$workspaceId,redacted=true)"
@@ -261,6 +268,12 @@ class RootPrivilegedServiceEngine(
     private val lifecycleConfig: RootServiceLifecycleConfig = RootServiceLifecycleConfig(),
     /** Test seam only: production reads the manager policy from the platform. */
     private val managerAuthorizationOverride: (() -> RootManagerAuthorization)? = null,
+    /** Test seam only. Production reads a fixed kernel proc file inside the UID0 service. */
+    private val kernelBootIdProvider: () -> String? = RootKernelBootReader::read,
+    private val managerObservationEnabled: Boolean = true,
+    private val kernelElapsedRealtimeProvider: () -> Long? = { android.os.SystemClock.elapsedRealtime() },
+    private val mountPolicyProvider: (RootControlPlaneBoundary) -> runtime.mobileagent.domain.RootTrustedMountRoots? = RootMountBoundary::read,
+    private val selectionPathResolver: (String) -> java.nio.file.Path = { java.io.File(it).canonicalFile.toPath() },
 ) : AutoCloseable {
 
     @Volatile
@@ -285,7 +298,7 @@ class RootPrivilegedServiceEngine(
     private var shutdownScheduled = false
 
     private val workspaceExecutors = ConcurrentHashMap<String, BoundWorkspaceExecutor>()
-    private val workspaceSelection = RootServiceWorkspaceSelection(fdOps, workspaceExecutors)
+    private val workspaceSelection = RootServiceWorkspaceSelection(fdOps, workspaceExecutors, mountPolicyProvider = mountPolicyProvider, selectionPathResolver = selectionPathResolver)
 
     @Volatile
     private var lifecycleWatchdog: RootServiceLifecycleWatchdog? = null
@@ -313,6 +326,7 @@ class RootPrivilegedServiceEngine(
             liveServiceUid = serviceUidProvider(),
             requestJson = requestJson,
             override = managerAuthorizationOverride,
+            observationEnabled = managerObservationEnabled,
         )
 
     private fun observeManagerAuthorization(
@@ -478,7 +492,10 @@ class RootPrivilegedServiceEngine(
         activeControlPlane = boundary
         leaseRegistry.recordSession(identity, caller)
         if (observedControllerPid > 0) armControllerWatchdog(observedControllerPid, lifecycle)
-        return json.encodeToString(RootServiceHandshakeResponse(true, identity = identity))
+        val kernelBootId = runCatching(kernelBootIdProvider).getOrNull()
+            ?.takeIf(runtime.mobileagent.domain.RootKernelBootIdentity::isValid)
+        return json.encodeToString(RootServiceHandshakeResponse(true, identity = identity, kernelBootId = kernelBootId,
+            kernelElapsedRealtimeMs = runCatching(kernelElapsedRealtimeProvider).getOrNull()?.takeIf { it > 0L }))
     }
 
     @Synchronized
@@ -820,6 +837,7 @@ class RootPrivilegedServiceEngine(
             args = args,
             acceptedStatus = acceptedStatus,
             payloadBytes = payloadBytes,
+            maxOutputBytes = envelope.budget.maxOutputBytes,
         )
     }
 
@@ -941,7 +959,7 @@ internal data class RootManagerAuthorizationResponse(
     val reason: String,
 )
 
-internal val SUPPORTED_MANAGER_MAJORS = 26..31
+internal val MAGISK_POLICY_SCHEMA_MAJORS = 26..31
 
 internal const val MANAGER_QUERY_TIMEOUT_MS = 2_000L
 internal const val MANAGER_OUTPUT_LIMIT_BYTES = 4_096

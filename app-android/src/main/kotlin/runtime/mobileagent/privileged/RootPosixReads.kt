@@ -26,7 +26,9 @@ internal class RootPosixReads(
             val bytes = runCatching { fdOps.readFdRange(entry.targetFd, offsetBytes, window) }.getOrNull()
                 ?: return null
             val identity = fdOps.fstatIdentity(entry.targetFd) ?: return null
-            val contentDigest = fdOps.fstatContentDigest(entry.targetFd)
+            val contentDigest = target.contentSha256?.let { fdOps.fstatContentDigest(entry.targetFd) }
+            if (!inspection.verifyEntry(entry, target, requireContentDigestRecheck = false) ||
+                fdOps.fstatSizeBytes(entry.targetFd) != sizeBytes) return null
             val version = fileIo.versionOf(entry.targetFd, identity, sizeBytes, contentDigest) ?: return null
             RootFdRangeRead(
                 bytes = bytes,

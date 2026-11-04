@@ -65,6 +65,7 @@ class RootDispatchRepository(
      * inspected `permits` + `releasedPermits` only (reviewer before-copy L64-69); durable receipts
      * are intentionally not consulted here.
      */
+    @Synchronized
     fun requiresShellForInvocation(authority: Authority, invocationId: String): Boolean =
         RootDispatchLookups.requiresShell(
             permits = permits.values + releasedPermits.values,
@@ -209,12 +210,12 @@ class RootDispatchRepository(
 
     /** Actual peer/outcome proof belongs to the adapter; known facts remain auditable after revocation. */
     @Synchronized
-    fun finish(permit: RootDispatchPermit, outcome: RootDispatchOutcome, resultSha256: String? = null): RootDispatchReceipt =
+    fun finish(permit: RootDispatchPermit, outcome: RootDispatchOutcome, resultSha256: String? = null, remoteQuiescent: Boolean = false): RootDispatchReceipt =
         db.transaction {
             requireOwned(permit)
             if (outcome in setOf(RootDispatchOutcome.SUCCEEDED,RootDispatchOutcome.FAILED,
                     RootDispatchOutcome.REJECTED_BEFORE_ACCEPTED)) require(tickets[permit.requestId]?.used == true)
-            terminalizer.finish(current(permit),outcome,resultSha256)
+            terminalizer.finish(current(permit),outcome,resultSha256,remoteQuiescent)
         }
 
     /** Local gate only. The caller must retain its coordination lock through actual forwarding. */
@@ -242,16 +243,27 @@ class RootDispatchRepository(
                 ledger.get(reqId)?.claim?.approval?.request?.execution?.identity?.authority == authority
             }
 
+    /** CLAIMED work has not crossed the wire; the revoked host gate makes it cancellable locally. */
+    @Synchronized
+    fun hasUnconfirmedRemoteWork(authority: Authority): Boolean {
+        if (remoteActiveRequests.any { ledger.get(it)?.claim?.approval?.request?.execution?.identity?.authority == authority }) return true
+        val proven = RootPendingDrainRepository(db, clock).provenRequests(authority)
+        return ledger.listOpen(authority).any {
+            it.stage in setOf(RootDispatchStage.ATTEMPTED, RootDispatchStage.ACKNOWLEDGED) ||
+                it.outcome == RootDispatchOutcome.UNKNOWN_OUTCOME && it.claim.requestId !in proven
+        }
+    }
+
     /**
      * Durable counterpart of [hasActivePermitsForAuthority]: receipts of this authority that were
      * never closed still record unconfirmed remote work after a controller rebuild.
      */
     fun hasUndrainedReceiptsForAuthority(authority: Authority): Boolean =
-        RootDispatchLookups.hasUndrainedReceipts(ledger.list(), authority)
+        RootDispatchLookups.hasUndrainedReceipts(ledger.listOpen(authority), authority)
 
     /** Persisted session identities whose remote drain was never confirmed for this authority. */
     fun undrainedSessionIdentities(authority: Authority): Set<PrivilegedSessionIdentity> =
-        RootDispatchLookups.undrainedSessionIdentities(ledger.list(), authority)
+        RootDispatchLookups.undrainedSessionIdentities(ledger.listOpen(authority), authority)
 
 
     @Synchronized
@@ -338,6 +350,11 @@ class RootDispatchRepository(
 
     @Synchronized
     fun markRemoteAttemptQuiescent(requestId: String) {
+        ledger.get(requestId)?.takeIf {
+            it.outcome == RootDispatchOutcome.UNKNOWN_OUTCOME || it.stage != RootDispatchStage.TERMINAL
+        }?.let {
+            RootPendingDrainRepository(db, clock).markRequestQuiescent(it.claim.approval.request.execution.identity, requestId)
+        }
         remoteActiveRequests.remove(requestId)
         permits[requestId]?.let { permit ->
             val row = ledger.get(requestId)
@@ -402,8 +419,7 @@ class RootDispatchRepository(
     fun canRotate(sessionId: String, openContentStreams: Int): Boolean {
         require(openContentStreams >= 0)
         return openContentStreams == 0 && permits.values.none { it.claim.approval.request.execution.identity.sessionId == sessionId } &&
-            ledger.list().none { it.claim.approval.request.execution.identity.sessionId == sessionId &&
-                (it.stage != RootDispatchStage.TERMINAL || !it.closed) }
+            ledger.listOpen().none { it.claim.approval.request.execution.identity.sessionId == sessionId }
     }
 
     private fun requireOwned(permit: RootDispatchPermit) {

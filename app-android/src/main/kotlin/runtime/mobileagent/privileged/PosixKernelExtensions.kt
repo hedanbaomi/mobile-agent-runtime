@@ -4,6 +4,7 @@
 package runtime.mobileagent.privileged
 
 import android.system.Os
+import android.system.OsConstants
 import java.io.File
 import java.io.FileDescriptor
 import java.nio.charset.StandardCharsets
@@ -88,6 +89,40 @@ internal object PosixKernelMutations {
             PosixProcFd.childPath(dstParentFdNumber, dstName),
         )
     }
+
+    /**
+     * `renameat2(2, ..., RENAME_NOREPLACE)`: the kernel refuses an existing destination entry
+     * instead of replacing it, so the source name disappears only together with a successful
+     * rename. Every no-replace move and every directory move commits through it — emulated storage
+     * (`fuse`/`sdcardfs`/vfat/exFAT/`fuseblk`) cannot create hard links at all, and `rename(2)`
+     * would replace an empty destination directory.
+     *
+     * The shipped supervisor library performs the syscall on the retained parent FDs. A missing
+     * symbol, an old kernel or a filesystem that rejects the flag is reported as
+     * `EOPNOTSUPP`/`ENOSYS`/`EINVAL` (mapped by the caller to an explicit unsupported result); it
+     * is never retried as a check-then-rename.
+     */
+    fun renameAtNoReplace(
+        srcParentFdNumber: Int,
+        srcName: String,
+        dstParentFdNumber: Int,
+        dstName: String,
+    ) {
+        // Same single-component validation as every other entry mutation: the native call gets FD
+        // numbers, so neither an invalid fd nor a name with a separator may reach it.
+        PosixProcFd.childPath(srcParentFdNumber, srcName)
+        PosixProcFd.childPath(dstParentFdNumber, dstName)
+        if (!RootNativeSupervisorJni.ensureLoaded()) throw PosixOpException("EOPNOTSUPP")
+        val rc = runCatching {
+            RootNativeSupervisorJni.nativeRenameAtNoReplace(
+                srcParentFdNumber,
+                srcName,
+                dstParentFdNumber,
+                dstName,
+            )
+        }.getOrDefault(-OsConstants.ENOSYS)
+        if (rc != 0) throw PosixOpException(PosixErrnoMapping.name(-rc, "EIO"))
+    }
 }
 
 internal object PosixProcFd {
@@ -97,6 +132,20 @@ internal object PosixProcFd {
         }
         return "/proc/self/fd/$fdNumber/$name"
     }
+}
+
+/**
+ * Directory durability classification for `fsync(2)` on a directory FD.
+ *
+ * FUSE, `sdcardfs`, vfat, exFAT and other foreign filesystems cannot express a directory sync and
+ * fail with `EINVAL`/`ENOSYS`/`EOPNOTSUPP`; the entry change is already visible and attributable,
+ * so those errors must not be reported as an uncertain mutation. `EIO` — and every other errno —
+ * means the kernel could not answer, so the caller keeps the outcome `UNKNOWN`.
+ */
+internal object PosixDirectoryDurability {
+    private val UNSUPPORTED_DIRECTORY_SYNC_ERRNOS = setOf("EINVAL", "ENOSYS", "EOPNOTSUPP", "ENOTSUP")
+
+    fun isUnsupportedDirectorySync(errnoName: String): Boolean = errnoName in UNSUPPORTED_DIRECTORY_SYNC_ERRNOS
 }
 
 internal object PosixDirectoryNames {
@@ -151,7 +200,7 @@ internal object PosixXattrAndAncestorSupport {
             ?: return null
         val validDir = !AndroidOsPosixFdOperations.isSymlinkMode(st.mode) &&
             AndroidOsPosixFdOperations.isDirMode(st.mode) &&
-            minOf(st.deviceId, st.inode) > 0L
+            st.deviceId > 0L && st.inode >= 0L
         return RootFdNodeIdentity(
             deviceId = st.deviceId,
             inode = st.inode,

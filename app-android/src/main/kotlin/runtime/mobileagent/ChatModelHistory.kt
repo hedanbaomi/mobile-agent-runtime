@@ -11,10 +11,20 @@ import runtime.mobileagent.provider.*
 
 internal data class ChatHistory(val messages: List<ChatMessage>, val sources: List<ContextSource>)
 
-internal fun projectBoundedHistory(container: AppContainer, visualReferencePlan: (List<String>) -> VisualReferencePlan, messages: List<Message>, max: Int, allowedKbs: Set<String>, source: Map<String, Pair<Citation, String>>, replayReasoning: Boolean = false, allowOriginals: Boolean = true): ChatHistory {
+internal data class BoundedTurnSelection(val messages: List<Message>, val turnIds: Map<String, String>)
+
+/**
+ * Select complete model-visible turns. A USER row with no assistant response is deliberately
+ * omitted from model context, not deleted from the conversation: it is either the current turn
+ * (passed separately as `currentUser`) or a pre-dispatch failure whose retry must not become a
+ * second consecutive USER message. UI, audit and citations keep the original durable row.
+ */
+internal fun selectBoundedTurns(messages: List<Message>, max: Int): BoundedTurnSelection {
     val groups = mutableListOf<MutableList<Message>>()
     orderedToolEvidenceHistory(messages).forEach { message ->
-        val toolEvidence = runCatching { Json.parseToJsonElement(message.metadataJson).jsonObject["toolEvidence"]?.jsonPrimitive?.booleanOrNull }.getOrNull() == true
+        val toolEvidence = runCatching {
+            Json.parseToJsonElement(message.metadataJson).jsonObject["toolEvidence"]?.jsonPrimitive?.booleanOrNull
+        }.getOrNull() == true
         if ((message.role == MessageRole.USER && !toolEvidence) || groups.isEmpty()) groups.add(mutableListOf())
         groups.last().add(message)
     }
@@ -39,10 +49,22 @@ internal fun projectBoundedHistory(container: AppContainer, visualReferencePlan:
         // summarized earlier in this same run. Exclude only the incomplete suffix.
         val complete = group.take(completeEnd)
         if (complete.isEmpty()) continue
+        // A USER-only suffix is not a model turn. This is the semantic retry rule: the previous
+        // attempt stays visible in the conversation, while only the new current USER is sent.
+        if (complete.first().role == MessageRole.USER &&
+            complete.drop(1).none { it.role == MessageRole.ASSISTANT }
+        ) continue
         if (selected.size + complete.size > max) break
         selected.addAll(0, complete)
         complete.forEach { turnIds[it.id] = group.first().id }
     }
+    return BoundedTurnSelection(selected, turnIds)
+}
+
+internal fun projectBoundedHistory(container: AppContainer, visualReferencePlan: (List<String>) -> VisualReferencePlan, messages: List<Message>, max: Int, allowedKbs: Set<String>, source: Map<String, Pair<Citation, String>>, replayReasoning: Boolean = false, allowOriginals: Boolean = true): ChatHistory {
+    val selection = selectBoundedTurns(messages, max)
+    val selected = selection.messages
+    val turnIds = selection.turnIds
     val analyzedHashes = selected.flatMap { message ->
         val metadata = runCatching { Json.parseToJsonElement(message.metadataJson).jsonObject }.getOrNull()
         if ((metadata?.get("visualBatchAnalysis") as? JsonPrimitive)?.booleanOrNull != true || message.text.isBlank()) emptyList()

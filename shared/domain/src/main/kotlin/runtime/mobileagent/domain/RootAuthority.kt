@@ -143,7 +143,6 @@ object RootAccessPolicy {
         if (shell && (!liveConsent.shellEnabled || frozen.shellConsentRevision <= 0 ||
                 liveConsent.shellRevision != frozen.shellConsentRevision)
         ) return RootAccessDenial.ROOT_SHELL_CONSENT_REQUIRED
-        if (shell && dangerousMode == DangerousMode.DISABLED) return RootAccessDenial.DANGEROUS_MODE_DISABLED
         return null
     }
 }

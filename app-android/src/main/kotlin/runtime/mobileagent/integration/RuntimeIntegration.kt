@@ -322,7 +322,7 @@ class RuntimeIntegration(
     private val diagnostics: AndroidDiagnosticLogger,
     private val shizukuAuthority: ShizukuAuthorityBridge? = null,
     private val wiredAuthority: WiredAdbAuthorityPort,
-) : SettingsAuthorityPort, ThreadWorkspacePort, ThreadWorkspaceRuntimePort, WorkspacePickerPort,
+) : SettingsAuthorityPort, runtime.mobileagent.RootRecoveryAuthorityPort, RootWorkspaceUiPort, ThreadWorkspacePort, ThreadWorkspaceRuntimePort, WorkspacePickerPort,
     CanonicalWorkspaceSink, AutoCloseable {
     private val appContext = context.applicationContext
     private val workspaceUiPresentations = WorkspaceUiPresentationStore(appContext)
@@ -462,7 +462,6 @@ class RuntimeIntegration(
         rootCoordinator.reconcileStartupRecovery()
         wireShizukuBackend()
         wireWiredBackend()
-        rootCoordinator.registerBackends(shellBackends, workspaceBackends, privilegedWorkspaceProviders, fullDeviceFilesGrantRepository)
         reconcileFullDeviceGrants()
         hydrateWorkspaces()
         installDiagnosticsCollectors()
@@ -519,8 +518,13 @@ class RuntimeIntegration(
     override fun agentWorkspaceDefault(agentId: String): AgentWorkspaceDefault? =
         agentWorkspaceDefaultRepository.get(agentId)
 
-    override fun resolveNewThreadWorkspace(agentId: String): String? =
-        agentWorkspaceDefaultRepository.resolveForNewThread(agentId)?.takeIf(rootWorkspaceUi::canSealNewThreadSnapshot)
+    override fun resolveNewThreadWorkspace(agentId: String): String? {
+        val id = agentWorkspaceDefaultRepository.resolveForNewThread(agentId) ?: return null
+        if (!rootWorkspaceUi.canSealNewThreadSnapshot(id)) {
+            throw runtime.mobileagent.ChatRootErrors.unavailable(runtime.mobileagent.ChatRootErrors.NEW_THREAD_STAGE, agentId)
+        }
+        return id
+    }
 
     override fun saveAgentWorkspaceDefault(default: AgentWorkspaceDefault): AgentWorkspaceDefault {
         val previous = agentWorkspaceDefaultRepository.get(default.agentId)
@@ -689,6 +693,15 @@ class RuntimeIntegration(
     }
 
     private val rootWorkspaceUi by lazy { RootWorkspaceUiController(db, rootCoordinator) }
+    override suspend fun browseRootDirectory(authority: Authority, path: String, cursor: String?) =
+        rootWorkspaceUi.browseRootDirectory(authority, path, cursor)
+    override fun rootWorkspacePermissions(workspaceId: String, agentId: String) =
+        rootWorkspaceUi.rootWorkspacePermissions(workspaceId, agentId)
+    override suspend fun updateRootWorkspacePermissions(
+        authority: Authority, workspaceId: String, agentId: String,
+        writable: Boolean, metadata: Boolean, shell: Boolean,
+    ) = rootWorkspaceUi.updateRootWorkspacePermissions(authority, workspaceId, agentId, writable, metadata, shell)
+
 
     override suspend fun attachRootDirectory(
         authority: Authority, absolutePath: String, writable: Boolean, metadata: Boolean, shell: Boolean,
@@ -1139,6 +1152,13 @@ class RuntimeIntegration(
     internal fun diagnosticWorkspaceAuthority(workspaceId: String?): DiagnosticAuthority =
         workspaceId?.let(workspaceRepository::get)?.authorityOrNull()?.toDiagnostic() ?: DiagnosticAuthority.NONE
 
+    /** Approval classification must distinguish an ordinary workspace from a failed/missing read. */
+    internal fun approvalWorkspaceAuthority(workspaceId: String): DiagnosticAuthority {
+        val workspace = requireNotNull(workspaceRepository.get(workspaceId)) { "Workspace unavailable for approval" }
+        if (workspace.backendType != WorkspaceBackendType.PRIVILEGED) return DiagnosticAuthority.NONE
+        return requireNotNull(workspace.authorityOrNull()) { "Workspace authority unavailable for approval" }.toDiagnostic()
+    }
+
     fun workspaceUiPresentation(workspaceId: String, chinese: Boolean = true): WorkspaceUiPresentation? {
         workspaceUiPresentations.get(workspaceId)?.let { return it }
         val workspace = workspaceRepository.get(workspaceId) ?: return null
@@ -1233,8 +1253,15 @@ class RuntimeIntegration(
             workspace = workspace,
             shell = if (rootSelected) null else shell,
             root = root,
+            boundSnapshotId = agentContext.snapshotId,
+            rootWorkspaceIds = frozenRootWorkspaceIds(agentContext),
         )
     }
+
+    /** Frozen binding IDs reserve their Root route even while the corresponding service is offline. */
+    fun frozenRootWorkspaceIds(context: ToolExecutionContext): Set<String> =
+        (context.snapshotGrantBindings.mapNotNull { it.workspaceId } + context.canonicalGrants.mapNotNull { it.workspaceId })
+            .filter { runtime.mobileagent.data.RootWorkspaceRepository(db).getOrigin(it) != null }.toSet()
 
     /**
      * Return a closed, aggregate-only explanation of the workspace exposure inputs for one run.
@@ -1400,6 +1427,17 @@ class RuntimeIntegration(
             skillId = skillId,
             skillRevision = skillRevision,
             trustedSkillEnvelope = trustedSkillEnvelope,
+        )
+    }
+
+    override fun acknowledgeRootRecovery(authority: Authority): runtime.mobileagent.SettingsAuthorityMutation {
+        val recovered = rootCoordinator.acknowledgeDegradedRecovery(
+            authority, userConfirmed = true, authorityManager = authorityManager,
+            shizukuState = RootPermissionEntry.resolveState(shizukuAuthority?.refresh()),
+        )
+        return runtime.mobileagent.SettingsAuthorityMutation(
+            accepted = recovered != null, snapshot = settingsSnapshot(),
+            reason = if (recovered != null) null else "ROOT_RECOVERY_RESTART_REQUIRED",
         )
     }
 

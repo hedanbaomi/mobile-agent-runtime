@@ -1,4 +1,4 @@
-﻿// SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+// SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 
 package runtime.mobileagent.domain
@@ -20,6 +20,7 @@ enum class ErrorCode {
     /** The provider ended normally but returned only reasoning, no answer text. */
     REASONING_ONLY,
     PERMISSION_DENIED,
+    AUTHORITY_TEMPORARILY_UNAVAILABLE,
     UNSUPPORTED_DEPENDENCY,
     RESOURCE_LIMIT,
     UNKNOWN_OUTCOME,

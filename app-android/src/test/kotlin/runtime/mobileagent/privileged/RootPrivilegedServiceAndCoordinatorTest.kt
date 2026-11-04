@@ -75,6 +75,10 @@ class RootPrivilegedServiceAndCoordinatorTest {
                 override fun cancel(requestId: String): Boolean = true
             }
             val serviceEngine = RootPrivilegedServiceEngine(
+            selectionPathResolver = { java.nio.file.Paths.get(it) },
+            mountPolicyProvider = { b -> runtime.mobileagent.domain.RootTrustedMountRoots.directoryTree(
+                setOf(b.credentialEncryptedIdentity.mountId, b.deviceProtectedIdentity.mountId)) },
+
                 managerAuthorizationOverride = { RootManagerAuthorization.GRANTED },
                 fdOps = serviceFdOps,
                 shellRunner = shizukuServiceRunner,
@@ -82,7 +86,14 @@ class RootPrivilegedServiceAndCoordinatorTest {
                 controlPlaneOverride = boundary,
             ).pinTestHost(boundary, signing)
             val binderStub = object : IRootPrivilegedService {
-                override fun asBinder(): android.os.IBinder? = null
+                override fun asBinder(): android.os.IBinder = java.lang.reflect.Proxy.newProxyInstance(
+                    android.os.IBinder::class.java.classLoader, arrayOf(android.os.IBinder::class.java),
+                ) { _, method, _ ->
+                    when (method.name) {
+                        "isBinderAlive", "pingBinder" -> true
+                        else -> throw UnsupportedOperationException(method.name)
+                    }
+                } as android.os.IBinder
 
                 override fun handshake(requestJson: String): String =
                     serviceEngine.handshake(requestJson, 10148)
@@ -167,7 +178,7 @@ class RootPrivilegedServiceAndCoordinatorTest {
                     db = db,
                     fdOps = serviceFdOps,
                     sessionConnector = connector,
-                    shellRunner = shizukuServiceRunner,
+
                     controlPlaneBoundaryOverride = boundary,
                     locatorCipher = locatorCipher,
                 )
@@ -192,11 +203,10 @@ class RootPrivilegedServiceAndCoordinatorTest {
                 assertNull(coordinator.setRootShellConsent(Authority.SHIZUKU_ROOT, enabled = true, userConfirmed = false))
 
                 // Shell execution before explicit per-channel Root Shell confirmation is rejected!
-                val shellExec = RootControlledShellExecutor(Authority.SHIZUKU_ROOT, coordinator)
                 val shellReq = ShellExecRequest.fromRuntime(
                     callId = "call-sh-1",
                     command = "id -u",
-                    cwd = wsPosix,
+                    cwd = null, // The selected workspace root, expressed by the typed protocol.
                     limits = ShellLimits(2000L, 4096L),
                     agentId = "agent-1",
                     snapshotId = "snap-1",
@@ -207,8 +217,8 @@ class RootPrivilegedServiceAndCoordinatorTest {
                     sessionIdentity = "ses-1",
                     toolSchemaVersion = 1,
                 )
-                val deniedShell = runBlocking { shellExec.execute(shellReq) }
-                assertEquals(ShellExecutionStatus.FAILED, deniedShell.status)
+                val deniedShell = executeFixtureShell(coordinator, Authority.SHIZUKU_ROOT, shellReq, "shizuku-root-ws")
+                assertNull(deniedShell)
                 assertEquals(0, shizukuShellCalls)
 
                 // Explicit per-channel Root Shell consent grants SHIZUKU_ROOT shell without touching ROOT_DIRECT
@@ -224,9 +234,8 @@ class RootPrivilegedServiceAndCoordinatorTest {
 
                 // Round 4 Finding 1 verification: unapproved or nonexistent agent/snapshot shell call fails closed
                 // and mints 0 capability grants, snapshots, workspaces, or approvals!
-                val unapprovedShell = runBlocking { shellExec.execute(shellReq) }
-                assertEquals(ShellExecutionStatus.FAILED, unapprovedShell.status)
-                assertEquals(ToolErrorCode.AUTHORITY_NOT_GRANTED, unapprovedShell.error?.code)
+                val unapprovedShell = executeFixtureShell(coordinator, Authority.SHIZUKU_ROOT, shellReq, "shizuku-root-ws")
+                assertNull(unapprovedShell)
                 assertEquals(0L, db.query("SELECT COUNT(*) AS c FROM capability_grants").single().long("c"))
                 assertEquals(0L, db.query("SELECT COUNT(*) AS c FROM root_approval_bindings").single().singleCount())
                 assertEquals(0, shizukuShellCalls)
@@ -257,12 +266,6 @@ class RootPrivilegedServiceAndCoordinatorTest {
 
                 // Issue 1, 4, 5, 6 verification: file write/stat route through the UID 0 service
                 // with an exact Runtime invocation id; the legacy no-id adapter path must fail closed.
-                val wsBackend = RootPrivilegedWorkspaceFactory.createWorkspaceBackend(
-                    authority = Authority.SHIZUKU_ROOT,
-                    coordinator = coordinator,
-                    workspaceRootPath = wsDir,
-                    workspaceId = "shizuku-root-ws",
-                ) as RootControlledWorkspaceBackend
                 val writeGrantId = "grant-snap-1-file-write_text"
                 val statGrantId = "grant-snap-1-file-metadata-read"
                 val shellGrantId = "grant-snap-1-shell-execute"
@@ -292,13 +295,13 @@ class RootPrivilegedServiceAndCoordinatorTest {
                 }
                 assertEquals("v=1", serviceFdOps.readText("config.ini"))
 
-                // The adapter has no Runtime invocation id and must not reach the service.
-                val legacyNoId = runBlocking {
-                    wsBackend.writeText(
-                        WorkspaceWriteTextRequest("shizuku-root-ws", "config.ini", "v=bad", replace = false),
-                    )
-                }
-                assertTrue(legacyNoId is WorkspaceResult.Failure, "no-id adapter must fail closed")
+                // The retired no-id entrypoint must not reach the service.
+                val legacyNoId = coordinator.executeFileInvocation(
+                    Authority.SHIZUKU_ROOT, "", writeV1Args.copy(
+                        contentSha256 = RootPrivilegedServiceEngine.sha256Hex("v=bad"), contentByteLength = 5,
+                    ), "v=bad".toByteArray(),
+                )
+                assertNull(legacyNoId, "no-id entrypoint must fail closed")
                 assertEquals("v=1", serviceFdOps.readText("config.ini"))
 
                 // Stale expectedVersion is rejected before any mutation.
@@ -373,21 +376,21 @@ class RootPrivilegedServiceAndCoordinatorTest {
                     policyVersion = shellReq.policyVersion, configSnapshotHash = shellReq.configSnapshotHash,
                     sessionIdentity = shellReq.sessionIdentity,
                 )
-                val deniedReuse = runBlocking { shellExec.execute(reusedModelCallId) }
-                assertEquals(ShellExecutionStatus.FAILED, deniedReuse.status, "A reused model call ID cannot consume another invocation's approval")
+                val deniedReuse = executeFixtureShell(coordinator, Authority.SHIZUKU_ROOT, reusedModelCallId, "shizuku-root-ws")
+                assertNull(deniedReuse, "A reused model call ID cannot consume another invocation's approval")
                 assertEquals(0, shizukuShellCalls)
-                val allowedShell = runBlocking { shellExec.execute(shellReq) }
-                assertEquals(ShellExecutionStatus.SUCCEEDED, allowedShell.status)
-                assertEquals("uid=0(SHIZUKU_ROOT):id -u", allowedShell.stdout)
+                val allowedShell = executeFixtureShell(coordinator, Authority.SHIZUKU_ROOT, shellReq, "shizuku-root-ws")
+                assertEquals(runtime.mobileagent.domain.RootServiceTerminalOutcome.SUCCEEDED, allowedShell?.terminalOutcome)
+                assertEquals("uid=0(SHIZUKU_ROOT):id -u", allowedShell?.shellOutcome?.stdout)
                 assertEquals(1, shizukuShellCalls)
 
                 simulateUnknownOutput = true
                 assertNotNull(approveFixtureShell(db, coordinator,
                     Authority.SHIZUKU_ROOT, "run-unknown", reusedModelCallId, shellGrantId, "shizuku-root-ws",
                 ))
-                val unknown = runBlocking { shellExec.execute(reusedModelCallId) }
-                assertEquals(ShellExecutionStatus.UNKNOWN_OUTCOME, unknown.status)
-                assertEquals("", unknown.stdout, "A withheld UNKNOWN receipt cannot disclose private output")
+                val unknown = executeFixtureShell(coordinator, Authority.SHIZUKU_ROOT, reusedModelCallId, "shizuku-root-ws")
+                assertEquals(runtime.mobileagent.domain.RootServiceTerminalOutcome.UNKNOWN_OUTCOME, unknown?.terminalOutcome)
+                assertEquals("", unknown?.shellOutcome?.stdout.orEmpty(), "A withheld UNKNOWN receipt cannot disclose private output")
                 assertTrue(coordinator.rootAuthorityRepository.get(Authority.SHIZUKU_ROOT).degraded)
 
                 val receiptRows = db.query("SELECT stage,outcome,closed FROM root_dispatch_receipts")
@@ -407,6 +410,10 @@ class RootPrivilegedServiceAndCoordinatorTest {
             val wsPosix = AndroidRootPosixFileDriver.toPosixAbsolutePath(wsDir)
             val serviceFdOps = InMemoryServiceFdOps(wsPosix)
             val engine = RootPrivilegedServiceEngine(
+            selectionPathResolver = { java.nio.file.Paths.get(it) },
+            mountPolicyProvider = { b -> runtime.mobileagent.domain.RootTrustedMountRoots.directoryTree(
+                setOf(b.credentialEncryptedIdentity.mountId, b.deviceProtectedIdentity.mountId)) },
+
                 fdOps = serviceFdOps,
                 serviceUidProvider = { PrivilegeTier.ROOT.uid },
                 controlPlaneOverride = boundary,
@@ -507,13 +514,24 @@ class RootPrivilegedServiceAndCoordinatorTest {
                 }
             }
             val serviceEngine = RootPrivilegedServiceEngine(
+            selectionPathResolver = { java.nio.file.Paths.get(it) },
+            mountPolicyProvider = { b -> runtime.mobileagent.domain.RootTrustedMountRoots.directoryTree(
+                setOf(b.credentialEncryptedIdentity.mountId, b.deviceProtectedIdentity.mountId)) },
+
                 fdOps = serviceFdOps,
                 shellRunner = slowRunner,
                 serviceUidProvider = { PrivilegeTier.ROOT.uid },
                 controlPlaneOverride = boundary,
             ).pinTestHost(boundary, signing)
             val binderStub = object : IRootPrivilegedService {
-                override fun asBinder(): android.os.IBinder? = null
+                override fun asBinder(): android.os.IBinder = java.lang.reflect.Proxy.newProxyInstance(
+                    android.os.IBinder::class.java.classLoader, arrayOf(android.os.IBinder::class.java),
+                ) { _, method, _ ->
+                    when (method.name) {
+                        "isBinderAlive", "pingBinder" -> true
+                        else -> throw UnsupportedOperationException(method.name)
+                    }
+                } as android.os.IBinder
                 override fun handshake(requestJson: String): String = serviceEngine.handshake(requestJson, 10148)
                 override fun bindWorkspace(requestJson: String): String = serviceEngine.bindWorkspace(requestJson, 10148)
                 override fun submitEnvelope(controlSequence: Long, rawEnvelopeJson: String): String =
@@ -596,7 +614,7 @@ class RootPrivilegedServiceAndCoordinatorTest {
                             shizukuState: runtime.mobileagent.shizuku.ShizukuAuthorityState?,
                         ): RootAcquiredSession? = RootAcquiredSession(validHs.identity!!, caller, transport, boundary)
                     },
-                    shellRunner = slowRunner,
+
                     controlPlaneBoundaryOverride = boundary,
                     locatorCipher = locatorCipher,
                 )
@@ -625,7 +643,7 @@ class RootPrivilegedServiceAndCoordinatorTest {
                 val slowReq = ShellExecRequest.fromRuntime(
                     callId = "call-slow-1",
                     command = "sleep 5",
-                    cwd = wsPosix,
+                    cwd = null, // Workspace-relative default; no discarded legacy absolute cwd.
                     limits = ShellLimits(10_000L, 4096L),
                     agentId = "agent-1",
                     snapshotId = "snap-1",
@@ -644,15 +662,15 @@ class RootPrivilegedServiceAndCoordinatorTest {
                     workspaceId = "ws-slow",
                 )
 
-                val resultHolder = java.util.concurrent.atomic.AtomicReference<runtime.mobileagent.skills.tooling.ShellExecResult>()
+                val resultHolder = java.util.concurrent.atomic.AtomicReference<RootServiceExecuteResponse>()
                 val worker = Thread {
-                    resultHolder.set(coordinator.executeControlledShell(Authority.SHIZUKU_ROOT, slowReq))
+                    resultHolder.set(executeFixtureShell(coordinator, Authority.SHIZUKU_ROOT, slowReq, "ws-slow"))
                 }.apply { start() }
 
                 assertTrue(startedLatch.await(2, java.util.concurrent.TimeUnit.SECONDS))
 
                 // Delivery is observed below; signalling alone is not termination confirmation.
-                assertFalse(coordinator.cancelControlledShell(Authority.SHIZUKU_ROOT, slowReq.requestId))
+                assertFalse(coordinator.cancellationRoute(requireNotNull(coordinator.currentExecutionStamp(Authority.SHIZUKU_ROOT)))(slowReq.requestId))
                 assertTrue(cancelObserved.get())
 
                 // Finding 3b: detachSession completes immediately (<1000ms) without blocking on 5s command
@@ -665,7 +683,7 @@ class RootPrivilegedServiceAndCoordinatorTest {
                 worker.join(2_000L)
                 val settled = resultHolder.get()
                 assertNotNull(settled)
-                assertEquals(ShellExecutionStatus.UNKNOWN_OUTCOME, settled!!.status)
+                assertEquals(runtime.mobileagent.domain.RootServiceTerminalOutcome.UNKNOWN_OUTCOME, settled!!.terminalOutcome)
 
                 // Finding 6: independent per-channel rootShellConsentEnabled exposed in Settings provider state
                 assertTrue(coordinator.buildSettingsProviderState(Authority.SHIZUKU_ROOT, authorityManager).rootShellConsentEnabled)

@@ -14,15 +14,18 @@ sealed interface RootStreamingPatchResult {
     data class Rejected(val reason: String) : RootStreamingPatchResult
 }
 
+private const val MAX_STREAM_LINE_BYTES = 1024 * 1024
+
 /**
  * Bounded-memory streaming patch applier for `unified` and `search_replace` formats (`ROOT09`, `ROOT14`, `S30`).
  *
  * Reads source content in 64 KiB windows and emits patched chunks through a 64 KiB sink buffer
- * without holding the full file in heap memory.
+ * without holding the full file in heap memory. The unified-diff state machine is the same
+ * [UnifiedPatchApplier] the in-memory engines use, so context matching, empty-file anchors,
+ * CRLF/LF preservation and `\ No newline at end of file` stay identical across engines.
  */
 object RootStreamingPatch {
     const val CHUNK_BYTES = 64 * 1024
-    private const val MAX_LINE_BYTES = 1024 * 1024
 
     fun applyStreamed(
         totalSizeBytes: Long,
@@ -47,14 +50,17 @@ object RootStreamingPatch {
         patchBytes: ByteArray,
         emitChunk: (ByteArray, Int, Int) -> Unit,
     ): RootStreamingPatchResult {
-        val hunks = RootUnifiedPatch.parsePatchHunks(patchBytes)
+        val hunks = UnifiedTextPatch.parsePatchHunks(patchBytes)
             ?: return RootStreamingPatchResult.Rejected(RootFileOperationReason.PATCH_INVALID)
         val sink = StreamedSink(emitChunk)
-        val state = UnifiedStreamState(hunks, sink)
-        val lineReader = StreamedLineReader(totalSizeBytes, readRange)
-        val walked = lineReader.forEachLine { line -> state.onSourceLine(line) }
+        val applier = UnifiedPatchApplier(
+            hunks,
+            UnifiedPatchLineSink { line, terminator -> sink.write(line, terminator) },
+        )
+        val reader = StreamedLineReader(totalSizeBytes, readRange)
+        val walked = reader.forEachLine { line, terminator -> applier.onSourceLine(line, terminator) }
         if (walked != null) return RootStreamingPatchResult.Rejected(walked)
-        val finished = state.finish(lineReader.endedWithNewline)
+        val finished = applier.finish()
         if (finished != null) return RootStreamingPatchResult.Rejected(finished)
         return sink.finish()
     }
@@ -74,6 +80,7 @@ object RootStreamingPatch {
             .onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT)
         val charScratch = CharBuffer.allocate(CHUNK_BYTES)
+        var utf8Carry = ByteArray(0)
         var carry = ByteArray(0)
         var offset = 0L
         var matches = 0
@@ -86,10 +93,14 @@ object RootStreamingPatch {
             val chunk = readRange(offset, ask)
                 ?: return RootStreamingPatchResult.Rejected(RootFileOperationReason.READ_FAILED)
             if (chunk.size != ask) return RootStreamingPatchResult.Rejected(RootFileOperationReason.READ_FAILED)
-            offset += chunk.size
-            if (!validateUtf8Chunk(utf8Validator, charScratch, chunk, offset == totalSizeBytes)) {
+            if (chunk.any { it == 0.toByte() }) {
                 return RootStreamingPatchResult.Rejected(RootFileOperationReason.PATCH_INVALID)
             }
+            offset += chunk.size
+            // CharsetDecoder leaves an incomplete UTF-8 suffix in the input on UNDERFLOW;
+            // it does not retain those bytes internally between separate ByteBuffers.
+            utf8Carry = validateUtf8Chunk(utf8Validator, charScratch, utf8Carry + chunk, offset == totalSizeBytes)
+                ?: return RootStreamingPatchResult.Rejected(RootFileOperationReason.PATCH_INVALID)
             val combined = ByteArray(carry.size + chunk.size)
             System.arraycopy(carry, 0, combined, 0, carry.size)
             System.arraycopy(chunk, 0, combined, carry.size, chunk.size)
@@ -103,8 +114,8 @@ object RootStreamingPatch {
                 }
                 totalReplacementBytes += replace.size
                 if (totalReplacementBytes > RootExecutionBudget.MAX_OUTPUT_BYTES ||
-                    !sink.write(combined, cursor, at - cursor) ||
-                    !sink.write(replace, 0, replace.size)
+                    !sink.writeRaw(combined, cursor, at - cursor) ||
+                    !sink.writeRaw(replace, 0, replace.size)
                 ) {
                     return RootStreamingPatchResult.Rejected(RootFileOperationReason.PATCH_RESULT_EXCEEDS_BUDGET)
                 }
@@ -112,7 +123,7 @@ object RootStreamingPatch {
             }
             val keepTail = minOf(search.size - 1, combined.size - cursor)
             val flushLen = (combined.size - cursor) - keepTail
-            if (flushLen > 0 && !sink.write(combined, cursor, flushLen)) {
+            if (flushLen > 0 && !sink.writeRaw(combined, cursor, flushLen)) {
                 return RootStreamingPatchResult.Rejected(RootFileOperationReason.PATCH_RESULT_EXCEEDS_BUDGET)
             }
             carry = combined.copyOfRange(combined.size - keepTail, combined.size)
@@ -120,7 +131,7 @@ object RootStreamingPatch {
         if (totalSizeBytes == 0L || matches == 0) {
             return RootStreamingPatchResult.Rejected(RootFileOperationReason.PATCH_CONTEXT_MISMATCH)
         }
-        if (carry.isNotEmpty() && !sink.write(carry, 0, carry.size)) {
+        if (carry.isNotEmpty() && !sink.writeRaw(carry, 0, carry.size)) {
             return RootStreamingPatchResult.Rejected(RootFileOperationReason.PATCH_RESULT_EXCEEDS_BUDGET)
         }
         return sink.finish()
@@ -131,19 +142,20 @@ object RootStreamingPatch {
         scratch: CharBuffer,
         chunk: ByteArray,
         endOfInput: Boolean,
-    ): Boolean {
+    ): ByteArray? {
         val input = ByteBuffer.wrap(chunk)
         while (true) {
             scratch.clear()
             val res = decoder.decode(input, scratch, endOfInput)
-            if (res.isError) return false
+            if (res.isError) return null
             if (res.isUnderflow) break
         }
         if (endOfInput) {
+            if (input.hasRemaining()) return null
             scratch.clear()
-            if (decoder.flush(scratch).isError) return false
+            if (decoder.flush(scratch).isError) return null
         }
-        return true
+        return ByteArray(input.remaining()).also { input.get(it) }
     }
 
     internal fun indexOfBytes(haystack: ByteArray, needle: ByteArray, from: Int): Int {
@@ -156,27 +168,26 @@ object RootStreamingPatch {
     }
 }
 
+/**
+ * Buffers one emitted line with its exact terminator, so CRLF/LF choices made by the shared
+ * applier reach the file byte for byte. `indexOfBytes`-style raw writes remain available for the
+ * byte-oriented `search_replace` format.
+ */
 private class StreamedSink(private val emitChunk: (ByteArray, Int, Int) -> Unit) {
     private val digest = MessageDigest.getInstance("SHA-256")
     private val buffer = ByteArray(RootStreamingPatch.CHUNK_BYTES)
     private var buffered = 0
     private var totalWritten = 0L
-    private var wroteAnyLine = false
 
-    fun writeLine(line: String): Boolean {
-        val newline = byteArrayOf('\n'.code.toByte())
-        if (wroteAnyLine && !write(newline, 0, 1)) return false
-        wroteAnyLine = true
-        val bytes = line.toByteArray(Charsets.UTF_8)
-        return write(bytes, 0, bytes.size)
+    fun write(line: String, terminator: String): Boolean {
+        val text = line.toByteArray(Charsets.UTF_8)
+        if (!writeRaw(text, 0, text.size)) return false
+        if (terminator.isEmpty()) return true
+        val eol = terminator.toByteArray(Charsets.UTF_8)
+        return writeRaw(eol, 0, eol.size)
     }
 
-    fun writeTrailingNewlineIfAny(trailingNewline: Boolean): Boolean {
-        if (!trailingNewline || !wroteAnyLine) return true
-        return write(byteArrayOf('\n'.code.toByte()), 0, 1)
-    }
-
-    fun write(src: ByteArray, offset: Int, length: Int): Boolean {
+    fun writeRaw(src: ByteArray, offset: Int, length: Int): Boolean {
         if (totalWritten + length > RootContentVersionPolicy.MAX_CONTENT_BYTES) return false
         var pos = offset
         var rem = length
@@ -205,14 +216,16 @@ private class StreamedSink(private val emitChunk: (ByteArray, Int, Int) -> Unit)
     }
 }
 
+/**
+ * Splits a byte source into lines without materialising the file: each visit carries the line text
+ * (decoded UTF-8, CR stripped only when it belongs to a CRLF terminator) and the exact terminator
+ * (`"\n"`, `"\r\n"` or `""` for a final unterminated line).
+ */
 private class StreamedLineReader(
     private val totalSizeBytes: Long,
     private val readRange: (Long, Int) -> ByteArray?,
 ) {
-    var endedWithNewline: Boolean = false
-        private set
-
-    fun forEachLine(visitor: (String) -> String?): String? {
+    fun forEachLine(visitor: (String, String) -> String?): String? {
         if (totalSizeBytes == 0L) return null
         val lineBuf = ByteArrayOutputStream(256)
         var offset = 0L
@@ -223,98 +236,27 @@ private class StreamedLineReader(
             if (chunk.size != ask) return RootFileOperationReason.READ_FAILED
             for (i in chunk.indices) {
                 val b = chunk[i]
-                val atFinalByte = (offset + i + 1L) == totalSizeBytes
                 if (b == '\n'.code.toByte()) {
-                    val line = decodeLine(lineBuf) ?: return RootFileOperationReason.PATCH_INVALID
+                    val raw = lineBuf.toByteArray()
                     lineBuf.reset()
-                    visitor(line)?.let { return it }
-                    if (atFinalByte) endedWithNewline = true
+                    val crlf = raw.isNotEmpty() && raw[raw.size - 1] == '\r'.code.toByte()
+                    val textBytes = if (crlf) raw.copyOf(raw.size - 1) else raw
+                    val text = runCatching {
+                        textBytes.decodeToString(throwOnInvalidSequence = true)
+                    }.getOrNull() ?: return RootFileOperationReason.PATCH_INVALID
+                    visitor(text, if (crlf) "\r\n" else "\n")?.let { return it }
                 } else {
-                    if (lineBuf.size() >= 1024 * 1024) return RootFileOperationReason.PATCH_INVALID
+                    if (lineBuf.size() >= MAX_STREAM_LINE_BYTES) return RootFileOperationReason.PATCH_INVALID
                     lineBuf.write(b.toInt())
                 }
             }
             offset += chunk.size
         }
-        if (!endedWithNewline) {
-            val line = decodeLine(lineBuf) ?: return RootFileOperationReason.PATCH_INVALID
-            visitor(line)?.let { return it }
-        }
-        return null
-    }
-
-    private fun decodeLine(buf: ByteArrayOutputStream): String? =
-        runCatching { buf.toByteArray().decodeToString(throwOnInvalidSequence = true) }.getOrNull()
-}
-
-private class UnifiedStreamState(
-    private val hunks: List<RootUnifiedPatch.Hunk>,
-    private val sink: StreamedSink,
-) {
-    private var sourceCursor = 0
-    private var hunkIndex = 0
-    private var hunkLineIndex = 0
-    private val initError: String? = advancePureInsertionHunks()
-
-    fun onSourceLine(line: String): String? {
-        initError?.let { return it }
-        while (hunkIndex < hunks.size) {
-            val hunk = hunks[hunkIndex]
-            val base = if (hunk.oldCount == 0) hunk.oldStart else hunk.oldStart - 1
-            if (base < sourceCursor && hunkLineIndex == 0) {
-                return RootFileOperationReason.PATCH_CONTEXT_MISMATCH
-            }
-            if (sourceCursor < base) break
-            emitPlusLinesAtCurrentHunk()?.let { return it }
-            if (hunkLineIndex >= hunk.lines.size) {
-                hunkIndex += 1
-                hunkLineIndex = 0
-                advancePureInsertionHunks()?.let { return it }
-                continue
-            }
-            val expected = hunk.lines[hunkLineIndex]
-            if (expected.text != line) return RootFileOperationReason.PATCH_CONTEXT_MISMATCH
-            if (expected.kind == ' ' && !sink.writeLine(expected.text)) {
-                return RootFileOperationReason.PATCH_RESULT_EXCEEDS_BUDGET
-            }
-            hunkLineIndex += 1
-            sourceCursor += 1
-            emitPlusLinesAtCurrentHunk()?.let { return it }
-            if (hunkLineIndex >= hunk.lines.size) {
-                hunkIndex += 1
-                hunkLineIndex = 0
-                advancePureInsertionHunks()?.let { return it }
-            }
-            return null
-        }
-        sourceCursor += 1
-        return if (sink.writeLine(line)) null else RootFileOperationReason.PATCH_RESULT_EXCEEDS_BUDGET
-    }
-
-    fun finish(trailingNewline: Boolean): String? {
-        (initError ?: advancePureInsertionHunks())?.let { return it }
-        if (hunkIndex < hunks.size) return RootFileOperationReason.PATCH_CONTEXT_MISMATCH
-        return if (sink.writeTrailingNewlineIfAny(trailingNewline)) null else RootFileOperationReason.PATCH_RESULT_EXCEEDS_BUDGET
-    }
-
-    private fun advancePureInsertionHunks(): String? {
-        while (hunkIndex < hunks.size) {
-            val hunk = hunks[hunkIndex]
-            if (hunk.oldCount != 0 || hunk.oldStart != sourceCursor) break
-            emitPlusLinesAtCurrentHunk()?.let { return it }
-            hunkIndex += 1
-            hunkLineIndex = 0
-        }
-        return null
-    }
-
-    private fun emitPlusLinesAtCurrentHunk(): String? {
-        val hunk = hunks[hunkIndex]
-        while (hunkLineIndex < hunk.lines.size && hunk.lines[hunkLineIndex].kind == '+') {
-            if (!sink.writeLine(hunk.lines[hunkLineIndex].text)) {
-                return RootFileOperationReason.PATCH_RESULT_EXCEEDS_BUDGET
-            }
-            hunkLineIndex += 1
+        if (lineBuf.size() > 0) {
+            val text = runCatching {
+                lineBuf.toByteArray().decodeToString(throwOnInvalidSequence = true)
+            }.getOrNull() ?: return RootFileOperationReason.PATCH_INVALID
+            visitor(text, "")?.let { return it }
         }
         return null
     }

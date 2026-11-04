@@ -26,10 +26,18 @@ internal fun approveFixtureFile(db: SqlConnection, coordinator: RootRuntimeCoord
 
 internal fun approveFixtureShell(db: SqlConnection, coordinator: RootRuntimeCoordinator,
     authority: Authority, runId: String, request: ShellExecRequest, grantId: String, workspaceId: String) = run {
+    val args = RootTypedArguments.ShellExec(workspaceId, request.command, request.cwd)
     admitFixtureInvocation(db, coordinator.currentExecutionStamp(authority, true)!!, runId,
-        request.requestId, request.callId, request.snapshotId, RootTypedArguments.ShellExec(workspaceId, request.command))
-    coordinator.approveShellInvocation(authority, runId, request, grantId, workspaceId)
+        request.requestId, request.callId, request.snapshotId, args)
+    coordinator.approveFileInvocation(authority, runId, request.requestId, request.callId,
+        request.snapshotId, grantId, args, configSnapshotHash = request.configSnapshotHash)
 }
+
+/** Exercise the production typed dispatch route; null is a definite pre-dispatch refusal. */
+internal fun executeFixtureShell(coordinator: RootRuntimeCoordinator, authority: Authority,
+    request: ShellExecRequest, workspaceId: String): RootServiceExecuteResponse? =
+    coordinator.executeFileInvocation(authority, request.requestId,
+        RootTypedArguments.ShellExec(workspaceId, request.command, request.cwd))
 
 private fun admitFixtureInvocation(db: SqlConnection, execution: RootExecutionStamp, runId: String,
     invocationId: String, callId: String, snapshotId: String, args: RootTypedArguments) {

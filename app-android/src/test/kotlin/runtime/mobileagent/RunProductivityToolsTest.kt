@@ -10,6 +10,52 @@ import org.junit.jupiter.api.Test
 import runtime.mobileagent.skills.*
 
 class RunProductivityToolsTest {
+    @Test fun sharedReadNamesRequireBatchApprovalOnlyForExplicitRootWorkspaceIds(): Unit = runBlocking {
+        val seen = java.util.Collections.synchronizedList(mutableListOf<ToolCall>())
+        val spec = runtime.mobileagent.privileged.RootToolArguments.spec("file_read_text")!!
+        val core = object : ToolExecutor {
+            override val specs = listOf(ToolSpec(spec.name, spec.description, spec.inputSchema, spec.capability!!.value, false, spec.schemaVersion))
+            override suspend fun invoke(call: ToolCall): ToolResult { seen += call; return ToolResult.Value("{}") }
+            override suspend fun approve(callId: String): ToolResult = error("The fixture completes reads directly")
+            override suspend fun authorizeReplay(call: ToolCall) = call in seen
+            override suspend fun authorizeDeferredResult(call: ToolCall) = call in seen
+        }
+        val tools = RunProductivityTools(core, this, { true }, { it }, rootWorkspaceIds = setOf("root-id"))
+        fun batch(id: String, workspace: String) = ToolCall(id, "read_batch",
+            """{"calls":[{"call_id":"child-$id","tool":"file_read_text","arguments":{"workspace_id":"$workspace","relative_path":"a"}}]}""")
+        try {
+            assertTrue(tools.executor.invoke(batch("ordinary", "internal-id")) is ToolResult.Value)
+            assertEquals(1, seen.size)
+            assertEquals(ToolResult.NeedsApproval, tools.executor.invoke(batch("root", "root-id")))
+            assertEquals(1, seen.size, "Root child must wait for the outer durable approval")
+            assertTrue(tools.executor.approve("root") is ToolResult.Value)
+            assertEquals(2, seen.size)
+        } finally { tools.executor.close() }
+    }
+    @Test fun discoveryAndMetadataReadsAreEligibleForExplicitReadBatches(): Unit = runBlocking {
+        val seen = java.util.Collections.synchronizedList(mutableListOf<ToolCall>())
+        val core = object : ToolExecutor {
+            override val specs = listOf("workspace_list", "file_get_metadata").map {
+                ToolSpec(it, "fixture", "{}", "", false)
+            }
+            override suspend fun invoke(call: ToolCall): ToolResult {
+                seen += call
+                return ToolResult.Value("{}")
+            }
+            override suspend fun approve(callId: String): ToolResult = ToolResult.Invalid("unused")
+            override suspend fun authorizeReplay(call: ToolCall) = call in seen
+            override suspend fun authorizeDeferredResult(call: ToolCall) = call in seen
+        }
+        val tools = RunProductivityTools(core, this, { true }, { it })
+        try {
+            val call = ToolCall("read-metadata-and-discover", "read_batch",
+                """{"calls":[{"call_id":"discover","tool":"workspace_list","arguments":{}},{"call_id":"metadata","tool":"file_get_metadata","arguments":{}}]}""")
+            val result = tools.executor.invoke(call)
+            assertTrue(result is ToolResult.Value, result.toString())
+            assertEquals(setOf("workspace_list", "file_get_metadata"), seen.map { it.name }.toSet())
+        } finally { tools.executor.close() }
+    }
+
     @Test fun rootChildrenWithoutDurableApprovalAreRejectedBeforeJobCreation(): Unit = runBlocking {
         var calls = 0
         val core = object : ToolExecutor {

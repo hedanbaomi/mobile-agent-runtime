@@ -7,6 +7,10 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
@@ -24,6 +28,99 @@ import runtime.mobileagent.skills.tooling.ToolInvocation
 import runtime.mobileagent.skills.tooling.ToolSpec
 
 class RootToolExecutorTest {
+    @Test
+    fun discoveryUsesExactRegistrationAndStickyLiveDisclosure() = runBlocking {
+        val backend = FakeRootBackend(listOf(exposure("file_read_text")))
+        val originalViews = listOf(runtime.mobileagent.tooling.AgentWorkspaceView(
+            "root-ws", "Notes", true, "selected_directory", true, false, false,
+            emptyList(), listOf("file_read_text"), emptyList(), emptyMap(),
+        ))
+        backend.views = originalViews
+        val executor = RootToolExecutor(specs("file_read_text"), backend)
+        val call = ToolCall("discovery-id", "workspace_list", "{}")
+        val first = executor.invoke(call)
+        assertTrue(first is ToolResult.Value)
+        assertTrue(executor.authorizeReplay(call))
+        assertTrue(executor.precheckDeferredResult(call))
+        assertTrue(executor.authorizeDeferredResult(call))
+        assertTrue(executor.invoke(call.copy(argumentsJson = "{\"unexpected\":true}")) is ToolResult.Invalid)
+        backend.views = emptyList()
+        assertFalse(executor.authorizeDeferredResult(call))
+        backend.views = originalViews
+        assertFalse(executor.authorizeReplay(call), "A revoked cached discovery must stay withheld")
+        assertTrue(executor.invoke(call) is ToolResult.Denied)
+        executor.close()
+        assertFalse(executor.authorizeDeferredResult(call))
+        assertTrue(executor.invoke(call.copy(callId = "after-close")) is ToolResult.Failure)
+    }
+
+    @Test
+    fun deferredDisclosureNeverAcceptsASettledDenial() = runBlocking {
+        val backend = FakeRootBackend(listOf(exposure("file_read_text")), ToolResult.Denied("PERMISSION_DENIED"))
+        val executor = RootToolExecutor(specs("file_read_text"), backend)
+        val call = ToolCall("denied-read", "file_read_text", """{"workspace_id":"root-ws","relative_path":"notes/a"}""")
+        assertTrue(executor.invoke(call) is ToolResult.Denied)
+        assertFalse(executor.precheckDeferredResult(call))
+        assertFalse(executor.authorizeDeferredResult(call))
+        assertTrue(backend.disclosures.isEmpty(), "Non-values never reach a consuming disclosure gate")
+    }
+
+    @Test
+    fun typedDiscoveryKeepsItsOriginalSnapshotAtDeferredDisclosure() = runBlocking {
+        val backend = FakeRootBackend(listOf(exposure("file_read_text")))
+        backend.views = listOf(runtime.mobileagent.tooling.AgentWorkspaceView(
+            "root-ws", "Notes", true, "selected_directory", true, false, false,
+            emptyList(), listOf("file_read_text"), emptyList(), emptyMap(),
+        ))
+        backend.discoverySnapshot = "snapshot-1"
+        val executor = RootToolExecutor(specs("file_read_text"), backend)
+        val stale = ToolInvocation.fromRuntime("model-stale", "other-snapshot", "agent-1", "workspace_list", "{}")
+        assertTrue(executor.invoke(stale) is ToolExecution.Failed)
+        val typed = ToolInvocation.fromRuntime("model-discovery", "snapshot-1", "agent-1", "workspace_list", "{}")
+        assertTrue(executor.invoke(typed) is ToolExecution.Value)
+        val call = ToolCall(typed.requestId, "workspace_list", "{}")
+        assertTrue(executor.authorizeDeferredResult(call))
+        backend.discoverySnapshot = "different-live-snapshot"
+        assertFalse(executor.authorizeDeferredResult(call))
+        backend.discoverySnapshot = "snapshot-1"
+        assertFalse(executor.authorizeDeferredResult(call))
+    }
+
+    @Test
+    fun sharedUnifiedDiffSpellingRetainsTheLegacyRootWireFormat() {
+        val common = RootToolArguments.normalize("file_apply_patch",
+            """{"workspace_id":"root-ws","relative_path":"notes/a","patch":"x","expected_version":"v1","format":"unified_diff"}""")!!
+        val legacy = RootToolArguments.normalize("file_apply_patch",
+            """{"workspace_id":"root-ws","relative_path":"notes/a","patch":"x","expected_version":"v1","format":"unified"}""")!!
+        assertEquals(legacy.canonicalJson, common.canonicalJson)
+    }
+
+    @Test
+    fun modelLearnsRandomWorkspaceIdThroughCommonDiscoveryBeforeItsFirstCall() = runBlocking {
+        val workspaceId = java.util.UUID.randomUUID().toString()
+        val backend = FakeRootBackend(listOf(exposure("file_read_text", workspaceId)))
+        backend.views = listOf(runtime.mobileagent.tooling.AgentWorkspaceView(
+            workspaceId, "Notes", true, "selected_directory", true, false, false,
+            emptyList(), listOf("file_read_text"), emptyList(), emptyMap(),
+        ))
+        val executor = RootToolExecutor(specs("file_read_text"), backend)
+        val factory = runtime.mobileagent.tooling.ToolExecutorFactory(root = executor)
+        val discovery = factory.invoke(ToolCall("enumerate", "workspace_list", "{}")) as ToolResult.Value
+        val learnedId = Json.parseToJsonElement(discovery.json).jsonObject.getValue("workspaces")
+            .jsonArray.single().jsonObject.getValue("workspace_id").jsonPrimitive.content
+        assertEquals(workspaceId, learnedId)
+        assertTrue(factory.invoke(ToolCall("discovered", "file_read_text",
+            """{"workspace_id":"$learnedId","relative_path":"notes/a.txt"}""")) is ToolResult.Value)
+        assertEquals(workspaceId, backend.invocations.single().workspaceId)
+        assertTrue(factory.invoke(ToolCall("ungranted", "file_read_text",
+            """{"workspace_id":"other","relative_path":"notes/a.txt"}""")) is ToolResult.Failure)
+        assertEquals(1, backend.invocations.size)
+        assertFalse(discovery.json.contains("grant-1"))
+        assertFalse(factory.toolingSpecs.any { it.inputSchema.contains(workspaceId) })
+        backend.views = emptyList()
+        assertTrue(factory.invoke(ToolCall("revoked-enumerate", "workspace_list", "{}")) is ToolResult.Denied)
+    }
+
     // ---- normalization -------------------------------------------------------
 
     @Test
@@ -83,6 +180,8 @@ class RootToolExecutorTest {
             "Duplicate JSON keys must fail closed",
         )
         assertNull(RootToolArguments.normalize("file_read_text", """{"workspace_id":"root-ws","relative_path":"../secret"}"""))
+        assertNull(RootToolArguments.normalize("file_read_text", """{"workspace_id":"root-ws","workspace_\u0069d":"other","relative_path":"a"}"""))
+        assertNull(RootToolArguments.normalize("file_read_text", """[{"workspace_id":"root-ws","relative_path":"a"}]"""))
         assertNull(RootToolArguments.normalize("file_glob", """{"workspace_id":"root-ws"}"""))
         assertNull(RootToolArguments.normalize("file_read_text", "[]"))
     }
@@ -445,6 +544,11 @@ private class FakeRootBackend(
     var invokeResult: ToolResult = ToolResult.Value("""{"ok":true}"""),
     var disclosureAllowed: Boolean = true,
 ) : RootToolBackend {
+    var views: List<runtime.mobileagent.tooling.AgentWorkspaceView> = emptyList()
+    override fun workspaceViews() = views
+    var discoverySnapshot: String? = null
+    override fun acceptsDiscoveryContext(snapshotId: String, agentId: String): Boolean =
+        snapshotId == discoverySnapshot && agentId == "agent-1"
     val started = CompletableDeferred<Unit>()
     var gate: CompletableDeferred<Unit>? = null
     var failInvoke: Throwable? = null

@@ -379,11 +379,11 @@ fun openShizuku(context: Context): Boolean {
     }.getOrDefault(false)
 }
 
-/** Opens the installed su manager (Magisk) or its official download page when absent. */
+/** Opens a recognized installed manager, or the app list for other/renamed su managers. */
 fun openRootManager(context: Context): Boolean {
     val manager = context.packageManager.getLaunchIntentForPackage(ROOT_MANAGER_PACKAGE)
         ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    val guide = Intent(Intent.ACTION_VIEW, Uri.parse(ROOT_MANAGER_GUIDE))
+    val guide = Intent(android.provider.Settings.ACTION_MANAGE_APPLICATIONS_SETTINGS)
         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     return runCatching {
         context.startActivity(manager ?: guide)
@@ -392,7 +392,6 @@ fun openRootManager(context: Context): Boolean {
 }
 
 private const val ROOT_MANAGER_PACKAGE = "com.topjohnwu.magisk"
-private const val ROOT_MANAGER_GUIDE = "https://github.com/topjohnwu/Magisk/releases/latest"
 
 private const val SHIZUKU_MANAGER_PACKAGE = "moe.shizuku.privileged.api"
 private const val SHIZUKU_INSTALL_GUIDE = "https://shizuku.rikka.app/download/"

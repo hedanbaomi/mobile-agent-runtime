@@ -79,6 +79,10 @@ class AuthorityPolicyRepository(
             ) {
                 throw AuthorityPolicyConflictException("Authority policy update lost its compare-and-set race")
             }
+            // Selection/mode edits still fence old runs/approvals via the global CAS,
+            // but it is not a fresh Root permission decision. Carry only already-valid durable
+            // Root authorization forward; immutable old snapshots/receipts remain untouched.
+            RootGrantRepository(db, clock).carryForwardPolicyEdit(current, persisted)
             persisted
         }
     }

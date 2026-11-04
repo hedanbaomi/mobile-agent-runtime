@@ -24,13 +24,16 @@ class RootMutationResumeRegressionTest {
     }
 
     @Test
-    fun cancellationAfterLinkPreservesPartialMutationOutcome() {
+    fun cancellationAfterAtomicNoReplaceRenamePreservesUnknownOutcome() {
         Fixture().use { f ->
             f.ops.afterMove = { f.driver.close() }
             val result = f.executor.executeMove(
                 RootTypedArguments.FileMove("ws", "source", "destination"),
             )
-            assertEquals("old!", f.ops.base.readText("source"))
+            // A no-replace move is a single atomic rename: the source name leaves with the syscall,
+            // so a cancel observed afterwards can only be UNKNOWN. There is no link/unlink step
+            // that could delete a swapped source name.
+            assertNull(f.ops.base.readText("source"))
             assertEquals("old!", f.ops.base.readText("destination"))
             assertUnknown(result)
         }
@@ -177,6 +180,18 @@ class RootMutationResumeRegressionTest {
         ) {
             if (denyMove) throw PosixOpException("EACCES")
             base.linkNoReplaceAt(srcParentFd, srcName, dstName)
+            afterMove?.invoke()
+        }
+
+        /** The no-replace move commit is one atomic `renameat2(RENAME_NOREPLACE)`. */
+        override fun renameAtNoReplace(
+            srcParentFd: PosixRetainedFd,
+            srcName: String,
+            dstParentFd: PosixRetainedFd,
+            dstName: String,
+        ) {
+            if (denyMove) throw PosixOpException("EACCES")
+            base.renameReplaceAt(srcParentFd, srcName, dstName)
             afterMove?.invoke()
         }
     }

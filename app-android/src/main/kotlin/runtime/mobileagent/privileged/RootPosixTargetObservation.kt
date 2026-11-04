@@ -47,7 +47,11 @@ internal class RootPosixTargetObservation(private val fdOps: PosixFdOperations) 
             sizeBytes = sizeBytes,
             version = version,
             directoryChain = chain,
-            writeDomain = RootWriteDomainPolicy.assess(fullChain, resolvedTargetParentPath = parentPath),
+            writeDomain = RootWriteDomainPolicy.assess(fullChain, resolvedTargetParentPath = parentPath,
+                workspaceChainStart = ancestorsAboveRoot.size, target = targetCurrent).let { evidence ->
+                if (evidence.isUid0Exclusive && fdOps.usesEmulatedStoragePermissions(targetFd)) evidence.copy(kind = runtime.mobileagent.domain.RootWriteDomainKind.SHARED_DIRECTORY)
+                else evidence
+            },
             contentSha256 = contentDigest,
             ancestorsAboveRoot = ancestorsAboveRoot,
         )

@@ -69,9 +69,8 @@ data class RootChannelUiModel(
  *   [RootChannelUiStatus.READY_UID_0]. Only a live verified `PrivilegedSessionIdentity`
  *   with `privilegeTier == PrivilegeTier.ROOT` (`serviceUid == 0`), matching `authority`,
  *   and active `RootAuthorityRecord` (`consent.enabled && !degraded`) renders `READY_UID_0`.
- * - A degraded epoch (`record.degraded == true`) requires explicit user recovery
- *   acknowledgment on a newer verified `identityEpoch` (`ACKNOWLEDGE_DEGRADED_RECOVERY`);
- *   auto-reconnect alone never clears `DEGRADED_UNCERTAIN_DESCENDANTS_REQUIRES_ACK`.
+ * - A degraded epoch requires explicit recovery, whose controller verifies authenticated drain
+ *   or kernel-reboot proof before rotating identity. This action itself grants no permission.
  * - Approval cards always surface the explicit Root channel and UID 0 badge and never
  *   conceal Root execution behind a generic background job label.
  */
@@ -87,6 +86,7 @@ object RootAuthorityPresentation {
         liveIdentity: PrivilegedSessionIdentity? = null,
         observedMismatchOrNonRootUid: Boolean = false,
         chinese: Boolean = true,
+        livePolicyVersion: Long = record.consent.policyVersion,
     ): RootChannelUiModel {
         require(authority.isRootAuthority) { "RootChannelUiModel requires ROOT_DIRECT or SHIZUKU_ROOT" }
         val isSelected = selectedAuthority == authority
@@ -98,13 +98,13 @@ object RootAuthorityPresentation {
             platformGranted = platformGranted,
             liveIdentity = liveIdentity,
             observedMismatchOrNonRootUid = observedMismatchOrNonRootUid,
+            livePolicyVersion = livePolicyVersion,
         )
-        val actions = resolveActions(status, isSelected, record, liveIdentity)
+        val actions = resolveActions(status, isSelected, record)
         val shellReady = status == RootChannelUiStatus.READY_UID_0 &&
             isSelected &&
             record.consent.enabled &&
-            record.consent.shellEnabled &&
-            dangerousMode != DangerousMode.DISABLED
+            record.consent.shellEnabled
         return RootChannelUiModel(
             authority = authority,
             status = status,
@@ -163,6 +163,7 @@ object RootAuthorityPresentation {
         platformGranted: Boolean,
         liveIdentity: PrivilegedSessionIdentity?,
         observedMismatchOrNonRootUid: Boolean,
+        livePolicyVersion: Long,
     ): RootChannelUiStatus {
         if (record.degraded) {
             return RootChannelUiStatus.DEGRADED_UNCERTAIN_DESCENDANTS_REQUIRES_ACK
@@ -181,6 +182,9 @@ object RootAuthorityPresentation {
             } else {
                 RootChannelUiStatus.UNCONFIGURED
             }
+        }
+        if (record.consent.policyVersion != livePolicyVersion) {
+            return RootChannelUiStatus.AWAITING_ROOT_CONSENT
         }
         return if (platformGranted && liveIdentity != null) {
             RootChannelUiStatus.READY_UID_0
@@ -203,7 +207,6 @@ object RootAuthorityPresentation {
         status: RootChannelUiStatus,
         isSelected: Boolean,
         record: RootAuthorityRecord,
-        liveIdentity: PrivilegedSessionIdentity?,
     ): List<RootChannelAction> = when (status) {
         RootChannelUiStatus.UNCONFIGURED, RootChannelUiStatus.MANAGER_DENIED ->
             listOf(RootChannelAction.REQUEST)
@@ -221,11 +224,7 @@ object RootAuthorityPresentation {
                 listOf(RootChannelAction.SELECT, RootChannelAction.RECONNECT, RootChannelAction.DISABLE)
             }
         RootChannelUiStatus.DEGRADED_UNCERTAIN_DESCENDANTS_REQUIRES_ACK -> {
-            val canAck = liveIdentity != null &&
-                liveIdentity.identityEpoch == record.identityEpoch &&
-                record.degradedEpoch != null &&
-                liveIdentity.identityEpoch > record.degradedEpoch
-            if (canAck) {
+            if (record.consent.enabled) {
                 listOf(RootChannelAction.ACKNOWLEDGE_DEGRADED_RECOVERY, RootChannelAction.DISABLE)
             } else {
                 listOf(RootChannelAction.RECONNECT, RootChannelAction.DISABLE)
@@ -250,9 +249,9 @@ object RootAuthorityPresentation {
             "Enabling a Root channel only permits access to workspaces you explicitly attach and grant; it never enables Root Shell or full-device access automatically."
         }
         val shellNotice = if (chinese) {
-            "Root Shell (UID 0) 需独立二次风险确认，且仅在当前通道已选定、服务就绪且危险模式启用时生效。"
+            "Root Shell (UID 0) 需独立风险确认及工作区授权，并要求当前通道已选定且 UID 0 服务就绪；不受 ADB 危险模式开关控制。"
         } else {
-            "Root Shell (UID 0) requires separate risk confirmation and is active only while this Root channel is selected, live-verified at UID 0, and Dangerous Mode is enabled."
+            "Root Shell (UID 0) requires separate risk confirmation, workspace authorization, and the selected channel's live UID 0 service. The ADB Dangerous Mode switch does not control Root Shell."
         }
         return RootChannelUiText(
             title = title,

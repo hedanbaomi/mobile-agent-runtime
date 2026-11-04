@@ -16,7 +16,10 @@ import runtime.mobileagent.domain.RootServiceTerminalOutcome
 import runtime.mobileagent.skills.tooling.ShellExecRequest
 import runtime.mobileagent.skills.tooling.ShellExecutionStatus
 
-/** Evidence collected for one shell process group before a terminal state is reported. */
+/**
+ * Evidence collected before a terminal state is reported. [leakedDescendants] records that a
+ * descendant outlived natural drain or required cleanup; [settled] records the final complete census.
+ */
 internal data class RootProcessGroupEvidence(
     val leaderExited: Boolean,
     val exitCode: Int?,
@@ -26,28 +29,36 @@ internal data class RootProcessGroupEvidence(
     val settled: Boolean,
 )
 
-/**
- * A direct child exiting is not completion. Any leaked group member, an observed `setsid`/
- * `setpgid` escapee, or a group census that could not be verified keeps the call in
- * `UNKNOWN_OUTCOME` with `requiresDegradedEpoch`, so the session refuses new dispatch.
- */
+/** A direct child exit with observed descendants is uncertain, even when cleanup later succeeds. */
 internal fun classifyRootShellOutcome(evidence: RootProcessGroupEvidence): RootShellRunOutcome {
     if (evidence.timedOut) {
+        // The command outcome stays unknown; a confirmed drain only removes the channel-wide degradation.
         return RootShellRunOutcome(
             status = ShellExecutionStatus.TIMED_OUT,
             exitCode = evidence.exitCode,
             timedOut = true,
             terminalOutcome = RootServiceTerminalOutcome.UNKNOWN_OUTCOME,
-            requiresDegradedEpoch = true,
+            requiresDegradedEpoch = !evidence.settled || !evidence.leaderExited,
         )
     }
-    if (!evidence.settled || evidence.leakedDescendants || !evidence.leaderExited) {
+    if (!evidence.settled || !evidence.leaderExited) {
         return RootShellRunOutcome(
             status = ShellExecutionStatus.UNKNOWN_OUTCOME,
             exitCode = evidence.exitCode,
             cancelled = evidence.cancelled,
             terminalOutcome = RootServiceTerminalOutcome.UNKNOWN_OUTCOME,
             requiresDegradedEpoch = true,
+        )
+    }
+    if (evidence.leakedDescendants) {
+        // Cleanup is verified, so retain UNKNOWN/no-replay for the command outcome without
+        // permanently degrading the Root channel for descendants that are no longer running.
+        return RootShellRunOutcome(
+            status = ShellExecutionStatus.UNKNOWN_OUTCOME,
+            exitCode = evidence.exitCode,
+            cancelled = evidence.cancelled,
+            terminalOutcome = RootServiceTerminalOutcome.UNKNOWN_OUTCOME,
+            requiresDegradedEpoch = false,
         )
     }
     return when {

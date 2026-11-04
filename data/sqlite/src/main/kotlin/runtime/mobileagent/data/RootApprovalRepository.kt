@@ -108,8 +108,7 @@ class RootApprovalRepository(
         val snapshot = requireNotNull(RootSnapshotGrantRepository(db,clock).revalidate(
             request.snapshotId,request.grantId,request.execution,request.taskIdentity,request.sessionIdentity))
         if (snapshot.grant.capability.value == CapabilityId.SHELL_EXECUTE) {
-            require(state.consent.shellEnabled && state.consent.shellRevision == request.execution.shellConsentRevision &&
-                AuthorityPolicyRepository(db).getPolicy().dangerousMode != DangerousMode.DISABLED)
+            require(state.consent.shellEnabled && state.consent.shellRevision == request.execution.shellConsentRevision)
         }
         return snapshot
     }
@@ -134,7 +133,8 @@ class RootApprovalRepository(
                 ),
             )
         }
-        require(AuthorityPolicyRepository(db).getPolicy().dangerousMode == binding.approval.dangerousMode)
+        // Global policyVersion, the immutable snapshot and the exact execution stamp already
+        // fence any intervening policy edit. Root Shell has its own explicit channel consent.
         require(!approvalExpired(binding.approval))
     }
 

@@ -27,6 +27,7 @@ internal object RootManagerAuthorizationReader {
         liveServiceUid: Int,
         requestJson: String,
         override: (() -> RootManagerAuthorization)?,
+        observationEnabled: Boolean = true,
     ): String {
         val request = runCatching {
             RootPrivilegedServiceEngine.json.decodeFromString<RootManagerAuthorizationRequest>(requestJson)
@@ -45,11 +46,14 @@ internal object RootManagerAuthorizationReader {
             return jsonResponse(RootManagerAuthorization.UNSUPPORTED, sessionIdentity, "caller_or_session_mismatch")
         }
         val overridden = override?.invoke()
-        val (authorization, reason) = if (overridden != null) {
-            overridden to "override"
-        } else {
-            observe(sessionIdentity.appUid, sessionIdentity.androidUserId)
+        if (overridden != null) {
+            return jsonResponse(overridden, sessionIdentity, "override")
         }
+        if (!observationEnabled) {
+            return jsonResponse(RootManagerAuthorization.SESSION_GRANTED, sessionIdentity,
+                "manager_observation_unavailable")
+        }
+        val (authorization, reason) = observe(sessionIdentity.appUid, sessionIdentity.androidUserId)
         return jsonResponse(authorization, sessionIdentity, reason)
     }
 
@@ -70,18 +74,27 @@ internal object RootManagerAuthorizationReader {
     )
 
 
-    fun observe(appUid: Int, androidUserId: Int): Pair<RootManagerAuthorization, String> {
-        val sqlite = MANAGER_SQLITE_PATHS.firstOrNull {
-            runCatching { java.io.File(it).canExecute() }.getOrDefault(false)
-        } ?: return RootManagerAuthorization.UNSUPPORTED to "manager_not_found"
-        val major = majorVersion(sqlite)
+    fun observe(
+        appUid: Int,
+        androidUserId: Int,
+        managerBinary: () -> String? = { resolveManagerBinary() },
+        versionOf: (String) -> Int? = { majorVersion(it) },
+        headless: () -> Boolean? = { headlessSystemUser() },
+    ): Pair<RootManagerAuthorization, String> {
+        // Entered only after the host selected a supported Magisk observer
+        // (observationEnabled=true). Losing that observer must fail closed: silently keeping the
+        // session would disable revocation monitoring. Generic authenticated sessions use the
+        // separate observationEnabled=false SESSION_GRANTED entry in authorizationJson.
+        val sqlite = managerBinary()
+            ?: return RootManagerAuthorization.UNSUPPORTED to "manager_not_found"
+        val major = versionOf(sqlite)
             ?: return RootManagerAuthorization.UNSUPPORTED to "manager_version_unknown"
-        if (major !in SUPPORTED_MANAGER_MAJORS) {
+        if (major !in MAGISK_POLICY_SCHEMA_MAJORS) {
             return RootManagerAuthorization.UNSUPPORTED to "manager_version_unsupported:$major"
         }
         // Magisk 31 headless system-user mode forces multiuser = EACH_USER and ignores the DB
-        // setting; this round refuses headless instead of reading the owner's ALLOW.
-        when (headlessSystemUser()) {
+        // setting; this round refuses to interpret the owner's row rather than reading it wrongly.
+        when (headless()) {
             null -> return RootManagerAuthorization.UNKNOWN to "headless_unreadable"
             true -> return RootManagerAuthorization.UNSUPPORTED to "headless_system_user_unsupported"
             false -> Unit
@@ -129,6 +142,47 @@ internal object RootManagerAuthorizationReader {
         )
         return authorization to "magisk_$major"
     }
+
+    /**
+     * Fixed Magisk locations plus every absolute PATH entry.
+     *
+     * Magisk can mount the daemon binary in a random tmpfs directory (for example
+     * `/dev/<id>/magisk`) instead of the historical fixed paths. The already-authenticated UID0
+     * service resolves the same PATH it used for `su`; relative entries are ignored and the
+     * candidate list is bounded so this stays a cheap, local lookup.
+     */
+    internal fun managerBinaryCandidates(
+        fixedPaths: List<String> = MANAGER_SQLITE_PATHS,
+        pathValue: String? = System.getenv("PATH"),
+        suCandidates: List<String> = rootPathSuCandidates(pathValue),
+        canonicalSu: (String) -> String? = { path ->
+            runCatching { java.io.File(path).canonicalFile.takeIf { it.isFile }?.path }
+                .getOrDefault(null)
+        },
+    ): List<String> {
+        val fromPath = pathValue.orEmpty().split(':').asSequence()
+            .map { it.trim() }
+            .filter { it.startsWith("/") }
+            .take(ROOT_PATH_ENTRY_LIMIT)
+            .map { it.trimEnd('/') + "/magisk" }
+        // A fixed su symlink (for example /system/bin/su) canonicalizes into Magisk's random
+        // tmpfs directory. Its parent is the actual daemon directory; resolve it by path only,
+        // never by executing the su/magisk binary and never by scanning /dev.
+        val fromSu = suCandidates.asSequence()
+            .mapNotNull(canonicalSu)
+            .map { it.substringBeforeLast('/', "") + "/magisk" }
+            .filter { it.startsWith("/") }
+        return (fixedPaths.asSequence() + fromPath + fromSu).distinct().toList()
+    }
+
+    /** Resolve the first executable Magisk binary; a directory named `magisk` is not executable. */
+    internal fun resolveManagerBinary(
+        candidates: List<String> = managerBinaryCandidates(),
+        executable: (String) -> Boolean = { path ->
+            runCatching { java.io.File(path).isFile && java.io.File(path).canExecute() }
+                .getOrDefault(false)
+        },
+    ): String? = candidates.firstOrNull(executable)
 
     /** `magisk -v` prints e.g. `26.4:MAGISK:R`; only the major version is used. */
     fun majorVersion(sqlite: String): Int? {

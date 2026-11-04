@@ -22,24 +22,26 @@ data class RootServiceLaunchIdentity(
     val androidUserId: Int,
     val packageName: String,
     val identityEpoch: Long,
+    val observeMagiskPolicy: Boolean = false,
 ) {
     fun toArgs(): List<String> =
-        listOf(appUid.toString(), androidUserId.toString(), packageName, identityEpoch.toString())
+        listOf(appUid.toString(), androidUserId.toString(), packageName, identityEpoch.toString(), observeMagiskPolicy.toString())
 
     companion object {
         private val PACKAGE_NAME = Regex("[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)+")
 
         fun isPackageName(value: String): Boolean = PACKAGE_NAME.matches(value) && value.length <= 255
 
-        /** Parses exactly the four non-secret fields; anything else is rejected (fail closed). */
+        /** Host identity and optional observer selection contain no authorization secret. */
         fun parse(args: List<String>): RootServiceLaunchIdentity? {
-            if (args.size != 4) return null
+            if (args.size != 5) return null
             val uid = args[0].toIntOrNull() ?: return null
             val userId = args[1].toIntOrNull() ?: return null
             val packageName = args[2]
             val epoch = args[3].toLongOrNull() ?: return null
             if (uid <= 0 || userId < 0 || epoch <= 0 || !isPackageName(packageName)) return null
-            return RootServiceLaunchIdentity(uid, userId, packageName, epoch)
+            val observe = args[4].toBooleanStrictOrNull() ?: return null
+            return RootServiceLaunchIdentity(uid, userId, packageName, epoch, observe)
         }
     }
 }

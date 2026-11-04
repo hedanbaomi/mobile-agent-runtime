@@ -77,9 +77,8 @@ object RootApprovalTools {
         CapabilityId.FILE_MOVE,
         CapabilityId.FILE_DELETE,
         CapabilityId.FILE_METADATA_WRITE,
-        CapabilityId.SHELL_EXECUTE,
     )
-    private val supportedCapabilities = readOnlyCapabilities + writeCapabilities
+    private val supportedCapabilities = readOnlyCapabilities + writeCapabilities + CapabilityId.SHELL_EXECUTE
 
     fun isSupportedCapability(capability: CapabilityId): Boolean =
         capability.value in supportedCapabilities

@@ -370,7 +370,9 @@ class RootPrivateDataBoundaryTest {
                 rootRun = true,
             ),
         )
-        listOf("file_get_metadata", "file_set_metadata", "file_apply_patch", "job_start").forEach { rootOrJobTool ->
+        assertTrue(AgentToolConfirmation.requiresExplicitApproval("file_get_metadata", rootRun = true))
+        assertFalse(AgentToolConfirmation.requiresExplicitApproval("file_get_metadata", rootRun = true, rootReadConfirmed = true))
+        listOf("file_set_metadata", "file_apply_patch", "job_start").forEach { rootOrJobTool ->
             assertTrue(
                 AgentToolConfirmation.requiresExplicitApproval(
                     toolName = rootOrJobTool,
@@ -606,6 +608,10 @@ class RootPrivateDataBoundaryTest {
             override fun cancel(requestId: String): Boolean = true
         }
         val engine = RootPrivilegedServiceEngine(
+            selectionPathResolver = { java.nio.file.Paths.get(it) },
+            mountPolicyProvider = { b -> runtime.mobileagent.domain.RootTrustedMountRoots.directoryTree(
+                setOf(b.credentialEncryptedIdentity.mountId, b.deviceProtectedIdentity.mountId)) },
+
             managerAuthorizationOverride = { RootManagerAuthorization.GRANTED },
             fdOps = fd,
             shellRunner = shellRunner,
@@ -647,7 +653,7 @@ class RootPrivateDataBoundaryTest {
                         return RootAcquiredSession(id, RootCallerObservation(10148, 0, "runtime.mobileagent", 0, signing), transport, boundary)
                     }
                 },
-                shellRunner = shellRunner,
+
                 controlPlaneBoundaryOverride = boundary,
                 locatorCipher = TestRootLocatorCipher(),
             )

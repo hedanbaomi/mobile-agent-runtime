@@ -199,6 +199,11 @@ data class SettingsUiState(
     val dangerousModeBuildAllowed: Boolean = false,
     val dangerousModeBuildKnown: Boolean = false,
     val dangerousModeReason: String = "DANGEROUS_MODE_BUILD_DENIED",
+    /**
+     * Root channels that recorded an outcome that could not be confirmed. The settings screen
+     * offers an explicit recovery action for each; nothing recovers automatically.
+     */
+    val rootRecoveryRequired: List<String> = emptyList(),
 )
 
 data class SettingsActions(
@@ -257,6 +262,11 @@ data class SettingsActions(
     val onSetDangerousMode: (String) -> Unit = {},
     val onDisableDangerousMode: () -> Unit = {},
     val onSetRootShellConsent: (String, Boolean) -> Unit = { _, _ -> },
+    /**
+     * Explicit foreground confirmation of an unconfirmed Root outcome for one channel
+     * (`ROOT_DIRECT` / `SHIZUKU_ROOT`). Never implied by reconnect or refresh.
+     */
+    val onAcknowledgeRootRecovery: (String) -> Unit = {},
 )
 
 @Composable
@@ -575,13 +585,15 @@ private fun AuthoritySettingsCard(
         else -> null
     }
     val isRootSelected = state.selectedAuthority == "ROOT_DIRECT" || state.selectedAuthority == "SHIZUKU_ROOT"
-    val shellAvailable = displayedDangerousMode != DangerousMode.DISABLED.name &&
-        selectedProvider?.let {
-            it.platformGrant == "GRANTED" &&
-                it.availability == "READY" &&
-                it.connection == "CONNECTED" &&
-                (!isRootSelected || it.rootShellConsentEnabled)
-        } == true
+    // Root Shell has independent channel consent. ADB-level channels still require Dangerous
+    // Mode, in addition to the same live platform/service facts used by their tool exposure.
+    val shellAvailable = selectedProvider?.let {
+        it.platformGrant == "GRANTED" &&
+            it.availability == "READY" &&
+            it.connection == "CONNECTED" &&
+            (if (isRootSelected) it.rootShellConsentEnabled
+             else displayedDangerousMode != DangerousMode.DISABLED.name)
+    } == true
     val safConfigured = state.safWorkspace.configured || state.safWorkspace.status == "GRANT_LOST"
 
     Card(Modifier.fillMaxWidth().testTag("settings.authorities")) {
@@ -734,6 +746,11 @@ private fun AuthoritySettingsCard(
                 },
                 modifier = Modifier.testTag("settings.authority.root_direct.shell_consent"),
             )
+            RootRecoveryNotice(
+                channel = "ROOT_DIRECT",
+                required = "ROOT_DIRECT" in state.rootRecoveryRequired,
+                onAcknowledge = actions.onAcknowledgeRootRecovery,
+            )
 
             ProviderLifecycleBlock(
                 state = state.shizukuRootAuthority,
@@ -769,6 +786,16 @@ private fun AuthoritySettingsCard(
                     else actions.onSetRootShellConsent("SHIZUKU_ROOT", false)
                 },
                 modifier = Modifier.testTag("settings.authority.shizuku_root.shell_consent"),
+            )
+            RootRecoveryNotice(
+                channel = "SHIZUKU_ROOT",
+                required = "SHIZUKU_ROOT" in state.rootRecoveryRequired,
+                onAcknowledge = actions.onAcknowledgeRootRecovery,
+            )
+            Text(
+                stringResource(R.string.sett_root_shell_independent_hint),
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag("settings.authority.root_shell_independent"),
             )
 
             Column(
@@ -886,13 +913,18 @@ private fun AuthoritySettingsCard(
                         modifier = Modifier.testTag("settings.dangerous_mode.durable_fail_closed"),
                     )
                 }
+                val shellState = stringResource(
+                    if (shellAvailable) R.string.sett_root_shell_state_available
+                    else R.string.sett_root_shell_state_unavailable,
+                )
+                Text(
+                    if (displayedDangerousMode != DangerousMode.DISABLED.name) {
+                        stringResource(R.string.sett_dangerous_mode_enabled_shell_state, shellState)
+                    } else shellState,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.testTag("settings.dangerous_mode.shell_state"),
+                )
                 if (displayedDangerousMode != DangerousMode.DISABLED.name) {
-                    Text(
-                        if (chinese) "危险模式：已开启 · Shell：${if (shellAvailable) "可用" else "当前不可用"}"
-                        else "Dangerous Mode: enabled · Shell: ${if (shellAvailable) "available" else "currently unavailable"}",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.testTag("settings.dangerous_mode.shell_state"),
-                    )
                     Text(
                         when (displayedDangerousMode) {
                             DangerousMode.ENABLED_AUTONOMOUS.name -> if (chinese) "完全自主：不会逐条询问，但仍受能力、选定通道、超时、输出与审计约束。" else "Autonomous: no per-command prompt, while capability, selected channel, timeout, output, and audit gates remain."
@@ -1285,6 +1317,35 @@ private fun BoxedSelector(
     androidx.compose.foundation.layout.Box {
         OutlinedButton(onClick = onOpen, enabled = enabled, modifier = modifier.heightIn(min = 48.dp)) { Text(value, maxLines = 2) }
         menu()
+    }
+}
+
+@Composable
+private fun RootRecoveryNotice(
+    channel: String,
+    required: Boolean,
+    onAcknowledge: (String) -> Unit,
+) {
+    if (!required) return
+    Column(
+        Modifier.fillMaxWidth()
+            .testTag("settings.authority.root_recovery.$channel"),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            stringResource(R.string.sett_root_recovery_required),
+            color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Text(
+            stringResource(R.string.sett_root_recovery_hint),
+            style = MaterialTheme.typography.bodySmall,
+        )
+        OutlinedButton(
+            onClick = { onAcknowledge(channel) },
+            modifier = Modifier.heightIn(min = 48.dp)
+                .testTag("settings.authority.root_recovery.$channel.confirm"),
+        ) { Text(stringResource(R.string.sett_root_recovery_action)) }
     }
 }
 

@@ -19,6 +19,8 @@ data class RootPendingDrainSession(
     val sessionId: String,
     val identityEpoch: Long,
     val requestIds: List<String> = emptyList(),
+    /** Legacy rows lacked per-request completeness, so they retain a session-wide obligation. */
+    val sessionWide: Boolean = true,
 ) {
     fun matches(identity: PrivilegedSessionIdentity): Boolean =
         identity.serviceInstanceId == serviceInstanceId &&
@@ -132,6 +134,7 @@ class RootPendingDrainRepository(
             val session = sessions[index]
             sessions[index] = session.copy(
                 requestIds = (session.requestIds + listOfNotNull(requestKey)).distinct().sorted(),
+                sessionWide = session.sessionWide || requestId == null,
             )
         } else {
             sessions += RootPendingDrainSession(
@@ -139,6 +142,7 @@ class RootPendingDrainRepository(
                 sessionId = identity.sessionId,
                 identityEpoch = identity.identityEpoch,
                 requestIds = listOfNotNull(requestKey).distinct().sorted(),
+                sessionWide = requestId == null,
             )
         }
         val next = RootPendingDrain(
@@ -189,8 +193,31 @@ class RootPendingDrainRepository(
         }
     }
 
+    /** Persist a proof for exactly one authenticated request; never discharge a whole session. */
+    fun markRequestQuiescent(identity: PrivilegedSessionIdentity, requestId: String) = db.transaction {
+        markProvenRequests(identity.authority, listOf(ProvenDrainRequest(requestId, identity.identityEpoch)))
+        val pending = (load(identity.authority) as? RootPendingDrainLoad.Present)?.state ?: return@transaction
+        val sessions = pending.sessions.mapNotNull { session ->
+            if (!session.matches(identity) || requestId !in session.requestIds) return@mapNotNull session
+            val remaining = session.requestIds - requestId
+            if (remaining.isEmpty() && !session.sessionWide) null else session.copy(requestIds = remaining)
+        }
+        if (sessions.isEmpty()) {
+            db.execute("DELETE FROM app_prefs WHERE key=?", listOf(key(identity.authority)))
+        } else if (sessions != pending.sessions) {
+            db.execute("UPDATE app_prefs SET value=? WHERE key=?",
+                listOf(json.encodeToString(pending.copy(sessions = sessions)), key(identity.authority)))
+        }
+    }
+
     fun provenRequests(authority: Authority): Set<String> =
         db.transaction { provenEntriesLocked(authority).mapTo(linkedSetOf()) { it.requestId } }
+
+    internal fun forgetDeletedReceipt(authority: Authority, requestId: String) {
+        val remaining = provenEntriesLocked(authority).filterNot { it.requestId == requestId }
+        if (remaining.isEmpty()) db.execute("DELETE FROM app_prefs WHERE key=?", listOf(provenKey(authority)))
+        else db.execute("UPDATE app_prefs SET value=? WHERE key=?", listOf(json.encodeToString(remaining), provenKey(authority)))
+    }
 
     private fun provenEntriesLocked(authority: Authority): List<ProvenDrainRequest> {
         val raw = db.query("SELECT value FROM app_prefs WHERE key=?", listOf(provenKey(authority)))
@@ -228,6 +255,12 @@ class RootPendingDrainRepository(
     /** True only when nothing at all remains recorded for this authority. */
     fun isMissing(load: RootPendingDrainLoad): Boolean = load is RootPendingDrainLoad.Missing
 
+    /** Called only inside the recovery transaction after a later OS boot was verified. */
+    internal fun clearAfterVerifiedDeviceRestart(authority: Authority) {
+        check(load(authority) !is RootPendingDrainLoad.Invalid)
+        db.execute("DELETE FROM app_prefs WHERE key=?", listOf(key(authority)))
+    }
+
     private fun key(authority: Authority): String = "$KEY_PREFIX${authority.name}"
 
     private fun provenKey(authority: Authority): String = "$PROVEN_PREFIX${authority.name}"
@@ -235,10 +268,12 @@ class RootPendingDrainRepository(
     companion object {
         const val KEY_PREFIX = "root_pending_drain:"
         const val PROVEN_PREFIX = "root_drain_proven:"
+        const val BOOT_PREFIX = "root_session_boot:"
+        const val KERNEL_BOOT_PREFIX = "${BOOT_PREFIX}kernel-v1:"
         private const val MAX_PROVEN_REQUESTS = 4_096
 
         fun isPendingDrainKey(key: String): Boolean =
-            key.startsWith(KEY_PREFIX) || key.startsWith(PROVEN_PREFIX)
+            key.startsWith(KEY_PREFIX) || key.startsWith(PROVEN_PREFIX) || key.startsWith(BOOT_PREFIX)
     }
 
     private val json = Json { ignoreUnknownKeys = false; explicitNulls = false }

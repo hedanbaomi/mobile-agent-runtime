@@ -387,70 +387,10 @@ class NioPrivilegedFileEngine(
 
     private fun applyPatchText(current: String, patch: String, format: WiredAdbPatchFormat): String? = when (format) {
         WiredAdbPatchFormat.REPLACE -> patch.takeIf { !it.contains('\u0000') }
-        WiredAdbPatchFormat.UNIFIED_DIFF -> applyUnifiedDiff(current, patch)
+        WiredAdbPatchFormat.UNIFIED_DIFF -> runtime.mobileagent.domain.UnifiedTextPatch.apply(current, patch)
     }
 
     /** Small, deterministic unified-diff parser; it accepts no paths or commands. */
-    private fun applyUnifiedDiff(current: String, patch: String): String? {
-        val source = current.split("\n", ignoreCase = false, limit = Int.MAX_VALUE)
-        val diff = patch.split("\n", ignoreCase = false, limit = Int.MAX_VALUE)
-        if (diff.isEmpty()) return null
-        var index = 0
-        if (diff.getOrNull(0)?.startsWith("--- ") == true) {
-            if (diff.getOrNull(1)?.startsWith("+++ ") != true) return null
-            index = 2
-        }
-        val output = ArrayList<String>(source.size)
-        var sourceIndex = 0
-        var hunkCount = 0
-        val hunkPattern = Regex("^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@.*$")
-        while (index < diff.size) {
-            if (diff[index].isEmpty() && index == diff.lastIndex) break
-            val header = hunkPattern.matchEntire(diff[index]) ?: return null
-            index++
-            val oldStart = header.groupValues[1].toIntOrNull() ?: return null
-            val oldCount = header.groupValues[2].takeIf { it.isNotEmpty() }?.toIntOrNull() ?: 1
-            val newCount = header.groupValues[4].takeIf { it.isNotEmpty() }?.toIntOrNull() ?: 1
-            if (oldStart < 0 || oldCount < 0 || newCount < 0) return null
-            val targetIndex = if (oldStart == 0) 0 else oldStart - 1
-            if (targetIndex < sourceIndex || targetIndex > source.size) return null
-            while (sourceIndex < targetIndex) output += source[sourceIndex++]
-            var consumedOld = 0
-            var consumedNew = 0
-            while (index < diff.size && !diff[index].startsWith("@@ ")) {
-                val line = diff[index++]
-                if (line.isEmpty() && index == diff.size) break
-                if (line == "\\ No newline at end of file") continue
-                if (line.isEmpty()) return null
-                when (line[0]) {
-                    ' ' -> {
-                        if (consumedOld >= oldCount || sourceIndex >= source.size || source[sourceIndex] != line.substring(1)) return null
-                        output += source[sourceIndex++]
-                        consumedOld++
-                        consumedNew++
-                    }
-                    '-' -> {
-                        if (consumedOld >= oldCount || sourceIndex >= source.size || source[sourceIndex] != line.substring(1)) return null
-                        sourceIndex++
-                        consumedOld++
-                    }
-                    '+' -> {
-                        if (consumedNew >= newCount) return null
-                        val added = line.substring(1)
-                        if (added.contains('\u0000')) return null
-                        output += added
-                        consumedNew++
-                    }
-                    else -> return null
-                }
-            }
-            if (consumedOld != oldCount || consumedNew != newCount) return null
-            hunkCount++
-        }
-        if (hunkCount == 0) return null
-        while (sourceIndex < source.size) output += source[sourceIndex++]
-        return output.joinToString("\n")
-    }
 
     private fun write(request: WiredAdbFileRequest): WiredAdbFileResult {
         val segments = WiredAdbPathPolicy.parse(request.relativePath, allowRoot = false)

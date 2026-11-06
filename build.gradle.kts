@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import org.jetbrains.kotlin.gradle.tasks.CompileUsingKotlinDaemon
+
 plugins {
     id("runtime.mobileagent.license-guard")
     alias(libs.plugins.android.application) apply false
@@ -25,6 +27,22 @@ if (developerAbi != null) {
 extra["debugNativeAbis"] = developerAbi?.let(::listOf) ?: supportedAndroidAbis
 extra["pinnedArtifactCacheRoot"] = providers.gradleProperty("pinnedArtifactCache").orNull
     ?.takeIf { it.isNotBlank() }?.let { file(it) } ?: gradle.gradleUserHomeDir.resolve("mobileagent-pinned")
+
+// Keep the Kotlin compiler separate from the 4 GiB Gradle/R8 JVM on workstations and CI.
+if (!providers.gradleProperty("kotlin.daemon.jvmargs").isPresent &&
+    !providers.systemProperty("kotlin.daemon.jvm.options").isPresent &&
+    !providers.gradleProperty("kotlin.compiler.execution.strategy").isPresent
+) {
+    gradle.projectsEvaluated {
+        subprojects {
+            tasks.withType<CompileUsingKotlinDaemon>().configureEach {
+                if (kotlinDaemonJvmArguments.getOrElse(emptyList()).isEmpty()) {
+                    kotlinDaemonJvmArguments.convention(listOf("-Xmx2g"))
+                }
+            }
+        }
+    }
+}
 
 // Every resolvable configuration participates in dependency locking.  The
 // checked-in lockfiles are generated with `--write-locks` and are verified by

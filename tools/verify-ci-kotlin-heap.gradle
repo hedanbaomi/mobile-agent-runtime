@@ -1,18 +1,29 @@
 // SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import java.util.concurrent.atomic.AtomicReference
+
 // Inspect tasks already selected by the packaging gate, including warm or cached ones.
 gradle.taskGraph.whenReady { graph ->
     if (gradle.parent != null) return
     def compilers = graph.allTasks.findAll {
         it.project.path == ':app-android' && it.hasProperty('kotlinDaemonJvmArguments')
-    }
+    }.toSet()
     if (compilers.empty) throw new GradleException('No Android Kotlin compiler tasks in the evidence gate')
     compilers.each { task ->
         def heaps = task.kotlinDaemonJvmArguments.getOrElse([]).findAll { it.startsWith('-Xmx') }
         if (task.compilerExecutionStrategy.get().name() != 'DAEMON' || heaps != ['-Xmx2g']) {
             throw new GradleException("Unexpected Kotlin compiler strategy or heap for " + task.path)
         }
+    }
+    def active = new AtomicReference()
+    graph.beforeTask { task ->
+        if (compilers.contains(task) && !active.compareAndSet(null, task)) {
+            throw new GradleException("Concurrent Android Kotlin compilations: " + active.get()?.path + " and " + task.path)
+        }
+    }
+    graph.afterTask { task, state ->
+        if (compilers.contains(task)) active.compareAndSet(task, null)
     }
     println("Verified Kotlin compiler daemon -Xmx2g on " + compilers.size() + " Android tasks in this build")
 }

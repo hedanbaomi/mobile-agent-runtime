@@ -58,6 +58,7 @@ val usearchGeneratedLicense = layout.buildDirectory.file("generated/vector-asset
 val usearchGeneratedNotice = layout.buildDirectory.file("generated/vector-assets/licenses/usearch-2.25.1/NOTICE.txt")
 
 val prepareUsearchSource = tasks.register("prepareUsearchSource") {
+    mustRunAfter("clean")
     inputs.property("usearchRevision", usearchRevision)
     inputs.property("usearchSourceSha256", usearchSourceSha256)
     inputs.property("usearchSourceUrl", usearchSourceUrl)
@@ -103,7 +104,9 @@ val prepareUsearchSource = tasks.register("prepareUsearchSource") {
 }
 
 tasks.named("preBuild").configure { dependsOn(prepareUsearchSource) }
-tasks.matching { it.name.startsWith("externalNativeBuild") }.configureEach { dependsOn(prepareUsearchSource) }
+// Native clean may run before the module's clean deletes build/. Prepare inputs for the consumers.
+tasks.matching { it.name.startsWith("configureCMake") || it.name.startsWith("buildCMake") }
+    .configureEach { dependsOn(prepareUsearchSource) }
 
 dependencies {
     implementation(project(":shared:domain"))

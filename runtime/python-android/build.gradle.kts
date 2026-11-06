@@ -88,6 +88,7 @@ val resolveOfficialCpython = tasks.register("resolveOfficialCpython") {
 }
 
 val prepareOfficialCpython = tasks.register("prepareOfficialCpython") {
+    mustRunAfter("clean")
     dependsOn(resolveOfficialCpython)
     inputs.files(officialCpythonSha256.values.map { pinnedArtifactCacheRoot.resolve(it) })
     inputs.file(safeStdlibRegistryFile)
@@ -357,7 +358,7 @@ tasks.named("preBuild").configure {
     dependsOn(verifyOfficialCpython, stageOfficialCpythonLibraries, packagePythonAssets)
 }
 tasks.configureEach {
-    if (name.contains("configureCMake") || name.contains("externalNativeBuild")) {
+    if (name.startsWith("configureCMake") || name.startsWith("buildCMake")) {
         dependsOn(verifyOfficialCpython, stageOfficialCpythonLibraries, packagePythonAssets)
     }
 }

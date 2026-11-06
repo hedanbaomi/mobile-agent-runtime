@@ -1,9 +1,13 @@
-﻿// SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+// SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 
 package runtime.mobileagent.knowledge
 
 import kotlinx.serialization.Serializable
+import runtime.mobileagent.domain.DEFAULT_IMAGE_INPUT_UNITS
+import runtime.mobileagent.domain.conservativeUtf8Units
+import runtime.mobileagent.domain.saturatingAddUnits
+import runtime.mobileagent.domain.saturatingMultiplyUnits
 
 /**
  * Explicitly conservative **admission estimate** for planning and guarding one
@@ -49,8 +53,7 @@ import kotlinx.serialization.Serializable
  *   a shared pipeline admission reservation. null means no extra cap.
  * @param outputReserveTokens room reserved for the model answer; planning only,
  *   never a wire output cap.
- * @param imageInputUnits fixed per-image reservation (default 4096, matching
- *   [runtime.mobileagent.provider.RequestInputBudget.IMAGE_UNITS_PER_IMAGE]).
+ * @param imageInputUnits fixed per-image reservation, defaulting to [DEFAULT_IMAGE_INPUT_UNITS].
  *   A heuristic reservation, not a measured provider image cost.
  * @param requestOverheadUnits fixed envelope for prompt, schema and parameter
  *   layers the planner cannot see. Callers that measured the exact envelope
@@ -61,7 +64,7 @@ data class VisionRequestBudget(
     val contextWindowTokens: Int? = null,
     val availableInputUnits: Long? = null,
     val outputReserveTokens: Int = 4096,
-    val imageInputUnits: Long = 4096,
+    val imageInputUnits: Long = DEFAULT_IMAGE_INPUT_UNITS,
     val requestOverheadUnits: Long = 1024,
 ) {
     init {
@@ -136,49 +139,4 @@ data class VisionRequestBudget(
          */
         const val UNKNOWN_WINDOW_TOKENS = 32_768L
     }
-}
-
-/**
- * Conservative UTF-8 byte length of [text].
- *
- * Well-formed text is measured exactly (4 bytes per surrogate pair, 3 bytes
- * per other non-ASCII BMP character). Unpaired surrogates are charged 3 bytes
- * (the UTF-8 length of the replacement character) instead of the JDK encoder's
- * lossy 1-byte `?`, so malformed input can never understate the estimate.
- */
-internal fun conservativeUtf8Units(text: String): Long {
-    if (text.isEmpty()) return 0L
-    var units = 0L
-    var index = 0
-    while (index < text.length) {
-        val code = text[index].code
-        when {
-            code < 0x80 -> units = saturatingAddUnits(units, 1L)
-            code < 0x800 -> units = saturatingAddUnits(units, 2L)
-            Character.isHighSurrogate(text[index]) &&
-                index + 1 < text.length &&
-                Character.isLowSurrogate(text[index + 1]) -> {
-                units = saturatingAddUnits(units, 4L)
-                index++
-            }
-            else -> units = saturatingAddUnits(units, 3L)
-        }
-        index++
-    }
-    return units
-}
-
-/** Saturating addition: overflow clamps to [Long.MAX_VALUE], never wraps. */
-internal fun saturatingAddUnits(current: Long, extra: Long): Long = when {
-    extra > 0L && current > Long.MAX_VALUE - extra -> Long.MAX_VALUE
-    extra < 0L && current < Long.MIN_VALUE - extra -> Long.MIN_VALUE
-    else -> current + extra
-}
-
-/** Saturating non-negative multiplication: overflow clamps to [Long.MAX_VALUE]. */
-internal fun saturatingMultiplyUnits(left: Long, right: Long): Long = when {
-    left == 0L || right == 0L -> 0L
-    left < 0L || right < 0L -> Long.MAX_VALUE
-    left > Long.MAX_VALUE / right -> Long.MAX_VALUE
-    else -> left * right
 }

@@ -26,8 +26,8 @@
     "app-android/src/main/kotlin/runtime/mobileagent/shizuku/ShizukuDeviceWorkspaceProvider.kt": 202,
     "app-android/src/main/kotlin/runtime/mobileagent/shizuku/ShizukuShellRunner.kt": 124,
     "app-android/src/main/kotlin/runtime/mobileagent/shizuku/ShizukuWorkspaceFileStore.kt": 239,
-    "app-android/src/main/kotlin/runtime/mobileagent/tooling/ShellToolExecutor.kt": 120,
-    "app-android/src/main/kotlin/runtime/mobileagent/tooling/UnifiedWorkspaceToolExecutor.kt": 279,
+    "app-android/src/main/kotlin/runtime/mobileagent/tooling/ShellToolExecutor.kt": 117,
+    "app-android/src/main/kotlin/runtime/mobileagent/tooling/UnifiedWorkspaceToolExecutor.kt": 253,
     "app-android/src/main/kotlin/runtime/mobileagent/ui/MainScreens.kt": 313,
     "app-android/src/main/kotlin/runtime/mobileagent/wired/WiredAdbAuthorityBridge.kt": 253,
     "app-android/src/main/kotlin/runtime/mobileagent/wired/WiredAdbFileEngine.kt": 221,
@@ -52,7 +52,7 @@
     "data/sqlite/src/main/kotlin/runtime/mobileagent/data/AgentRepository.kt": 81,
     "data/sqlite/src/main/kotlin/runtime/mobileagent/data/AnnouncementRepository.kt": 96,
     "data/sqlite/src/main/kotlin/runtime/mobileagent/data/AuthorityRepository.kt": 199,
-    "data/sqlite/src/main/kotlin/runtime/mobileagent/data/KnowledgeRepository.kt": 994,
+    "data/sqlite/src/main/kotlin/runtime/mobileagent/data/KnowledgeRepository.kt": 990,
     "data/sqlite/src/main/kotlin/runtime/mobileagent/data/Migrations.kt": 360,
     "data/sqlite/src/main/kotlin/runtime/mobileagent/data/Repositories.kt": 79,
     "data/sqlite/src/main/kotlin/runtime/mobileagent/data/TransferRepository.kt": 289,
@@ -67,7 +67,6 @@
     "runtime/python-android/src/main/kotlin/runtime/mobileagent/python/IsolatedPythonRuntime.kt": 84,
     "desktop/bridge/src/main/kotlin/runtime/mobileagent/desktop/bridge/AuthenticatedBridge.kt": 86,
     "desktop/bridge/src/main/kotlin/runtime/mobileagent/desktop/bridge/WiredAdbTypedFiles.kt": 93,
-    "shared/skills-api/src/main/kotlin/runtime/mobileagent/skills/ReadBatchToolExecutor.kt": 84,
     "shared/skills-api/src/main/kotlin/runtime/mobileagent/skills/ManagedJobToolExecutor.kt": 99
   }
 }

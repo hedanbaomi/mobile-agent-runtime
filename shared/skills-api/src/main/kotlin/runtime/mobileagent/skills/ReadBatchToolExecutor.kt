@@ -16,7 +16,6 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import runtime.mobileagent.skills.tooling.ToolErrorCode
 
@@ -24,47 +23,10 @@ import runtime.mobileagent.skills.tooling.ToolErrorCode
 internal const val READ_BATCH_TOOL_NAME = RunControlTools.READ_BATCH
 
 /**
- * Transparent [ToolExecutor] wrapper that adds one explicit `read_batch` tool.
- *
- * ## Why an explicit batch instead of a smarter single-call loop
- *
- * The existing single-call loop is correct and stays untouched; this wrapper
- * only adds a *declared* batch.  Every child call still goes through the
- * delegate's own `invoke`, so the delegate keeps its live authorization,
- * approval, capability, and replay semantics for each child: a batch can never
- * become a way to skip a per-call gate.
- *
- * ## Safety properties
- *
- * - **Explicit read-only allowlist.** Only names passed as `eligibleTools` may
- *   appear in a batch, and a name the delegate declares side-effectful
- *   (`ToolSpec.sideEffect == true`) is never eligible even if listed.  The
- *   default allowlist is empty.
- * - **Batch calls still cost budget.** The batch asks [reserveCalls] for one
- *   reservation covering every child call *before* dispatching anything; only
- *   the granted prefix is dispatched and the rest are reported as
- *   `BUDGET_EXHAUSTED`.  A single outer tool call therefore cannot buy unbounded
- *   child calls, which is exactly why this seam exists instead of a hidden
- *   fan-out.
- * - **No silent approval.** If a child answers [ToolResult.NeedsApproval] the
- *   batch reports a `NEEDS_APPROVAL` entry and never calls
- *   [ToolExecutor.approve], so a batch cannot widen the user's approval.
- * - **Per-child call-id dedup.** Child call ids are unique for the whole Run; a
- *   repeat is rejected with `CALL_ID_REPLAY` and never double-dispatched.
- * - **Bounded and ordered.** At most [ReadBatchBudget.maxCallsPerBatch] children
- *   and [ReadBatchBudget.maxConcurrency] running at once.  Results keep the
- *   requested order regardless of completion order.
- * - **Cancellation stops started work only.** Cancelling the batch cancels the
- *   children that already started and never starts the rest.
- * - **Disclosure is revalidated.** Every child call that produced content must
- *   still pass `replayAuthorized` before a cached batch result is disclosed
- *   again; otherwise the payload is purged and replay is denied.
- * - **Nothing leaks at teardown.** [close] cancels and joins every in-flight
- *   batch.  Every child is side-effect-free, so a cancelled or failing child
- *   changed nothing and settles as a definite stop or failure.  Only a child the
- *   delegate itself reports as [ToolResult.UnknownOutcome], or one lost to an
- *   unexpected error, is unknown; [hasUnknownOutcomes] reports those so the Run
- *   is persisted as an unknown outcome instead of a false completion.
+ * Runs bounded read batches in request order. [ReadBatchProtocol] validates input, filters
+ * the explicit allowlist and supplies the schema. The delegate authorizes each actual call.
+ * Child IDs are single-use within the Run. Reserve the budget before dispatch; a child that
+ * needs approval is reported to the caller. Replays revalidate captured child results.
  *
  * @param delegate executor whose specs and live gates are reused; all
  *   non-batch calls are forwarded unchanged.
@@ -108,12 +70,7 @@ class ReadBatchToolExecutor(
      * declarations; `sideEffect` is only ever used to *narrow* the allowlist,
      * never to grant eligibility.
      */
-    private val frozenEligible: Set<String> = eligibleTools
-        .filter { name ->
-            val spec = delegateByName[name]
-            spec != null && !spec.sideEffect && name !in RESERVED_NAMES
-        }
-        .toSet()
+    private val frozenEligible: Set<String> = ReadBatchProtocol.eligibleReadTools(eligibleTools, delegateByName)
 
     private val frozenApprovalRequired: Set<String> = approvalRequiredTools intersect frozenEligible
 
@@ -127,19 +84,9 @@ class ReadBatchToolExecutor(
         }
     }
 
-    private val readBatchSpec = ToolSpec(
-        name = READ_BATCH_TOOL_NAME,
-        description = "Run up to ${budget.maxCallsPerBatch} eligible read tool calls in one explicit batch. " +
-            "Results keep the requested order. A batch never approves a call: a child that needs approval " +
-            "is reported as NEEDS_APPROVAL.",
-        parametersJson = readBatchSchema(frozenEligible.sorted(), budget.maxCallsPerBatch),
-        capability = "",
-        sideEffect = false,
-    )
-
     override val specs: List<ToolSpec> = buildList {
-        delegateSpecs.forEach { spec -> if (spec.name != READ_BATCH_TOOL_NAME) add(spec) }
-        add(readBatchSpec)
+        addAll(delegateSpecs)
+        add(ReadBatchProtocol.spec(frozenEligible, budget.maxCallsPerBatch))
     }
 
     private val calls = linkedMapOf<String, OuterCall>()
@@ -303,32 +250,17 @@ class ReadBatchToolExecutor(
     // ------------------------------------------------------------------ batching
 
     private suspend fun runBatch(entry: OuterCall, batchApproved: Boolean = false): ToolResult {
-        val args = parseObject(entry.call.argumentsJson) ?: return ToolResult.Invalid(ARGS_INCOMPLETE)
-        strictKeys(args, READ_BATCH_KEYS)?.let { return ToolResult.Invalid(it) }
-        val rawCalls = args["calls"] as? JsonArray
-            ?: return ToolResult.Invalid("calls must be a JSON array")
-        if (rawCalls.isEmpty()) return ToolResult.Invalid("calls must not be empty")
-        if (rawCalls.size > budget.maxCallsPerBatch) {
-            return ToolResult.Invalid("calls exceeds the per-batch limit of ${budget.maxCallsPerBatch}")
-        }
-        val requests = ArrayList<ChildRequest>(rawCalls.size)
-        rawCalls.forEachIndexed { index, element ->
-            val child = element as? JsonObject
-                ?: return ToolResult.Invalid("calls[$index] must be a JSON object")
-            strictKeys(child, CHILD_KEYS)?.let { return ToolResult.Invalid("calls[$index]: $it") }
-            val childCallId = child.stringOrNull("call_id")
-                ?: return ToolResult.Invalid("calls[$index].call_id must be a nonblank string")
-            val tool = child.stringOrNull("tool")
-                ?: return ToolResult.Invalid("calls[$index].tool must be a nonblank string")
-            val arguments = child["arguments"] as? JsonObject
-                ?: return ToolResult.Invalid("calls[$index].arguments must be a JSON object")
-            val argumentsJson = arguments.toString()
-            if (argumentsJson.toByteArray(StandardCharsets.UTF_8).size > budget.maxArgumentsBytes) {
-                return ToolResult.Invalid("calls[$index].arguments exceed the batch argument budget")
+        val requests = mutableListOf<ChildRequest>()
+        val error = ReadBatchProtocol.visitChildren(entry.call.argumentsJson, budget.maxCallsPerBatch) { index, child ->
+            val arguments = child.arguments.toString()
+            if (arguments.toByteArray(StandardCharsets.UTF_8).size > budget.maxArgumentsBytes) {
+                return@visitChildren "calls[$index].arguments exceed the batch argument budget"
             }
-            val runtimeCallId = childCallId(entry.call.callId, index, childCallId)
-            requests.add(ChildRequest(index, childCallId, runtimeCallId, tool, argumentsJson))
+            val runtimeId = childCallId(entry.call.callId, index, child.callId)
+            requests += ChildRequest(index, child.callId, runtimeId, child.tool, arguments)
+            null
         }
+        if (error != null) return ToolResult.Invalid(error)
 
         if (!batchApproved && requests.filter { it.tool in frozenEligible }.any { request ->
             request.tool in frozenApprovalRequired || !guardBoolean {
@@ -345,9 +277,8 @@ class ReadBatchToolExecutor(
         val dispatchable = ArrayList<ChildRequest>(requests.size)
         synchronized(lock) {
             requests.forEach { request ->
-                val spec = delegateByName[request.tool]
                 when {
-                    spec == null || spec.sideEffect || request.tool !in frozenEligible ->
+                    request.tool !in frozenEligible ->
                         outcomes[request.index] =
                             failureEntry(request, DENIED_STATUS, ToolErrorCode.CAPABILITY_DENIED, NOT_ELIGIBLE)
                     !usedChildCallIds.add(request.childCallId) ->
@@ -706,7 +637,6 @@ class ReadBatchToolExecutor(
     )
 
     private companion object {
-        const val ARGS_INCOMPLETE = "Tool arguments are incomplete JSON"
         const val ALREADY_RUNNING = "Tool call is already executing; use a new call ID"
         const val CALL_ID_REUSED = "Tool call ID was already used for a different request"
         const val CLOSED_REASON = "Read batch executor is closed"
@@ -734,10 +664,6 @@ class ReadBatchToolExecutor(
         const val INTERNAL_NOTICE = "The child call failed"
         const val APPROVAL_NOTICE =
             "This child call needs its own approval; a batch never approves it. Call the tool directly to approve."
-
-        val READ_BATCH_KEYS = setOf("calls")
-        val CHILD_KEYS = setOf("call_id", "tool", "arguments")
-        val RESERVED_NAMES = RunControlTools.ALL
     }
 }
 
@@ -746,7 +672,7 @@ data class ReadBatchBudget(
     /** Children running at once. */
     val maxConcurrency: Int = 2,
     /** Hard ceiling for `calls`, matching the model-facing schema. */
-    val maxCallsPerBatch: Int = 4,
+    val maxCallsPerBatch: Int = MAX_BATCH_CALLS,
     /** Embedded result bytes per child. */
     val maxResultBytesPerCall: Int = 32 * 1024,
     /** Embedded result bytes across the whole batch. */
@@ -767,36 +693,6 @@ data class ReadBatchBudget(
         /** Protocol limit for one explicit batch. */
         const val MAX_BATCH_CALLS = 4
     }
-}
-
-private fun readBatchSchema(names: List<String>, maxCalls: Int): String {
-    val enum = names.joinToString(separator = ",") { "\"$it\"" }
-    return """{"type":"object","additionalProperties":false,"required":["calls"],""" +
-        """"properties":{"calls":{"type":"array","minItems":1,"maxItems":$maxCalls,""" +
-        """"description":"Read calls to run together, in order.",""" +
-        """"items":{"type":"object","additionalProperties":false,""" +
-        """"required":["call_id","tool","arguments"],"properties":{""" +
-        """"call_id":{"type":"string","minLength":1,"maxLength":128},""" +
-        """"tool":{"type":"string","enum":[$enum]},""" +
-        """"arguments":{"type":"object","additionalProperties":true,""" +
-        """"description":"Arguments object passed unchanged to the selected tool."}}}}}}"""
-}
-
-private fun parseObject(raw: String): JsonObject? {
-    if (raw.isBlank()) return null
-    return runCatching { Json.parseToJsonElement(raw) }.getOrNull() as? JsonObject
-}
-
-private fun JsonObject.stringOrNull(key: String): String? {
-    val primitive = this[key] as? JsonPrimitive ?: return null
-    if (!primitive.isString) return null
-    return primitive.contentOrNull?.takeIf { it.isNotBlank() }
-}
-
-private fun strictKeys(args: JsonObject, allowed: Set<String>): String? {
-    val unknown = args.keys - allowed
-    if (unknown.isEmpty()) return null
-    return "Unknown parameter: ${unknown.sorted().joinToString()}"
 }
 
 private fun str(value: String): JsonElement = JsonPrimitive(value)

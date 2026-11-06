@@ -97,8 +97,8 @@ object ModelToolArguments {
 
     /** One model schema vocabulary; platform capability differences remain explicit inputs. */
     fun workspaceSchema(name: String, root: Boolean = false): String {
-        if (name == "file_glob") return WorkspaceSearchProtocol.globSpec.inputSchema
-        if (name == "file_grep") return WorkspaceSearchProtocol.grepSpec.inputSchema
+        if (name == WorkspaceToolNames.FILE_GLOB) return WorkspaceSearchProtocol.globSchema
+        if (name == WorkspaceToolNames.FILE_GREP) return WorkspaceSearchProtocol.grepSchema
         val properties = linkedMapOf<String, JsonElement>()
         fun string(name: String, max: Int, min: Int? = null) {
             properties[name] = buildJsonObject { put("type", "string"); put("maxLength", max); min?.let { put("minLength", it) } }

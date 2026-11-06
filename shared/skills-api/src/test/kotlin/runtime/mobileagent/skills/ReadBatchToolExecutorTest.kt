@@ -258,6 +258,72 @@ class ReadBatchToolExecutorTest {
     }
 
     @Test
+    fun malformedEnvelopeKeepsItsRejectionReasonAndPriority() = runTest {
+        val delegate = FakeBatchDelegate(specs)
+        val minted = mutableListOf<String>()
+        val batch = ReadBatchToolExecutor(delegate, { true }, { true }, { it }, eligible,
+            childCallId = { _, _, id ->
+                minted += id
+                id
+            },
+        )
+        suspend fun reason(callId: String, arguments: String): String =
+            (batch.invoke(ToolCall(callId, READ_BATCH_TOOL_NAME, arguments)) as? ToolResult.Invalid)
+                ?.reason ?: fail("expected Invalid for $arguments")
+
+        assertEquals("Tool arguments are incomplete JSON", reason("e1", "{"))
+        assertEquals("Unknown parameter: extra", reason("e2", """{"calls":[],"extra":1}"""))
+        assertEquals("calls must be a JSON array", reason("e3", """{"calls":{}}"""))
+        assertEquals("calls must not be empty", reason("e4", """{"calls":[]}"""))
+        // The count check precedes child parsing, so this stays the reported error
+        // even though the fifth child is malformed too.
+        val tooMany = (1..5).joinToString(prefix = """{"calls":[""", separator = ",", postfix = "]}") { index ->
+            if (index == 5) """{"tool":"kb_search"}"""
+            else """{"call_id":"c$index","tool":"kb_search","arguments":{}}"""
+        }
+        assertEquals("calls exceeds the per-batch limit of 4", reason("e5", tooMany))
+        assertEquals("calls[0] must be a JSON object", reason("e6", """{"calls":["nope"]}"""))
+        assertEquals(
+            "calls[0]: Unknown parameter: extra",
+            reason("e7", """{"calls":[{"call_id":"c","tool":"kb_search","arguments":{},"extra":1}]}"""),
+        )
+        assertEquals(
+            "calls[0].call_id must be a nonblank string",
+            reason("e8", """{"calls":[{"tool":"kb_search","arguments":{}}]}"""),
+        )
+        assertEquals(
+            "calls[0].tool must be a nonblank string",
+            reason("e9", """{"calls":[{"call_id":"c","arguments":{}}]}"""),
+        )
+        assertEquals(
+            "calls[0].arguments must be a JSON object",
+            reason("e10", """{"calls":[{"call_id":"c","tool":"kb_search"}]}"""),
+        )
+        val validPrefix = """{"calls":[{"call_id":"prefix","tool":"kb_search","arguments":{}},null]}"""
+        assertEquals("calls[1] must be a JSON object", reason("prefix-error", validPrefix))
+        assertEquals("prefix", minted.last())
+        assertTrue(delegate.dispatched.isEmpty(), "a malformed envelope dispatches nothing")
+    }
+
+    @Test
+    fun childArgumentsBudgetKeepsItsByteBoundary() = runTest {
+        val delegate = FakeBatchDelegate(specs)
+        val arguments = """{"q":"1234567890"}"""
+        assertEquals(18, arguments.toByteArray(Charsets.UTF_8).size)
+        val request = """{"calls":[{"call_id":"c1","tool":"kb_search","arguments":$arguments}]}"""
+        assertTrue(
+            executor(delegate, budget = ReadBatchBudget(maxArgumentsBytes = 18))
+                .invoke(ToolCall("a1", READ_BATCH_TOOL_NAME, request)) is ToolResult.Value,
+        )
+        val over = executor(delegate, budget = ReadBatchBudget(maxArgumentsBytes = 17))
+            .invoke(ToolCall("a2", READ_BATCH_TOOL_NAME, request))
+        assertEquals(
+            "calls[0].arguments exceed the batch argument budget",
+            (over as? ToolResult.Invalid)?.reason,
+        )
+    }
+
+    @Test
     fun cancellationStopsStartedChildrenAndNeverStartsTheRest() = runTest {
         val delegate = FakeBatchDelegate(specs).apply { gate = CompletableDeferred() }
         val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))

@@ -727,6 +727,120 @@ class KnowledgeRepository(
             visionConsent, embeddingIsApi, embeddingConsent)
     }.also { if (automaticStorageMaintenance) collectStorage() }
 
+    /** A missing format means this call returns the persisted job at its current stage. */
+    private data class PreparedByteImport(val job: ImportJob, val formatToProcess: SourceFormat? = null)
+
+    /** Shared preparation before the validated local or API route runs its continuation. */
+    private fun prepareByteImport(
+        displayName: String,
+        mediaType: String,
+        bytes: ByteArray,
+        kbId: String,
+        visionConfigured: Boolean,
+        visionConsent: Boolean,
+        embeddingIsApi: Boolean,
+        embeddingConsent: Boolean,
+        pauseAt: ImportStage?,
+    ): PreparedByteImport {
+        val format = MediaKind.detect(displayName, mediaType, bytes.copyOf(minOf(bytes.size, 64)))
+        if (format == SourceFormat.KNOWLEDGE_ARCHIVE) {
+            require(bytes.size <= KnowledgeArchive.MAX_TOTAL_BYTES) { "RESOURCE_LIMIT" }
+            return PreparedByteImport(
+                expandKnowledgeArchive(
+                    displayName, visionConfigured, kbId, visionConsent, embeddingIsApi, embeddingConsent, pauseAt,
+                ) { visit -> KnowledgeArchive.forEachEntry(bytes, visit) },
+            )
+        }
+        require(bytes.size <= MediaKind.MAX_IMPORT_BYTES) { "RESOURCE_LIMIT" }
+        val stored = putManagedBlob(bytes, mediaType.ifBlank { guessedMime(format) })
+        val existingId = existingDocument(kbId, stored.sha256)
+        val liveExistingId = existingId?.takeIf { id ->
+            db.query("SELECT deleted_at FROM documents WHERE id = ?", listOf(id))
+                .single().string("deleted_at").isBlank()
+        }
+        if (liveExistingId != null) {
+            if (embeddingIsApi && hasUncertainApiEmbedding(liveExistingId)) {
+                val job = ImportJob(
+                    id = EntityId.random().value,
+                    knowledgeBaseId = kbId,
+                    documentId = liveExistingId,
+                    stage = ImportStage.FAILED,
+                    visionConfigured = visionConfigured,
+                    visionConsent = visionConsent,
+                    embeddingIsApi = true,
+                    embeddingConsent = embeddingConsent,
+                    localEmbeddingAvailable = true,
+                    error = API_EMBEDDING_UNKNOWN_ERROR,
+                )
+                persistJob(job, displayName)
+                return PreparedByteImport(job)
+            }
+            val reuseStage = publishedReadyStage(liveExistingId, kbId, requestedApi = embeddingIsApi)
+            if (reuseStage != null) {
+                val job = reuseJob(
+                    liveExistingId, kbId, reuseStage, visionConfigured, visionConsent,
+                    embeddingIsApi = embeddingIsApi, embeddingConsent = embeddingConsent,
+                )
+                persistJob(job, displayName)
+                return PreparedByteImport(job)
+            }
+        }
+        val documentId = liveExistingId ?: run {
+            // The cancellable API route serializes registration with index changes.
+            if (embeddingIsApi) {
+                synchronized(indexLock) { registerByteImportDocument(stored, existingId, kbId, displayName, format) }
+            } else {
+                registerByteImportDocument(stored, existingId, kbId, displayName, format)
+            }
+            // Re-read what the commit registered; this lookup is intentionally outside the lock.
+            existingDocument(kbId, stored.sha256)!!
+        }
+        val job = ImportJob(
+            id = EntityId.random().value,
+            knowledgeBaseId = kbId,
+            documentId = documentId,
+            hasImages = MediaKind.isImage(format),
+            visionConfigured = visionConfigured,
+            visionConsent = visionConsent,
+            embeddingIsApi = embeddingIsApi,
+            embeddingConsent = embeddingConsent,
+            localEmbeddingAvailable = true,
+        )
+        persistJob(job, displayName)
+        if (pauseAt == ImportStage.COPYING) {
+            job.stage = ImportStage.COPYING
+            persistJob(job, displayName)
+            return PreparedByteImport(job)
+        }
+        return PreparedByteImport(job, formatToProcess = format)
+    }
+
+    private fun hasUncertainApiEmbedding(documentId: String): Boolean {
+        val error = db.query(
+            "SELECT error FROM import_jobs WHERE document_id = ? AND embedding_is_api = 1 ORDER BY updated_at DESC LIMIT 1",
+            listOf(documentId),
+        ).firstOrNull()?.string("error") ?: return false
+        return error.contains("UNKNOWN_OUTCOME", ignoreCase = true) && error.contains("embedding", ignoreCase = true)
+    }
+
+    private fun registerByteImportDocument(
+        stored: StoredBlob,
+        existingId: String?,
+        kbId: String,
+        displayName: String,
+        format: SourceFormat,
+    ) {
+        db.transaction {
+            upsertBlob(stored)
+            val documentId = existingId ?: EntityId.random().value
+            db.execute(
+                "INSERT INTO documents(id,kb_id,blob_hash,display_name,format,active_version_id,deleted_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET kb_id=excluded.kb_id,blob_hash=excluded.blob_hash,display_name=excluded.display_name,format=excluded.format,active_version_id=excluded.active_version_id,deleted_at=excluded.deleted_at",
+                listOf(documentId, kbId, stored.sha256, displayName, format.name, null, null),
+            )
+            syncBlobRef(stored.sha256)
+        }
+    }
+
     private suspend fun importBytesCancellableOwned(
         displayName: String, mediaType: String, bytes: ByteArray, visionConfigured: Boolean,
         knowledgeBaseId: String?, pauseAt: ImportStage?, visionConsent: Boolean,
@@ -738,99 +852,12 @@ class KnowledgeRepository(
         check(embeddingIsApi) {
             "The suspending import entry point is reserved for an explicitly selected API embedding"
         }
-        val format = MediaKind.detect(displayName, mediaType, bytes.copyOf(minOf(bytes.size, 64)))
-        if (format == SourceFormat.KNOWLEDGE_ARCHIVE) {
-            require(bytes.size <= KnowledgeArchive.MAX_TOTAL_BYTES) { "RESOURCE_LIMIT" }
-            return expandKnowledgeArchive(
-                displayName, visionConfigured, kbId, visionConsent, embeddingIsApi, embeddingConsent, pauseAt,
-            ) { visit -> KnowledgeArchive.forEachEntry(bytes, visit) }
-        }
-        require(bytes.size <= MediaKind.MAX_IMPORT_BYTES) { "RESOURCE_LIMIT" }
-        val stored = putManagedBlob(bytes, mediaType.ifBlank { guessedMime(format) })
-        val existingId = existingDocument(kbId, stored.sha256)
-        if (existingId != null) {
-            val prior = db.query("SELECT active_version_id, deleted_at FROM documents WHERE id = ?", listOf(existingId)).single()
-            if (prior.string("deleted_at").isBlank()) {
-                val unknownEmbedding = db.query(
-                    "SELECT error FROM import_jobs WHERE document_id = ? AND embedding_is_api = 1 ORDER BY updated_at DESC LIMIT 1",
-                    listOf(existingId),
-                ).firstOrNull()?.string("error")?.takeIf { it.contains("UNKNOWN_OUTCOME", ignoreCase = true) }
-                    ?.takeIf { it.contains("embedding", ignoreCase = true) }
-                if (unknownEmbedding != null) {
-                    val job = ImportJob(
-                        id = EntityId.random().value,
-                        knowledgeBaseId = kbId,
-                        documentId = existingId,
-                        stage = ImportStage.FAILED,
-                        visionConfigured = visionConfigured,
-                        visionConsent = visionConsent,
-                        embeddingIsApi = true,
-                        embeddingConsent = embeddingConsent,
-                        localEmbeddingAvailable = true,
-                        error = API_EMBEDDING_UNKNOWN_ERROR,
-                    )
-                    persistJob(job, displayName)
-                    return job
-                }
-                val reuseStage = publishedReadyStage(existingId, kbId, requestedApi = true)
-                if (reuseStage != null) {
-                    val job = reuseJob(
-                        existingId, kbId, reuseStage, visionConfigured, visionConsent,
-                        embeddingIsApi = true, embeddingConsent = embeddingConsent,
-                    )
-                    persistJob(job, displayName)
-                    return job
-                }
-                val job = ImportJob(
-                    id = EntityId.random().value,
-                    knowledgeBaseId = kbId,
-                    documentId = existingId,
-                    hasImages = MediaKind.isImage(format),
-                    visionConfigured = visionConfigured,
-                    visionConsent = visionConsent,
-                    embeddingIsApi = true,
-                    embeddingConsent = embeddingConsent,
-                    localEmbeddingAvailable = true,
-                )
-                persistJob(job, displayName)
-                if (pauseAt == ImportStage.COPYING) {
-                    job.stage = ImportStage.COPYING
-                    persistJob(job, displayName)
-                    return job
-                }
-                return continueImportCancellable(job, displayName, bytes, format)
-            }
-        }
-        synchronized(indexLock) {
-            db.transaction {
-                upsertBlob(stored)
-                val documentId = existingId ?: EntityId.random().value
-                db.execute(
-                    "INSERT INTO documents(id,kb_id,blob_hash,display_name,format,active_version_id,deleted_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET kb_id=excluded.kb_id,blob_hash=excluded.blob_hash,display_name=excluded.display_name,format=excluded.format,active_version_id=excluded.active_version_id,deleted_at=excluded.deleted_at",
-                    listOf(documentId, kbId, stored.sha256, displayName, format.name, null, null),
-                )
-                syncBlobRef(stored.sha256)
-            }
-        }
-        val documentId = existingDocument(kbId, stored.sha256)!!
-        val job = ImportJob(
-            id = EntityId.random().value,
-            knowledgeBaseId = kbId,
-            documentId = documentId,
-            hasImages = MediaKind.isImage(format),
-            visionConfigured = visionConfigured,
-            visionConsent = visionConsent,
-            embeddingIsApi = true,
-            embeddingConsent = embeddingConsent,
+        val prepared = prepareByteImport(
+            displayName, mediaType, bytes, kbId, visionConfigured, visionConsent,
+            embeddingIsApi, embeddingConsent, pauseAt,
         )
-        job.localEmbeddingAvailable = true
-        persistJob(job, displayName)
-        if (pauseAt == ImportStage.COPYING) {
-            job.stage = ImportStage.COPYING
-            persistJob(job, displayName)
-            return job
-        }
-        return continueImportCancellable(job, displayName, bytes, format)
+        val format = prepared.formatToProcess ?: return prepared.job
+        return continueImportCancellable(prepared.job, displayName, bytes, format)
     }
 
     /** Suspending API resume bridge used after a Worker/process interruption. */
@@ -1234,97 +1261,12 @@ class KnowledgeRepository(
         val kbId = routedKbId
         requireKb(kbId)
         validateRequestedEmbeddingSelection(kbId, embeddingIsApi, embeddingConsent)
-        val format = MediaKind.detect(displayName, mediaType, bytes.copyOf(minOf(bytes.size, 64)))
-        if (format == SourceFormat.KNOWLEDGE_ARCHIVE) {
-            require(bytes.size <= KnowledgeArchive.MAX_TOTAL_BYTES) { "RESOURCE_LIMIT" }
-            return expandKnowledgeArchive(
-                displayName, visionConfigured, kbId, visionConsent, embeddingIsApi, embeddingConsent, pauseAt,
-            ) { visit -> KnowledgeArchive.forEachEntry(bytes, visit) }
-        }
-        require(bytes.size <= MediaKind.MAX_IMPORT_BYTES) { "RESOURCE_LIMIT" }
-        val stored = putManagedBlob(bytes, mediaType.ifBlank { guessedMime(format) })
-        val existingId = existingDocument(kbId, stored.sha256)
-        if (existingId != null) {
-            val prior = db.query("SELECT active_version_id, deleted_at FROM documents WHERE id = ?", listOf(existingId)).single()
-            if (prior.string("deleted_at").isBlank()) {
-                val unknownEmbedding = db.query(
-                    "SELECT error FROM import_jobs WHERE document_id = ? AND embedding_is_api = 1 ORDER BY updated_at DESC LIMIT 1",
-                    listOf(existingId),
-                ).firstOrNull()?.string("error")?.takeIf { it.contains("UNKNOWN_OUTCOME", ignoreCase = true) }
-                    ?.takeIf { it.contains("embedding", ignoreCase = true) }
-                if (unknownEmbedding != null && embeddingIsApi) {
-                    val job = ImportJob(
-                        id = EntityId.random().value,
-                        knowledgeBaseId = kbId,
-                        documentId = existingId,
-                        stage = ImportStage.FAILED,
-                        visionConfigured = visionConfigured,
-                        visionConsent = visionConsent,
-                        embeddingIsApi = true,
-                        embeddingConsent = embeddingConsent,
-                        localEmbeddingAvailable = true,
-                        error = "UNKNOWN_OUTCOME: prior API embedding is uncertain; explicit duplicate-charge acknowledgement is required",
-                    )
-                    persistJob(job, displayName)
-                    return job
-                }
-                val reuseStage = publishedReadyStage(existingId, kbId, embeddingIsApi)
-                if (reuseStage != null) {
-                    val job = reuseJob(
-                        existingId, kbId, reuseStage, visionConfigured, visionConsent,
-                        embeddingIsApi = embeddingIsApi, embeddingConsent = embeddingConsent,
-                    )
-                    persistJob(job, displayName)
-                    return job
-                }
-                val job = ImportJob(
-                    id = EntityId.random().value,
-                    knowledgeBaseId = kbId,
-                    documentId = existingId,
-                    hasImages = MediaKind.isImage(format),
-                    visionConfigured = visionConfigured,
-                    visionConsent = visionConsent,
-                    embeddingIsApi = embeddingIsApi,
-                    embeddingConsent = embeddingConsent,
-                    localEmbeddingAvailable = true,
-                )
-                persistJob(job, displayName)
-                if (pauseAt == ImportStage.COPYING) {
-                    job.stage = ImportStage.COPYING
-                    persistJob(job, displayName)
-                    return job
-                }
-                return continueImport(job, displayName, bytes, format)
-            }
-        }
-        db.transaction {
-            upsertBlob(stored)
-            val documentId = existingId ?: EntityId.random().value
-            db.execute(
-                "INSERT INTO documents(id,kb_id,blob_hash,display_name,format,active_version_id,deleted_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET kb_id=excluded.kb_id,blob_hash=excluded.blob_hash,display_name=excluded.display_name,format=excluded.format,active_version_id=excluded.active_version_id,deleted_at=excluded.deleted_at",
-                listOf(documentId, kbId, stored.sha256, displayName, format.name, null, null),
-            )
-            syncBlobRef(stored.sha256)
-        }
-        val documentId = existingDocument(kbId, stored.sha256)!!
-        val job = ImportJob(
-            id = EntityId.random().value,
-            knowledgeBaseId = kbId,
-            documentId = documentId,
-            hasImages = MediaKind.isImage(format),
-            visionConfigured = visionConfigured,
-            visionConsent = visionConsent,
-            embeddingIsApi = embeddingIsApi,
-            embeddingConsent = embeddingConsent,
+        val prepared = prepareByteImport(
+            displayName, mediaType, bytes, kbId, visionConfigured, visionConsent,
+            embeddingIsApi, embeddingConsent, pauseAt,
         )
-        job.localEmbeddingAvailable = true
-        persistJob(job, displayName)
-        if (pauseAt == ImportStage.COPYING) {
-            job.stage = ImportStage.COPYING
-            persistJob(job, displayName)
-            return job
-        }
-        return continueImport(job, displayName, bytes, format)
+        val format = prepared.formatToProcess ?: return prepared.job
+        return continueImport(prepared.job, displayName, bytes, format)
     }
 
     /**

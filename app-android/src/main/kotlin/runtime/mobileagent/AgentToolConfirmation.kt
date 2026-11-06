@@ -11,7 +11,10 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import runtime.mobileagent.diagnostics.DiagnosticAuthority
 import runtime.mobileagent.domain.Authority
+import runtime.mobileagent.privileged.RootToolArguments
+import runtime.mobileagent.skills.ReadBatchProtocol
 import runtime.mobileagent.skills.RunControlTools
+import runtime.mobileagent.tooling.UnifiedWorkspaceToolExecutor
 
 /** User-owned per-agent preference. Missing or malformed data always requires confirmation. */
 internal object AgentToolConfirmation {
@@ -31,30 +34,9 @@ internal object AgentToolConfirmation {
         "workspace_list", "file_list", "file_stat", "file_read_text", "file_glob", "file_grep",
         "file_get_metadata", RunControlTools.READ_BATCH,
     )
-    private val ROOT_ELIGIBLE_TOOLS = setOf(
-        "file_list",
-        "file_stat",
-        "file_read_text",
-        "file_write_text",
-        "file_create_directory",
-        "file_move",
-        "file_delete",
-        "file_glob",
-        "file_grep",
-        "file_get_metadata",
-        "file_set_metadata",
-        "file_apply_patch",
-        "shell_exec",
-        RunControlTools.READ_BATCH,
-        RunControlTools.JOB_START,
-    )
-    private val WORKSPACE_TOOL_NAMES = setOf(
-        "workspace_list", "file_list", "file_stat", "file_read_text", "file_write_text",
-        "file_create_directory", "file_move", "file_delete", "file_glob", "file_grep",
-        "file_get_metadata", "file_set_metadata", "file_apply_patch", "apply_patch",
-    )
-    /** Mirrors the side-effect-free batch allowlist; unknown children fail closed. */
-    private val READ_BATCH_CHILD_TOOLS = (ROOT_READ_ONLY_TOOLS - RunControlTools.READ_BATCH) + "calculator"
+    private val ROOT_ELIGIBLE_TOOLS = RootToolArguments.supportedToolNames + setOf(RunControlTools.READ_BATCH, RunControlTools.JOB_START)
+    // A legacy patch alias still identifies a workspace invocation for confirmation.
+    private val WORKSPACE_TOOL_NAMES = RootToolArguments.workspaceToolNames + UnifiedWorkspaceToolExecutor.APPLY_PATCH
 
     fun isRootReadOnlyTool(toolName: String): Boolean = toolName in ROOT_READ_ONLY_TOOLS
 
@@ -175,12 +157,7 @@ internal object AgentToolConfirmation {
         )
     }
 
-    /**
-     * read_batch is atomic for approval: the outer call is auto-approved only when its children
-     * are non-empty, well-formed, known read-only tools, and every child independently passes its
-     * Root-read or ordinary-skip condition. Any malformed child or authority lookup failure
-     * returns false so ReadBatchToolExecutor asks for the outer approval.
-     */
+    /** Every distinct, well-formed read child must pass confirmation for its own route. */
     private fun autoApprovesReadBatch(
         argumentsJson: String,
         selectedAuthority: String,
@@ -190,7 +167,7 @@ internal object AgentToolConfirmation {
         ordinarySkip: Boolean,
         authorityForWorkspace: (String) -> DiagnosticAuthority,
     ): Boolean {
-        val children = strictBatchChildren(argumentsJson) ?: return false
+        val children = ReadBatchProtocol.childrenForApproval(argumentsJson) ?: return false
         val needsFallbackRoute = children.any { it.tool == "workspace_list" }
         val fallbackAuthority = if (!rootRun && needsFallbackRoute && fallbackWorkspaceId != null) {
             try {
@@ -202,64 +179,35 @@ internal object AgentToolConfirmation {
             null
         }
         return children.all { child ->
-            if (child.tool !in READ_BATCH_CHILD_TOOLS) return@all false
-            when (child.tool) {
+            if (child.tool !in eligibleChildReadTools) return@all false
+            val authority = when (child.tool) {
                 "workspace_list" -> {
                     if (child.arguments.isNotEmpty()) return@all false
-                    val root = rootRun || fallbackAuthority?.let(::isRootDiagnosticAuthority) == true
-                    if (root) rootReadConfirmed
-                    else ordinaryChildAutoApproves(child.tool, selectedAuthority, DiagnosticAuthority.NONE, ordinarySkip)
+                    fallbackAuthority ?: DiagnosticAuthority.NONE
                 }
                 "calculator" -> {
                     if (child.arguments.keys != setOf("expression")) return@all false
-                    val expression = (child.arguments["expression"] as? JsonPrimitive)
-                        ?.takeIf { it.isString }?.contentOrNull
-                    if (expression.isNullOrBlank()) return@all false
-                    ordinaryChildAutoApproves(child.tool, selectedAuthority, DiagnosticAuthority.NONE, ordinarySkip)
+                    if (child.arguments.stringValue("expression") == null) return@all false
+                    DiagnosticAuthority.NONE
                 }
                 else -> {
                     val workspaceId = strictWorkspaceId(child.arguments) ?: return@all false
-                    val authority = try {
+                    try {
                         authorityForWorkspace(workspaceId)
                     } catch (_: Exception) {
                         return@all false
                     }
-                    if (isRootDiagnosticAuthority(authority)) rootReadConfirmed
-                    else ordinaryChildAutoApproves(child.tool, selectedAuthority, authority, ordinarySkip)
                 }
             }
+            autoApproves(
+                toolName = child.tool,
+                selectedAuthority = selectedAuthority,
+                workspaceAuthority = authority,
+                rootRun = rootRun && child.tool == "workspace_list",
+                rootReadConfirmed = rootReadConfirmed,
+                ordinarySkip = ordinarySkip,
+            )
         }
-    }
-
-    private fun ordinaryChildAutoApproves(
-        toolName: String,
-        selectedAuthority: String,
-        workspaceAuthority: DiagnosticAuthority,
-        ordinarySkip: Boolean,
-    ): Boolean = !requiresExplicitApproval(
-        toolName = toolName,
-        selectedAuthority = selectedAuthority,
-        workspaceAuthority = workspaceAuthority,
-        rootRun = false,
-    ) && ordinarySkip
-
-    private fun strictBatchChildren(argumentsJson: String): List<StrictBatchChild>? {
-        val root = runCatching { Json.parseToJsonElement(argumentsJson) as? JsonObject }.getOrNull()
-            ?: return null
-        if (root.keys != setOf("calls")) return null
-        val calls = root["calls"] as? JsonArray ?: return null
-        if (calls.isEmpty()) return null
-        val children = ArrayList<StrictBatchChild>(calls.size)
-        for (element in calls) {
-            val child = element as? JsonObject ?: return null
-            if (child.keys != setOf("call_id", "tool", "arguments")) return null
-            val callId = child.stringValue("call_id") ?: return null
-            val tool = child.stringValue("tool") ?: return null
-            val arguments = child["arguments"] as? JsonObject ?: return null
-            children += StrictBatchChild(callId, tool, arguments)
-        }
-        if (children.map { it.callId }.distinct().size != children.size) return null
-        return children
     }
 
     private fun strictWorkspaceId(value: JsonObject): String? {
@@ -277,15 +225,10 @@ internal object AgentToolConfirmation {
     private fun JsonObject.stringValue(key: String): String? =
         (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull?.takeIf { it.isNotBlank() }
 
-    private data class StrictBatchChild(
-        val callId: String,
-        val tool: String,
-        val arguments: JsonObject,
-    )
-
     private fun isRootDiagnosticAuthority(authority: DiagnosticAuthority): Boolean =
         authority == DiagnosticAuthority.ROOT_DIRECT || authority == DiagnosticAuthority.SHIZUKU_ROOT
 
+    /** Deliberately lenient route evidence; approval goes through [ReadBatchProtocol.childrenForApproval]. */
     private fun readBatchChildren(argumentsJson: String): List<JsonObject> = runCatching {
         val root = Json.parseToJsonElement(argumentsJson) as? JsonObject ?: return@runCatching emptyList()
         (root["calls"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }

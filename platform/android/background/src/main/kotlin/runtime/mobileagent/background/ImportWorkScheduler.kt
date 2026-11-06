@@ -7,6 +7,7 @@ import android.content.Context
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
+import androidx.work.ListenableWorker
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequest
 import androidx.work.OneTimeWorkRequestBuilder
@@ -55,6 +56,13 @@ fun interface ConsentFailureHandler {
 }
 
 object ImportWorkerRegistry {
+    /** Application startup may temporarily leave a handler unregistered. */
+    internal fun missingHandler(attempt: Int, onExhausted: () -> Unit = {}): ListenableWorker.Result {
+        if (attempt < 3) return ListenableWorker.Result.retry()
+        onExhausted()
+        return ListenableWorker.Result.failure()
+    }
+
     @Volatile
     var handler: ImportJobHandler? = null
 

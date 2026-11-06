@@ -10,8 +10,6 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
-import runtime.mobileagent.domain.CapabilityId
-import runtime.mobileagent.skills.tooling.ToolSpec
 import runtime.mobileagent.skills.tooling.WorkspaceEntryType
 import runtime.mobileagent.tooling.WorkspaceSearchMatching.WorkspaceSearchGlob
 
@@ -54,31 +52,17 @@ internal object WorkspaceSearchProtocol {
         """"max_millis":{"type":"integer","minimum":1,"maximum":30000}"""
 
     /** Glob patterns are `*`/`?`/`**` only; no regex is compiled from model input. */
-    private val GLOB_SCHEMA =
+    val globSchema =
         """{"type":"object","additionalProperties":false,"required":["workspace_id","pattern"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","maxLength":512},"pattern":{"type":"string","minLength":1,"maxLength":256},""" +
             SEARCH_DEPTH_PROPERTY + SEARCH_ENTRY_PROPERTY + SEARCH_FILE_PROPERTY +
             SEARCH_RESULT_PROPERTY + SEARCH_TIME_PROPERTY + "}}"
 
     /** Literal text search; the schema deliberately has no regex-shaped option. */
-    private val GREP_SCHEMA =
+    val grepSchema =
         """{"type":"object","additionalProperties":false,"required":["workspace_id","query"],"properties":{"workspace_id":{"type":"string","minLength":1,"maxLength":128},"relative_path":{"type":"string","maxLength":512},"query":{"type":"string","minLength":1,"maxLength":256},"case_sensitive":{"type":"boolean"},""" +
             SEARCH_DEPTH_PROPERTY + SEARCH_ENTRY_PROPERTY + SEARCH_FILE_PROPERTY +
             """"max_scanned_bytes":{"type":"integer","minimum":1,"maximum":4194304},""" +
             SEARCH_RESULT_PROPERTY + SEARCH_TIME_PROPERTY + "}}"
-
-    private const val GLOB_DESCRIPTION =
-        "Find workspace entries matching a glob pattern, recursively and with bounded budgets. " +
-            "* and ? match inside one path segment; ** matches whole segments. A pattern without / " +
-            "matches the entry name at any depth; with / it matches the full relative path. Files and " +
-            "directories are both returned. truncation_reasons names the budget that stopped the scan, " +
-            "so truncated=true with no matches is not the same as no match."
-
-    private const val GREP_DESCRIPTION =
-        "Search authorized workspace text for a literal string (never a regular expression), " +
-            "recursively and with bounded budgets. Hits are reported one per line with line number and " +
-            "column; case_sensitive defaults to false. Every limit is reported in truncation_reasons, and " +
-            "unreadable non-UTF-8 files are counted in scanned.unreadable_entries instead of being " +
-            "reported as no match."
 
     /** Keys accepted for `file_glob`; the camelCase spellings are compatibility aliases. */
     val globKeys: Set<String> = setOf(
@@ -95,24 +79,6 @@ internal object WorkspaceSearchProtocol {
         "maxDepth", "max_depth", "maxScannedEntries", "max_scanned_entries",
         "maxScannedFiles", "max_scanned_files", "maxScannedBytes", "max_scanned_bytes",
         "maxResults", "max_results", "maxMillis", "max_millis",
-    )
-
-    val globSpec: ToolSpec = ToolSpec(
-        UnifiedWorkspaceToolExecutor.FILE_GLOB,
-        GLOB_DESCRIPTION,
-        GLOB_SCHEMA,
-        CapabilityId(CapabilityId.FILE_LIST),
-        false,
-        UnifiedWorkspaceToolExecutor.TOOL_SCHEMA_VERSION,
-    )
-
-    val grepSpec: ToolSpec = ToolSpec(
-        UnifiedWorkspaceToolExecutor.FILE_GREP,
-        GREP_DESCRIPTION,
-        GREP_SCHEMA,
-        CapabilityId(CapabilityId.FILE_READ_TEXT),
-        false,
-        UnifiedWorkspaceToolExecutor.TOOL_SCHEMA_VERSION,
     )
 
     /**

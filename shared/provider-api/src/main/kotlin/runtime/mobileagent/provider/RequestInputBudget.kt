@@ -4,7 +4,11 @@
 package runtime.mobileagent.provider
 
 import kotlinx.serialization.json.JsonElement
+import runtime.mobileagent.domain.DEFAULT_IMAGE_INPUT_UNITS
 import runtime.mobileagent.domain.MAX_CONTEXT_IMAGE_BYTES
+import runtime.mobileagent.domain.conservativeUtf8Units
+import runtime.mobileagent.domain.saturatingAddUnits
+import runtime.mobileagent.domain.saturatingMultiplyUnits
 
 /**
  * Conservative size of one prepared model request, in abstract *units*.
@@ -30,25 +34,18 @@ data class InputBudgetEstimate(
     val continuationUnits: Long = 0L,
 )
 
-/**
- * Default basis label for [RequestInputBudget.estimate]. Adapters that change
- * what actually reaches the wire must return their own clear label instead.
- */
-const val INPUT_BUDGET_BASIS: String =
+private const val INPUT_BUDGET_PREFIX =
     "conservative-utf8-upper-bound: text, tool call ids/names/arguments, tool schemas and " +
-        "parameter layers and replayed chat reasoning counted as UTF-8 bytes; fixed per-image (4096 units) and protocol " +
-        "reservations; provider-private continuation counted as replayed payload bytes; " +
-        "not a tokenizer count and not provider usage"
+        "parameter layers and replayed chat reasoning counted as UTF-8 bytes; fixed per-image ($DEFAULT_IMAGE_INPUT_UNITS units) and protocol " +
+        "reservations; provider-private continuation "
 
-/**
- * Basis label for transports that drop [ChatMessage.providerContinuationItems]
- * (for example Chat Completions) and therefore must not reserve for them.
- */
+/** Basis when the transport replays [ChatMessage.providerContinuationItems]. */
+const val INPUT_BUDGET_BASIS: String =
+    INPUT_BUDGET_PREFIX + "counted as replayed payload bytes; not a tokenizer count and not provider usage"
+
+/** Basis for transports that omit [ChatMessage.providerContinuationItems]. */
 const val INPUT_BUDGET_BASIS_WITHOUT_CONTINUATION: String =
-    "conservative-utf8-upper-bound: text, tool call ids/names/arguments, tool schemas and " +
-        "parameter layers and replayed chat reasoning counted as UTF-8 bytes; fixed per-image (4096 units) and protocol " +
-        "reservations; provider-private continuation excluded because this transport does " +
-        "not send it; not a tokenizer count and not provider usage"
+    INPUT_BUDGET_PREFIX + "excluded because this transport does not send it; not a tokenizer count and not provider usage"
 
 /**
  * Deterministic, overflow-safe conservative input estimator shared by adapters.
@@ -121,15 +118,7 @@ object RequestInputBudget {
     /** Fixed per-continuation-item envelope: `{"type":"reasoning","encrypted_content":...}`. */
     private const val CONTINUATION_ENVELOPE_UNITS = 32L
 
-    /**
-     * Keep the "(4096 units)" wording in [INPUT_BUDGET_BASIS] in sync with this
-     * constant.
-     *
-     * Fixed reservation per inline image. This matches the existing runtime
-     * budget convention (`4096` units per image) so callers keep identical
-     * numbers; it is a reservation, not a tokenizer or byte count.
-     */
-    const val IMAGE_UNITS_PER_IMAGE = 4096L
+    const val IMAGE_UNITS_PER_IMAGE = DEFAULT_IMAGE_INPUT_UNITS
 
     /**
      * Estimate the conservative input size of [request].
@@ -266,51 +255,6 @@ object RequestInputBudget {
             onFailure = { PARAMETER_ENTRY_UNITS },
         )
     }
-}
-
-/**
- * Conservative UTF-8 byte length of [text].
- *
- * Well-formed text is measured exactly (4 bytes per surrogate pair, 3 bytes
- * per other non-ASCII BMP character). Unpaired surrogates are charged 3 bytes
- * (the UTF-8 length of the replacement character) instead of the JDK encoder's
- * lossy 1-byte `?`, so malformed input can never understate the estimate.
- */
-internal fun conservativeUtf8Units(text: String): Long {
-    if (text.isEmpty()) return 0L
-    var units = 0L
-    var index = 0
-    while (index < text.length) {
-        val code = text[index].code
-        when {
-            code < 0x80 -> units = saturatingAddUnits(units, 1L)
-            code < 0x800 -> units = saturatingAddUnits(units, 2L)
-            Character.isHighSurrogate(text[index]) &&
-                index + 1 < text.length &&
-                Character.isLowSurrogate(text[index + 1]) -> {
-                units = saturatingAddUnits(units, 4L)
-                index++
-            }
-            else -> units = saturatingAddUnits(units, 3L)
-        }
-        index++
-    }
-    return units
-}
-
-/** Saturating non-negative addition: overflow clamps to [Long.MAX_VALUE]. */
-internal fun saturatingAddUnits(current: Long, extra: Long): Long = when {
-    extra > 0L && current > Long.MAX_VALUE - extra -> Long.MAX_VALUE
-    extra < 0L && current < Long.MIN_VALUE - extra -> Long.MIN_VALUE
-    else -> current + extra
-}
-
-/** Saturating non-negative multiplication: overflow clamps to [Long.MAX_VALUE]. */
-internal fun saturatingMultiplyUnits(left: Long, right: Long): Long = when {
-    left == 0L || right == 0L -> 0L
-    left < 0L || right < 0L -> Long.MAX_VALUE
-    left > Long.MAX_VALUE / right -> Long.MAX_VALUE
-    else -> left * right
 }
 
 /** Saturating [Int] count: overflow clamps to [Int.MAX_VALUE]. */

@@ -3,6 +3,7 @@
 
 package runtime.mobileagent.tooling
 
+import runtime.mobileagent.privileged.RootToolArguments
 import java.util.Collections
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -220,7 +221,7 @@ private class CompositeToolExecutor(
 
     private fun workspaceRouted(name: String, candidates: List<ToolExecutor>): Boolean =
         candidates.any { it === root || it === workspace } ||
-            (rootWorkspaceIds.isNotEmpty() && name in FROZEN_WORKSPACE_TOOLS)
+            (rootWorkspaceIds.isNotEmpty() && name in RootToolArguments.workspaceToolNames)
 
     override fun normalize(call: ToolCall, typed: ToolInvocation?): ComposedInvocation? {
         val candidates = owners[call.name] ?: return null
@@ -270,7 +271,7 @@ private class CompositeToolExecutor(
      * fallback, and no change to the exposed tool set.
      */
     override fun legacyUnknownTool(call: ToolCall): ToolResult {
-        if (call.name !in FROZEN_WORKSPACE_TOOLS) return ToolResult.Invalid("Unknown tool")
+        if (call.name !in RootToolArguments.workspaceToolNames) return ToolResult.Invalid("Unknown tool")
         val id = (ModelToolArguments.workspaceIdSelection(call.argumentsJson)
             as? WorkspaceIdSelection.Present)?.id ?: return ToolResult.Invalid("Unknown tool")
         if (id !in rootWorkspaceIds) return ToolResult.Invalid("Unknown tool")
@@ -447,13 +448,6 @@ private class CompositeToolExecutor(
 
     private companion object {
         val SAFE_CODE = Regex("[A-Z][A-Z0-9_]{2,63}")
-        // A frozen Root binding reserves these built-in names even when the Root service is
-        // absent. A same-named external provider must not receive that workspace's request.
-        val FROZEN_WORKSPACE_TOOLS = setOf(
-            "workspace_list", "file_list", "file_stat", "file_read_text", "file_write_text",
-            "file_create_directory", "file_move", "file_delete", "file_glob", "file_grep",
-            "file_get_metadata", "file_set_metadata", "file_apply_patch",
-        )
     }
 }
 

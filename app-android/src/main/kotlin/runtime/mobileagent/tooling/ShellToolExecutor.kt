@@ -147,9 +147,7 @@ class ShellToolExecutor(
     )
 
     val toolingSpecs: List<ToolSpec> = Collections.unmodifiableList(if (exposure.exposed) listOf(SHELL_SPEC) else emptyList())
-    override val specs: List<LegacyToolSpec> = Collections.unmodifiableList(toolingSpecs.map { spec ->
-        LegacyToolSpec(spec.name, spec.description, spec.inputSchema, spec.capability?.value.orEmpty(), spec.sideEffect, spec.schemaVersion)
-    })
+    override val specs: List<LegacyToolSpec> = Collections.unmodifiableList(toolingSpecs.map { it.toLegacySpec() })
 
     override suspend fun invoke(call: ToolCall): ToolResult = invoke(call, contextProvider())
 
@@ -161,7 +159,7 @@ class ShellToolExecutor(
         context: ToolExecutionContext,
         requestId: String,
     ): ToolResult {
-        val key = modelKey(context, call.callId)
+        val key = context.modelCallKey(call.callId)
         // Keep duplicate detection and request registration in one critical
         // section.  A caller can suspend as soon as invokeBound starts the
         // provider dispatch; the internal request must already be reserved by
@@ -661,39 +659,14 @@ class ShellToolExecutor(
         }
     }
 
-    private fun ToolResult.toToolExecution(): ToolExecution = when (this) {
-        is ToolResult.Value -> ToolExecution.Value(json)
-        is ToolResult.Denied -> ToolExecution.Failed(ToolError(reason.toToolErrorCode(ToolErrorCode.CAPABILITY_DENIED)))
-        is ToolResult.Invalid -> ToolExecution.Failed(ToolError(reason.toToolErrorCode(ToolErrorCode.INVALID_REQUEST)))
-        is ToolResult.Failure -> ToolExecution.Failed(error)
-        is ToolResult.UnknownOutcome -> ToolExecution.Unknown(ToolError(reason.toToolErrorCode(ToolErrorCode.UNKNOWN_OUTCOME)))
-        ToolResult.NeedsApproval -> ToolExecution.Failed(ToolError(ToolErrorCode.APPROVAL_REQUIRED))
-    }
-
-    private fun String.toToolErrorCode(fallback: ToolErrorCode): ToolErrorCode =
-        runCatching { ToolErrorCode.valueOf(this) }.getOrDefault(fallback)
-
     private fun ToolExecution.toLegacyResult(): ToolResult = when (this) {
         is ToolExecution.Value -> ToolResult.Value(json)
         is ToolExecution.Failed -> if (error.code == ToolErrorCode.APPROVAL_REQUIRED) ToolResult.NeedsApproval else ToolResult.Denied(error.code.name)
         is ToolExecution.Unknown -> ToolResult.UnknownOutcome(error.code.name)
     }
 
-    private fun modelKey(context: ToolExecutionContext, callId: String): ModelCallKey = ModelCallKey(
-        agentId = context.agentId,
-        snapshotId = context.snapshotId,
-        sessionIdentity = context.sessionIdentity,
-        taskIdentity = context.taskIdentity,
-        callId = callId,
-    )
-
     private fun resolveRequestId(callId: String): String = synchronized(lock) {
-        val matches = requestByModelCall.asSequence()
-            .filter { (key, _) -> key.callId == callId }
-            .map { it.value }
-            .distinct()
-            .toList()
-        if (matches.size == 1) matches.single() else callId
+        requestByModelCall.resolveRequestId(callId)
     }
 
     private fun ApprovalDecision.toToolResult(): ToolResult = when (this) {
@@ -702,25 +675,11 @@ class ShellToolExecutor(
         is ApprovalDecision.Rejected -> ToolResult.Denied(code.name)
     }
 
-    private fun ApprovalDecision.toToolExecution(): ToolExecution = when (this) {
-        is ApprovalDecision.Approved -> ToolExecution.Failed(ToolError(ToolErrorCode.INTERNAL_ERROR))
-        is ApprovalDecision.Required -> ToolExecution.Failed(ToolError(ToolErrorCode.APPROVAL_REQUIRED))
-        is ApprovalDecision.Rejected -> ToolExecution.Failed(ToolError(code))
-    }
-
     private data class ParsedShellCall(
         val command: String,
         val cwd: String?,
         val timeoutMs: Long,
         val maxOutputBytes: Long,
-    )
-
-    private data class ModelCallKey(
-        val agentId: String,
-        val snapshotId: String,
-        val sessionIdentity: String,
-        val taskIdentity: String,
-        val callId: String,
     )
 
     private data class AuditCorrelation(

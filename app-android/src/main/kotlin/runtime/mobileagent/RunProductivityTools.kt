@@ -15,9 +15,16 @@ import runtime.mobileagent.skills.ToolExecutor
 import runtime.mobileagent.skills.ToolResult
 import runtime.mobileagent.skills.tooling.InternalRequestIds
 import runtime.mobileagent.tooling.ShellToolExecutor
-import runtime.mobileagent.tooling.UnifiedWorkspaceToolExecutor
+import runtime.mobileagent.tooling.WorkspaceOperation
 import runtime.mobileagent.tooling.ModelToolArguments
 import java.util.concurrent.ConcurrentHashMap
+
+/** Explicit read children for batching, read-only jobs and per-child confirmation. Live gates still apply. */
+internal val eligibleChildReadTools: Set<String> = java.util.Collections.unmodifiableSet(buildSet {
+    WorkspaceOperation.entries.filter { it.eligibleReadChild }.mapTo(this) { it.spec.name }
+    add("file_get_metadata")
+    add(BuiltinTools.calculator.name)
+})
 
 /** Explicit eligible tools only: screen, HTTP, MCP, Python and mutations cannot enter a read batch. */
 internal class RunProductivityTools(
@@ -54,7 +61,7 @@ internal class RunProductivityTools(
     private fun controlCall(call: ToolCall): ToolCall = if (ownsTool(call.name))
         call.copy(callId = controlIds[call.callId]?.runtimeId ?: call.callId) else call
     private val exposed = core.specs.map { it.name }.toSet() - excludedChildTools
-    private val reads = READ_TOOLS intersect exposed
+    private val reads = eligibleChildReadTools intersect exposed
     private val frozenRootWorkspaceIds = (rootWorkspaceIds + (core as? RootToolExecutor)?.workspaceIds.orEmpty()).toSet()
     private val batch = ReadBatchToolExecutor(
         delegate = core,
@@ -145,18 +152,4 @@ internal class RunProductivityTools(
     }
 
     private fun unknown(): ToolResult = ToolResult.UnknownOutcome("A dispatched child tool has an unknown outcome; stop and do not retry automatically")
-
-    private companion object {
-        /** Side-effect-free tools that may run in a batch or a read-only job. */
-        val READ_TOOLS = setOf(
-            "workspace_list",
-            "file_get_metadata",
-            BuiltinTools.calculator.name,
-            UnifiedWorkspaceToolExecutor.FILE_LIST,
-            UnifiedWorkspaceToolExecutor.FILE_STAT,
-            UnifiedWorkspaceToolExecutor.FILE_READ_TEXT,
-            UnifiedWorkspaceToolExecutor.FILE_GLOB,
-            UnifiedWorkspaceToolExecutor.FILE_GREP,
-        )
-    }
 }

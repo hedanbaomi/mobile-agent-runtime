@@ -321,27 +321,6 @@ abstract class ManagedToolExecutor<I : ManagedToolInvocation>(specifications: Li
         }
     }
 
-    private fun ToolResult.toToolExecution(): ToolExecution = when (this) {
-        is ToolResult.Value -> ToolExecution.Value(json)
-        is ToolResult.Denied -> ToolExecution.Failed(ToolError(reason.asErrorCode(ToolErrorCode.CAPABILITY_DENIED)))
-        is ToolResult.Invalid -> ToolExecution.Failed(ToolError(reason.asErrorCode(ToolErrorCode.INVALID_REQUEST)))
-        is ToolResult.Failure -> ToolExecution.Failed(error)
-        is ToolResult.UnknownOutcome -> ToolExecution.Unknown(ToolError(reason.asErrorCode(ToolErrorCode.UNKNOWN_OUTCOME)))
-        ToolResult.NeedsApproval -> ToolExecution.Failed(ToolError(ToolErrorCode.APPROVAL_REQUIRED))
-    }
-
-    private fun String.asErrorCode(fallback: ToolErrorCode): ToolErrorCode =
-        runCatching { ToolErrorCode.valueOf(this) }.getOrDefault(fallback)
-
-    private fun ToolSpec.toLegacySpec(): LegacyToolSpec = LegacyToolSpec(
-        name = name,
-        description = description,
-        parametersJson = inputSchema,
-        capability = capability?.value.orEmpty(),
-        sideEffect = sideEffect,
-        schemaVersion = schemaVersion,
-    )
-
     private inner class BoundCall(val invocation: I) {
         var result: ToolResult? = null
         var approvalPending: Boolean = false

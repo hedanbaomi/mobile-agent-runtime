@@ -223,6 +223,21 @@ data class DangerousModeState(
     val enabled: Boolean get() = policy != DomainDangerousMode.DISABLED
 }
 
+internal data class ModelCallKey(
+    val agentId: String,
+    val snapshotId: String,
+    val sessionIdentity: String,
+    val taskIdentity: String,
+    val callId: String,
+)
+
+internal fun ToolExecutionContext.modelCallKey(callId: String): ModelCallKey =
+    ModelCallKey(agentId, snapshotId, sessionIdentity, taskIdentity, callId)
+
+/** Accept a model's call ID as an alias only when it maps to one distinct runtime request. */
+internal fun Map<ModelCallKey, String>.resolveRequestId(callId: String): String =
+    asSequence().filter { it.key.callId == callId }.map { it.value }.distinct().singleOrNull() ?: callId
+
 data class ToolExecutionContext(
     val agentId: String,
     val snapshotId: String,

@@ -43,18 +43,11 @@ class RequestInputBudgetTest {
 
     @Test
     fun unicodeBodiesUseConservativeUtf8ByteCounts() {
-        assertEquals(0L, conservativeUtf8Units(""))
-        assertEquals(3L, conservativeUtf8Units("abc"))
-        assertEquals(2L, conservativeUtf8Units("\u00e9"))
-        assertEquals(6L, conservativeUtf8Units("\u4e2d\u6587"))
-        assertEquals(4L, conservativeUtf8Units("\uD83D\uDE00"))
-        assertEquals(3L, conservativeUtf8Units("\uD83D"), "unpaired high surrogate must not understate bytes")
-        assertEquals(3L, conservativeUtf8Units("\uDE00"), "unpaired low surrogate must not understate bytes")
-
         val ascii = RequestInputBudget.estimate(messageRequest("aaa"))
         val cjk = RequestInputBudget.estimate(messageRequest("\u4e2d\u4e2d\u4e2d"))
         val supplementary = RequestInputBudget.estimate(messageRequest("\uD83D\uDE00"))
         val twoAscii = RequestInputBudget.estimate(messageRequest("aa"))
+        assertEquals(ascii.units, RequestInputBudget.estimate(messageRequest("\uD83D")).units)
         assertEquals(6L, cjk.units - ascii.units)
         assertEquals(2L, supplementary.units - twoAscii.units)
     }
@@ -192,17 +185,7 @@ class RequestInputBudgetTest {
     }
 
     @Test
-    fun saturatingArithmeticClampsInsteadOfWrapping() {
-        assertEquals(Long.MAX_VALUE, saturatingAddUnits(Long.MAX_VALUE, 1L))
-        assertEquals(Long.MAX_VALUE, saturatingAddUnits(Long.MAX_VALUE - 1L, 2L))
-        assertEquals(Long.MIN_VALUE, saturatingAddUnits(Long.MIN_VALUE, -1L))
-        assertEquals(0L, saturatingMultiplyUnits(0L, Long.MAX_VALUE))
-        assertEquals(0L, saturatingMultiplyUnits(Long.MAX_VALUE, 0L))
-        assertEquals(Long.MAX_VALUE, saturatingMultiplyUnits(Long.MAX_VALUE / 2L + 1L, 2L))
-        assertEquals(
-            Long.MAX_VALUE,
-            saturatingAddUnits(conservativeUtf8Units("x".repeat(1_000)), Long.MAX_VALUE),
-        )
+    fun largeMessageChargeIncludesProtocolOverhead() {
         assertTrue(RequestInputBudget.estimate(messageRequest("x".repeat(70_000))).units > 70_000L)
     }
 

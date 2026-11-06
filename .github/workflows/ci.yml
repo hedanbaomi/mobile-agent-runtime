@@ -80,7 +80,7 @@ jobs:
       - name: Packaged notice inventory regression tests
         run: python tools/test_runtime_notices.py
       - name: Unit tests and Android debug APK/SBOM
-        run: ./gradlew debugEvidenceGate --dependency-verification=strict --no-daemon
+        run: ./gradlew -I tools/verify-ci-kotlin-heap.gradle debugEvidenceGate --dependency-verification=strict --no-daemon
       - name: Upload debug artifact evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -91,7 +91,7 @@ jobs:
 
       - name: Review-like non-debuggable APK/SBOM/provenance gate
         # R8 and dependency collection share the 4 GiB daemon heap; serialize their workers.
-        run: ./gradlew reviewGate --dependency-verification=strict --no-daemon --max-workers=1
+        run: ./gradlew -I tools/verify-ci-kotlin-heap.gradle reviewGate --dependency-verification=strict --no-daemon --max-workers=1
       - name: Upload review security evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

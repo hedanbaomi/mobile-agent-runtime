@@ -16,9 +16,7 @@ tasks.withType<Test>().configureEach {
 
 dependencies {
     implementation(project(":shared:domain"))
-    implementation(project(":shared:serialization"))
     implementation(project(":shared:provider-api"))
-    implementation(project(":shared:knowledge-api"))
     implementation(project(":shared:skills-api"))
 
     implementation(libs.kotlinx.serialization.json)

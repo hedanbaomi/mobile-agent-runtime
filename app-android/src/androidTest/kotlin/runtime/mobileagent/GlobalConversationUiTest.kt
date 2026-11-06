@@ -39,6 +39,12 @@ import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.test.DeviceConfigurationOverride
+import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.FontScale
+import androidx.compose.ui.test.ForcedSize
+import androidx.compose.ui.test.then
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
@@ -623,9 +629,12 @@ class GlobalConversationUiTest {
     }
 
     @Test
+    @OptIn(ExperimentalTestApi::class)
     fun wideLayoutHidesCompactMenuOpener() {
         compose.setContent {
-            CompositionLocalProvider(LocalDensity provides Density(1f, fontScale = 1.8f)) {
+            DeviceConfigurationOverride(
+                DeviceConfigurationOverride.ForcedSize(DpSize(640.dp, 320.dp)) then DeviceConfigurationOverride.FontScale(1.8f),
+            ) {
                 MaterialTheme {
                     GlobalDrawerShell(
                         selectedRoute = "settings",

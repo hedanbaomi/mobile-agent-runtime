@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.collect
 import runtime.mobileagent.agent.RuntimeEvent
 import runtime.mobileagent.domain.EntityId
 import runtime.mobileagent.skills.ToolCall
+import runtime.mobileagent.skills.ToolExecutor
 
 /** Execution ownership survives a timeout; permission to update a page does not. */
 internal data class ChatRunOwner(val runId: String, val conversationId: String, val generation: Long)
@@ -58,7 +59,7 @@ internal class ChatRunExecution(
             delay(wait)
         }
     },
-    val approvalReady: (suspend (ToolCall) -> Boolean) -> Unit = {},
+    val approvalReady: (ToolExecutor, suspend (ToolCall) -> Boolean) -> Unit = { _, _ -> },
     val collectEvents: suspend (Flow<RuntimeEvent>, suspend (RuntimeEvent) -> Unit) -> Unit =
         { events, accept -> events.collect { accept(it) } },
 )

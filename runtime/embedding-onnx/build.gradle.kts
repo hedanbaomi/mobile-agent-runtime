@@ -43,7 +43,11 @@ val projectionSource = "https://huggingface.co/sentence-transformers/distiluse-b
 val onnxRuntimeVersion = "1.29.0"
 val onnxRuntimeLicenseUrl = "https://github.com/microsoft/onnxruntime/blob/v$onnxRuntimeVersion/LICENSE"
 val onnxRuntimeLicenseSource = rootProject.file("runtime/embedding-onnx/third-party/onnxruntime-$onnxRuntimeVersion/LICENSE.txt")
-val modelPackCache = layout.buildDirectory.dir("modelpack/$modelPackId")
+// Raw model files may be reused from a shared, SHA-256 verified cache.
+// Set -PpinnedArtifactCache=<dir> to share one cache across checkouts.
+val pinnedArtifactCacheRoot: File by rootProject.extra
+val offline = gradle.startParameter.isOffline
+val legacyModelPackCache = layout.buildDirectory.dir("modelpack/$modelPackId")
 val modelPackGenerated = layout.buildDirectory.dir("generated/embedding-assets/modelpacks/$modelPackId")
 val embeddingAssetsGenerated = layout.buildDirectory.dir("generated/embedding-assets")
 val onnxRuntimeLicenseGenerated = layout.buildDirectory.file(
@@ -53,16 +57,23 @@ val onnxRuntimeNoticeGenerated = layout.buildDirectory.file(
     "generated/embedding-assets/licenses/onnxruntime-$onnxRuntimeVersion/NOTICE.txt",
 )
 
-fun downloadPinned(url: String, destination: File, expectedSha256: String) {
-    PinnedArtifactDownload.download(url, destination, expectedSha256, followRedirects = true)
-}
+fun modelInput(url: String, name: String, sha256: String): File =
+    PinnedArtifactDownload.download(
+        url, pinnedArtifactCacheRoot.resolve(sha256), sha256,
+        offline = offline,
+        localSeed = legacyModelPackCache.get().file(name).asFile,
+    )
 
 val prepareModelPack = tasks.register("prepareModelPack") {
+    inputs.property("modelPackId", modelPackId)
     inputs.property("modelPackRevision", modelPackRevision)
+    inputs.property("modelPackSource", modelPackSource)
     inputs.property("modelPackModelSha256", modelPackModelSha256)
     inputs.property("modelPackTokenizerSha256", modelPackTokenizerSha256)
     inputs.property("onnxRuntimeVersion", onnxRuntimeVersion)
+    inputs.property("onnxRuntimeLicenseUrl", onnxRuntimeLicenseUrl)
     inputs.property("projectionSha256", projectionSha256)
+    inputs.property("projectionSource", projectionSource)
     inputs.property("windowStrategy", "sentence-bounded-coverage-mean-v3")
     inputs.file(onnxRuntimeLicenseSource)
     inputs.file(rootProject.file("LICENSES/Apache-2.0.txt"))
@@ -70,23 +81,22 @@ val prepareModelPack = tasks.register("prepareModelPack") {
     outputs.dir(embeddingAssetsGenerated)
     outputs.file(onnxRuntimeLicenseGenerated)
     outputs.file(onnxRuntimeNoticeGenerated)
+    outputs.upToDateWhen {
+        listOf(modelPackModelSha256, modelPackTokenizerSha256, projectionSha256).all { pinnedArtifactCacheRoot.resolve(it).isFile }
+    }
     doLast {
-        val cache = modelPackCache.get().asFile
         val generated = modelPackGenerated.get().asFile
-        val model = cache.resolve("model.onnx")
-        val tokenizer = cache.resolve("tokenizer.json")
-        downloadPinned(
+        val model = modelInput(
             "${modelPackSource}resolve/$modelPackRevision/onnx/model_quantized.onnx?download=true",
-            model,
+            "model.onnx",
             modelPackModelSha256,
         )
-        downloadPinned(
+        val tokenizer = modelInput(
             "${modelPackSource}resolve/$modelPackRevision/tokenizer.json?download=true",
-            tokenizer,
+            "tokenizer.json",
             modelPackTokenizerSha256,
         )
-        val projection = cache.resolve("dense.safetensors")
-        downloadPinned(projectionSource, projection, projectionSha256)
+        val projection = modelInput(projectionSource, "dense.safetensors", projectionSha256)
         // This task owns modelpacks; remove retired generated packs so an incremental
         // build cannot accidentally ship the obsolete model alongside the replacement.
         generated.parentFile.deleteRecursively()

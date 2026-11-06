@@ -4,7 +4,6 @@
 import java.io.File
 import groovy.json.JsonSlurper
 import java.net.URI
-import java.security.MessageDigest
 import org.gradle.api.tasks.Copy
 import org.gradle.api.tasks.Sync
 import org.gradle.api.file.DuplicatesStrategy
@@ -12,6 +11,7 @@ import org.gradle.api.tasks.bundling.Zip
 import org.gradle.api.tasks.bundling.ZipEntryCompression
 
 import runtime.mobileagent.build.PinnedArtifactDownload
+import runtime.mobileagent.license.BuildEvidenceHashes
 
 plugins {
     alias(libs.plugins.android.library)
@@ -19,6 +19,7 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+val debugNativeAbis: List<String> by rootProject.extra
 val officialCpythonVersion = "3.14.7"
 val officialCpythonDirectory = layout.buildDirectory.dir("official/$officialCpythonVersion")
 val officialCpythonSha256 = mapOf(
@@ -30,6 +31,10 @@ val officialCpythonSigstoreSha256 = mapOf(
     "x86_64" to "840007443d6ac16262d33753875ed183bb55cc350ad809b090b4cf011055e099",
 )
 val officialCpythonSource = "https://www.python.org/ftp/python/$officialCpythonVersion"
+// Raw pinned archives may be reused from a shared, SHA-256 verified cache.
+// Set -PpinnedArtifactCache=<dir> to share one cache across checkouts.
+val pinnedArtifactCacheRoot: File by rootProject.extra
+val offline = gradle.startParameter.isOffline
 val pythonAssetSourceDirectory = layout.buildDirectory.dir("generated/pythonAssetSources")
 val pythonAssetDirectory = layout.buildDirectory.dir("generated/pythonAssets")
 val compatibilityDirectory = rootProject.file("vendor/cpython/3.14.7/api26-x86_64")
@@ -43,23 +48,19 @@ val safeStdlibModules = listOf(
 val safeStdlibRegistry = JsonSlurper().parse(safeStdlibRegistryFile) as Map<String, Map<String, Map<String, String>>>
 
 
-fun File.sha256Hex(): String {
-    val digest = MessageDigest.getInstance("SHA-256")
-    inputStream().use { input ->
-        val buffer = ByteArray(64 * 1024)
-        while (true) {
-            val count = input.read(buffer)
-            if (count < 0) break
-            digest.update(buffer, 0, count)
-        }
-    }
-    return digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
-}
+val excludedStdlibPaths = listOf(
+    "test/**", "tests/**", "idlelib/**", "tkinter/**", "turtledemo/**", "ensurepip/**", "venv/**",
+    "ctypes/**", "multiprocessing/**", "subprocess.py", "socket.py", "ssl.py", "asyncio/**",
+    "concurrent/futures/**", "http/**", "urllib/request.py", "urllib/parse.py",
+)
+
+fun File.sha256Hex(): String = BuildEvidenceHashes.sha256(this)
 
 fun prefixFor(architecture: String): File =
     officialCpythonDirectory.get().asFile.resolve("extract-$architecture/prefix")
 
-fun downloadPinned(url: String, destination: File, expectedSha256: String) {
+fun officialInput(filename: String, sha256: String): File {
+    val url = "$officialCpythonSource/$filename"
     val source = URI(url)
     check(
         source.scheme == "https" &&
@@ -67,60 +68,44 @@ fun downloadPinned(url: String, destination: File, expectedSha256: String) {
             source.userInfo == null &&
             source.port in listOf(-1, 443),
     ) { "Official CPython source must be https://www.python.org:443" }
-    PinnedArtifactDownload.download(url, destination, expectedSha256, followRedirects = false)
+    return PinnedArtifactDownload.download(
+        url, pinnedArtifactCacheRoot.resolve(sha256), sha256,
+        followRedirects = false,
+        offline = offline,
+        localSeed = officialCpythonDirectory.get().asFile.resolve(filename),
+    )
+}
+
+// Check the pinned archive and Sigstore inputs on every build, independently of prefix reuse.
+val resolveOfficialCpython = tasks.register("resolveOfficialCpython") {
+    doLast {
+        officialCpythonSha256.forEach { (architecture, archiveSha256) ->
+            val name = "python-$officialCpythonVersion-$architecture-linux-android.tar.gz"
+            officialInput(name, archiveSha256)
+            officialInput("$name.sigstore", officialCpythonSigstoreSha256.getValue(architecture))
+        }
+    }
 }
 
 val prepareOfficialCpython = tasks.register("prepareOfficialCpython") {
-    // Deliberately keep this task untracked: every build re-hashes ignored
-    // external inputs, while valid downloads and matching extractions are reused.
-    inputs.property("officialCpythonVersion", officialCpythonVersion)
-    inputs.property("officialCpythonSha256", officialCpythonSha256)
-    inputs.property("officialCpythonSigstoreSha256", officialCpythonSigstoreSha256)
+    dependsOn(resolveOfficialCpython)
+    inputs.files(officialCpythonSha256.values.map { pinnedArtifactCacheRoot.resolve(it) })
+    inputs.file(safeStdlibRegistryFile)
+    inputs.property("excludedStdlibPaths", excludedStdlibPaths)
+    outputs.dirs(officialCpythonSha256.keys.map { prefixFor(it).parentFile })
     doLast {
-        officialCpythonSha256.forEach { (architecture, archiveSha256) ->
-            val root = officialCpythonDirectory.get().asFile
-            val archive = root.resolve("python-$officialCpythonVersion-$architecture-linux-android.tar.gz")
-            val sigstore = File("${archive}.sigstore")
-            downloadPinned("$officialCpythonSource/${archive.name}", archive, archiveSha256)
-            downloadPinned(
-                "$officialCpythonSource/${sigstore.name}",
-                sigstore,
-                officialCpythonSigstoreSha256.getValue(architecture),
-            )
-
-            val prefix = prefixFor(architecture)
-            val extracted = root.resolve("extract-$architecture")
-            val sourceMarker = extracted.resolve(".archive-sha256")
-            val extractionComplete =
-                sourceMarker.isFile &&
-                    sourceMarker.readText(Charsets.UTF_8).trim() == archiveSha256 &&
-                    prefix.resolve("include/python3.14/Python.h").isFile &&
-                    prefix.resolve("lib/libpython3.14.so").isFile &&
-                    prefix.resolve("lib/python3.14/LICENSE.txt").isFile
-            if (!extractionComplete) {
-                val temporary = root.resolve(".extract-$architecture.tmp")
-                temporary.deleteRecursively()
-                project.copy {
-                    from(tarTree(resources.gzip(archive)))
-                    into(temporary)
+        officialCpythonSha256.forEach { (architecture, hash) ->
+            val stdlib = "prefix/lib/python3.14"
+            project.sync {
+                from(tarTree(resources.gzip(pinnedArtifactCacheRoot.resolve(hash))))
+                into(prefixFor(architecture).parentFile)
+                include("prefix/include/python3.14/**", "prefix/lib/libpython3.14.so", "$stdlib/LICENSE.txt")
+                include(safeStdlibRegistry.getValue(architecture).values.map { "$stdlib/lib-dynload/${it.getValue("source")}" })
+                if (architecture == "aarch64") {
+                    // The one packaged stdlib ZIP includes the empty site-packages directory.
+                    include("$stdlib/**/*.py", "$stdlib/site-packages/README.txt")
+                    exclude(excludedStdlibPaths.map { "$stdlib/$it" })
                 }
-                val temporaryPrefix = temporary.resolve("prefix")
-                check(temporaryPrefix.resolve("include/python3.14/Python.h").isFile) {
-                    "Official CPython headers were not extracted for $architecture"
-                }
-                check(temporaryPrefix.resolve("lib/libpython3.14.so").isFile) {
-                    "Official CPython library was not extracted for $architecture"
-                }
-                check(temporaryPrefix.resolve("lib/python3.14/LICENSE.txt").isFile) {
-                    "Official CPython PSF license was not extracted for $architecture"
-                }
-                temporary.resolve(".archive-sha256").writeText("$archiveSha256\n", Charsets.UTF_8)
-                extracted.deleteRecursively()
-                project.copy {
-                    from(temporary)
-                    into(extracted)
-                }
-                temporary.deleteRecursively()
             }
         }
     }
@@ -130,8 +115,8 @@ val verifyOfficialCpython = tasks.register("verifyOfficialCpython") {
     dependsOn(prepareOfficialCpython)
     doLast {
         officialCpythonSha256.forEach { (architecture, expectedHash) ->
-            val archive = officialCpythonDirectory.get().asFile.resolve("python-$officialCpythonVersion-$architecture-linux-android.tar.gz")
-            val sigstore = File("${archive}.sigstore")
+            val archive = pinnedArtifactCacheRoot.resolve(expectedHash)
+            val sigstore = pinnedArtifactCacheRoot.resolve(officialCpythonSigstoreSha256.getValue(architecture))
             val prefix = prefixFor(architecture)
             check(archive.isFile) { "Missing official CPython $officialCpythonVersion archive for $architecture: ${archive.absolutePath}" }
             check(archive.sha256Hex() == expectedHash) { "Official CPython archive hash mismatch for $architecture" }
@@ -177,30 +162,41 @@ val verifyCpythonCompatibility = tasks.register("verifyCpythonCompatibility") {
 
 val stageOfficialCpythonLibraries = tasks.register("stageOfficialCpythonLibraries") {
     dependsOn(verifyCpythonCompatibility)
+    // Stage only from the verified archives and separately pinned x86 override.
+    inputs.property("safeStdlibModules", safeStdlibModules)
+    inputs.file(safeStdlibRegistryFile)
+    inputs.property("archivesByArchitecture", officialCpythonSha256)
+    inputs.files(officialCpythonSha256.values.map { pinnedArtifactCacheRoot.resolve(it) })
+    inputs.file(compatibilityDirectory.resolve("libpython3.14.so"))
     outputs.dir(layout.buildDirectory.dir("generated/cpython-jniLibs"))
     doLast {
         val destinationRoot = layout.buildDirectory.dir("generated/cpython-jniLibs").get().asFile
         project.delete(destinationRoot)
         officialCpythonSha256.keys.forEach { architecture ->
             val abi = if (architecture == "aarch64") "arm64-v8a" else "x86_64"
-            val source = prefixFor(architecture).resolve("lib")
             val destination = destinationRoot.resolve(abi)
             destination.mkdirs()
-            source.listFiles()
-                ?.filter { file ->
-                    file.isFile && (file.name == "libpython3.14.so" || file.name == "libpython3.so" ||
-                        file.name.startsWith("lib") && file.name.endsWith("_python.so"))
+            val extensions = safeStdlibRegistry.getValue(architecture).entries.associate { (name, record) ->
+                "prefix/lib/python3.14/lib-dynload/${record.getValue("source")}" to "libcpython_$name.so"
+            }
+            val archive = pinnedArtifactCacheRoot.resolve(officialCpythonSha256.getValue(architecture))
+            tarTree(resources.gzip(archive)).visit {
+                val member = path.removePrefix("./")
+                val outputName = extensions[member] ?: name.takeIf {
+                    member == "prefix/lib/$it" && (it == "libpython3.so" || it == "libpython3.14.so" ||
+                        (it.startsWith("lib") && it.endsWith("_python.so")))
                 }
-                ?.forEach { file -> file.copyTo(destination.resolve(file.name), overwrite = true) }
+                if (!isDirectory && outputName != null) {
+                    destination.resolve(outputName).outputStream().use { out -> open().use { it.copyTo(out) } }
+                }
+            }
             if (architecture == "x86_64") {
                 compatibilityDirectory.resolve("libpython3.14.so")
                     .copyTo(destination.resolve("libpython3.14.so"), overwrite = true)
             }
-            safeStdlibRegistry.getValue(architecture).forEach { (name, record) ->
-                prefixFor(architecture).resolve("lib/python3.14/lib-dynload").resolve(record.getValue("source"))
-                    .copyTo(destination.resolve("libcpython_$name.so"), overwrite = true)
+            check((extensions.values + listOf("libpython3.14.so", "libpython3.so")).all { destination.resolve(it).isFile }) {
+                "Incomplete CPython JNI staging for $abi"
             }
-            check(destination.resolve("libpython3.14.so").isFile) { "Failed to stage CPython for $abi" }
         }
         destinationRoot.resolve("safe_stdlib_modules.h").writeText(buildString {
             appendLine("// SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors")
@@ -242,11 +238,7 @@ val packagePythonStdlib = tasks.register<Zip>("packagePythonStdlib") {
     from(prefixFor("aarch64").resolve("lib/python3.14")) {
         // Keep the PSF license/notice alongside the standard library asset.
         include("**/*.py", "LICENSE.txt")
-        exclude(
-            "test/**", "tests/**", "idlelib/**", "tkinter/**", "turtledemo/**", "ensurepip/**", "venv/**",
-            "ctypes/**", "multiprocessing/**", "subprocess.py", "socket.py", "ssl.py", "asyncio/**",
-            "concurrent/futures/**", "http/**", "urllib/request.py", "urllib/parse.py",
-        )
+        exclude(excludedStdlibPaths)
     }
     from("src/main/python")
 }
@@ -259,10 +251,22 @@ val packagePythonLicense = tasks.register<Copy>("packagePythonLicense") {
 
 val packagePythonNotice = tasks.register("packagePythonNotice") {
     dependsOn(verifyCpythonCompatibility)
+    inputs.property("officialCpythonVersion", officialCpythonVersion)
+    inputs.property("officialCpythonSha256", officialCpythonSha256)
+    inputs.property("compatibilitySha256", compatibilitySha256)
+    inputs.file(safeStdlibRegistryFile)
+    inputs.files(
+        compatibilityDirectory.resolve("provenance.json"),
+        compatibilityDirectory.resolve("HACL-LICENSE.txt"),
+        compatibilityDirectory.resolve("BLAKE2-NOTICE.txt"),
+        compatibilityDirectory.resolve("CC0-1.0.txt"),
+    )
     val notice = pythonAssetSourceDirectory.map {
         it.file("licenses/cpython-$officialCpythonVersion/NOTICE.txt")
     }
     outputs.file(notice)
+    outputs.files(listOf("compatibility-provenance.json", "HACL-LICENSE.txt", "BLAKE2-NOTICE.txt", "CC0-1.0.txt",
+        "safe-stdlib-modules.json").map { name -> notice.map { it.asFile.resolveSibling(name) } })
     doLast {
         val destination = notice.get().asFile
         destination.parentFile.mkdirs()
@@ -319,7 +323,7 @@ android {
     defaultConfig {
         minSdk = libs.versions.minSdk.get().toInt()
         ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            abiFilters += debugNativeAbis
         }
         externalNativeBuild {
             cmake {
@@ -359,7 +363,6 @@ tasks.configureEach {
 }
 
 dependencies {
-    implementation(project(":shared:domain"))
     implementation(project(":shared:skills-api"))
     implementation(project(":platform:android:ipc"))
     implementation(libs.kotlinx.coroutines.core)

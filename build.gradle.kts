@@ -11,6 +11,21 @@ plugins {
     alias(libs.plugins.compose.compiler) apply false
 }
 
+// A narrow APK is for local iteration. Evidence and release invocations always
+// use their own standard ABI sets, even if a developer left a property enabled.
+val supportedAndroidAbis = listOf("arm64-v8a", "x86_64")
+val developerAbi = providers.gradleProperty("marDevAbi").orNull
+if (developerAbi != null) {
+    require(developerAbi in supportedAndroidAbis) { "marDevAbi must be arm64-v8a or x86_64" }
+    require(gradle.startParameter.taskNames == listOf(":app-android:assembleDebug") &&
+        providers.environmentVariable("CI").orNull.isNullOrBlank()) {
+        "marDevAbi is only allowed for a local :app-android:assembleDebug invocation"
+    }
+}
+extra["debugNativeAbis"] = developerAbi?.let(::listOf) ?: supportedAndroidAbis
+extra["pinnedArtifactCacheRoot"] = providers.gradleProperty("pinnedArtifactCache").orNull
+    ?.takeIf { it.isNotBlank() }?.let { file(it) } ?: gradle.gradleUserHomeDir.resolve("mobileagent-pinned")
+
 // Every resolvable configuration participates in dependency locking.  The
 // checked-in lockfiles are generated with `--write-locks` and are verified by
 // the release gate before any artifact can be considered reproducible.

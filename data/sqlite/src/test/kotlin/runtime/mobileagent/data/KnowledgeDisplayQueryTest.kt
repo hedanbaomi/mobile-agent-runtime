@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.knowledge.MemoryBlobSink
+import runtime.mobileagent.knowledge.sha256Hex
 
 class KnowledgeDisplayQueryTest {
     @Test
@@ -118,6 +119,38 @@ class KnowledgeDisplayQueryTest {
         assertTrue(!counted.queries.single().first.contains(sqlLike))
         assertTrue(repo.listJobs("missing").isEmpty())
         assertEquals(1, repo.listJobs().size)
+    }
+
+    @Test
+    fun consentScopeCountsAndHashesTheSameLiveRowsInLegacyOrder() = fixture { db ->
+        val counted = CountingConnection(db)
+        val repo = KnowledgeRepository(counted, MemoryBlobSink())
+        assertEquals(KnowledgeDocumentScope(sha256Hex(byteArrayOf()), 0), repo.documentScope("selected"))
+        repo.createKnowledgeBase("Selected", "selected")
+        repo.createKnowledgeBase("Other", "other")
+        document(db, "文", "selected")
+        document(db, "a", "selected")
+        document(db, "removed", "selected", deleted = true)
+        document(db, "outside", "other")
+        db.execute("UPDATE documents SET active_version_id=? WHERE id=?", listOf("v2", "文"))
+        counted.clear()
+        val legacyBytes = "a:hash.a:\n文:hash.文:v2".toByteArray(Charsets.UTF_8)
+        assertEquals(KnowledgeDocumentScope(sha256Hex(legacyBytes), 2), repo.documentScope("selected"))
+        assertEquals(listOf(2), counted.rowCounts)
+    }
+
+    @Test
+    fun findingOneImportJobDecodesOnlyTheRequestedRow() = fixture { db ->
+        job(db, "valid", "selected", ImportStage.AWAITING_UPLOAD_CONSENT.name, "1", "UNKNOWN_OUTCOME")
+        val counted = CountingConnection(db)
+        val repo = KnowledgeRepository(counted, MemoryBlobSink())
+        val expected = repo.listJobs().single().first
+        job(db, "invalid", "selected", "BROKEN_STAGE", "2")
+        counted.clear()
+        assertEquals(expected, repo.findJob("valid"))
+        assertEquals(null, repo.findJob("valid' OR 1=1 --"))
+        assertThrows(IllegalArgumentException::class.java) { repo.findJob("invalid") }
+        assertEquals(listOf(1, 0, 1), counted.rowCounts)
     }
 
     private fun fixture(test: (SqlConnection) -> Unit) {

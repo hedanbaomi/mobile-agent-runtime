@@ -21,7 +21,6 @@ import runtime.mobileagent.domain.RunRecord
 import runtime.mobileagent.domain.RunStatus
 import runtime.mobileagent.domain.ToolInvocation
 import runtime.mobileagent.domain.Utc
-import runtime.mobileagent.feature.chat.ChatRequestInspectorAvailability
 
 /** Restart safety proof for Chat's process-local approval lifecycle. */
 @RunWith(AndroidJUnit4::class)
@@ -234,39 +233,4 @@ class ChatViewModelRestartApprovalTest {
         assertFalse("Approval recovery did not finish", viewModel.state.value.loading)
     }
 
-    @Test
-    fun requestInspectorAvailabilityDistinguishesDisabledPreparationLossAndReady() {
-        assertEquals(
-            ChatRequestInspectorAvailability.DISABLED,
-            resolveRequestInspectorAvailability(
-                inspectorEnabled = false,
-                previewAvailable = false,
-                persistedPreviewHint = false,
-            ),
-        )
-        assertEquals(
-            ChatRequestInspectorAvailability.NOT_PREPARED,
-            resolveRequestInspectorAvailability(
-                inspectorEnabled = true,
-                previewAvailable = false,
-                persistedPreviewHint = false,
-            ),
-        )
-        assertEquals(
-            ChatRequestInspectorAvailability.CONTEXT_LOST,
-            resolveRequestInspectorAvailability(
-                inspectorEnabled = true,
-                previewAvailable = false,
-                persistedPreviewHint = true,
-            ),
-        )
-        assertEquals(
-            ChatRequestInspectorAvailability.READY,
-            resolveRequestInspectorAvailability(
-                inspectorEnabled = true,
-                previewAvailable = true,
-                persistedPreviewHint = true,
-            ),
-        )
-    }
 }

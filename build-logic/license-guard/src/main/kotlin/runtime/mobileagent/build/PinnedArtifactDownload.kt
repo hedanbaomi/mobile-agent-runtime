@@ -45,6 +45,8 @@ object PinnedArtifactDownload {
         readTimeoutMillis: Int = 120_000,
         maxAttempts: Int = MAX_ATTEMPTS,
         initialBackoffMillis: Long = 1_000L,
+        localSeed: File? = null,
+        offline: Boolean = false,
     ): File {
         require(sha256Pattern.matches(expectedSha256)) {
             "expectedSha256 must be 64 lowercase hexadecimal characters"
@@ -85,6 +87,14 @@ object PinnedArtifactDownload {
         }
 
         try {
+            // Bootstrap a shared content-addressed file from an older checkout.
+            // Verify the private copy before publishing, even if the seed changes.
+            if (localSeed != null && copyMatchingSeed(localSeed, checkNotNull(temporary), expectedSha256)) {
+                replaceAtomically(checkNotNull(temporary), target, artifactName, expectedSha256)
+                temporary = null
+                return target.toFile()
+            }
+            if (offline) throw failure(artifactName, "verified input unavailable offline")
             var backoffMillis = initialBackoffMillis
             for (attempt in 1..maxAttempts) {
                 if (Thread.currentThread().isInterrupted) {
@@ -103,7 +113,7 @@ object PinnedArtifactDownload {
                     if (Thread.currentThread().isInterrupted) {
                         throw failure(artifactName, "cancelled")
                     }
-                    replaceAtomically(checkNotNull(temporary), target, artifactName)
+                    replaceAtomically(checkNotNull(temporary), target, artifactName, expectedSha256)
                     temporary = null
                     return target.toFile()
                 } catch (attemptFailure: AttemptFailure) {
@@ -237,22 +247,19 @@ object PinnedArtifactDownload {
         }
     }
 
-    private fun replaceAtomically(temporary: Path, target: Path, artifactName: String) {
+    private fun replaceAtomically(temporary: Path, target: Path, artifactName: String, expected: String) {
         try {
-            Files.move(
-                temporary,
-                target,
-                StandardCopyOption.ATOMIC_MOVE,
-                StandardCopyOption.REPLACE_EXISTING,
-            )
-        } catch (_: AtomicMoveNotSupportedException) {
             try {
+                Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            } catch (_: AtomicMoveNotSupportedException) {
                 Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING)
-            } catch (_: IOException) {
-                throw failure(artifactName, "local I/O failure")
             }
         } catch (_: IOException) {
-            throw failure(artifactName, "local I/O failure")
+            // Windows can refuse a replacement while another checkout is
+            // reading the winner. Accept it only after verifying its bytes.
+            val winnerMatches = try { hashFile(target) == expected } catch (_: IOException) { false }
+            if (!winnerMatches) throw failure(artifactName, "local I/O failure")
+            Files.deleteIfExists(temporary)
         }
     }
 
@@ -268,6 +275,15 @@ object PinnedArtifactDownload {
             "url must be an HTTP(S) URL without user-info or a fragment"
         }
         return uri
+    }
+
+    private fun copyMatchingSeed(seed: File, temporary: Path, expected: String): Boolean = try {
+        Files.newInputStream(seed.toPath()).use { input ->
+            Files.copy(input, temporary, StandardCopyOption.REPLACE_EXISTING)
+        }
+        hashFile(temporary) == expected
+    } catch (_: IOException) {
+        false // Missing or unreadable legacy input: apply the normal network/offline policy.
     }
 
     private fun hashFile(path: Path): String {

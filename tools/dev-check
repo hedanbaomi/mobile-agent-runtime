@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+set -eu
+
+if [[ $# -lt 1 || $# -gt 2 || ! $1 =~ ^(:[[:alnum:]_-]+)+:(test|testDebugUnitTest)$ ]]; then
+    echo "Usage: bash tools/dev-check :module:test [test-pattern]" >&2
+    exit 2
+fi
+task=$1
+shift
+if [[ $# == 1 ]]; then set -- --tests "$1"; fi
+cd -- "$(dirname -- "$0")/.."
+cache_options=()
+if [[ $task == :shared:*:test || $task == :data:sqlite:test || $task == :desktop:bridge:test ]]; then
+    cache_options=(--configure-on-demand --configuration-cache --configuration-cache-problems=fail)
+fi
+exec ./gradlew --offline --no-daemon --max-workers=2 --dependency-verification=strict \
+    "${cache_options[@]}" licenseGuard verifyModuleBoundaries "$task" "$@"

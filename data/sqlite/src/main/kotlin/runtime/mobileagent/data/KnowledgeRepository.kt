@@ -36,6 +36,8 @@ import runtime.mobileagent.knowledge.ImportItemState
 import runtime.mobileagent.knowledge.ConsumedConsentTicket
 import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.knowledge.KnowledgeArchive
+import runtime.mobileagent.knowledge.KnowledgeArchiveEntry
+import runtime.mobileagent.knowledge.KnowledgeArchiveSummary
 import runtime.mobileagent.knowledge.ImportStateMachine
 import runtime.mobileagent.knowledge.MediaKind
 import runtime.mobileagent.knowledge.OfficeParser
@@ -93,6 +95,9 @@ import java.util.concurrent.CompletableFuture
 /** Legacy cache identity may be adopted only when it maps to one current destination. */
 data class LegacyVisionCacheTarget(val fingerprint: String, val unambiguous: Boolean)
 
+/** Digest and count of the same ordered set of live document versions used for consent. */
+data class KnowledgeDocumentScope(val sha256: String, val documentCount: Int)
+
 /** Display metadata only; import, consent and execution use their full records. */
 data class KnowledgeBaseDisplaySummary(val id: String, val name: String, val documentCount: Int)
 
@@ -132,11 +137,13 @@ class KnowledgeRepository(
     private val pipeline = DocumentPipelineStore(db)
     private val unitPlanner = DocumentUnitPlanner(plannerVersion)
     private val storage = StorageMaintenance(db, blobs, vectorIndexDirectory)
+    private val batchReads = KnowledgeBatchReadStore(db)
     private val batchProgressStore = KnowledgeBatchProgressStore(db)
     private val visualSource = KnowledgeVisualSource(pdfRasterizer)
     private val retrievalStore = KnowledgeRetrievalStore(db) { kbId -> vectorIndexCache.invalidateKnowledgeBase(kbId) }
     private val lexicalIndex = KnowledgeLexicalIndexStore(db)
     private val repairState = KnowledgeIndexRepairState(db)
+    private val jobDisplay = KnowledgeJobDisplayStore(db)
 
     fun storageUsage(): StorageUsage = synchronized(indexLock) { storage.usage() }
     fun configureStorageQuota(totalBytes: Long): StorageUsage = synchronized(indexLock) { storage.configureQuota(totalBytes) }
@@ -164,7 +171,7 @@ class KnowledgeRepository(
         var rebuilt = 0
         rows.forEach { row ->
             if (pipeline.publication(row.string("id"),chunkVersion) == null) {
-                val job = importJobFromRow(row,visionConfigured=true,stage=ImportStage.COPYING)
+                val job = row.importJob(visionConfigured = true, stage = ImportStage.COPYING)
                 val bytes = blobs.get(row.string("blob_hash")) ?: error("CAS source is missing")
                 continueImport(job,row.string("display_name"),bytes,SourceFormat.valueOf(row.string("format")))
                 if (ImportStateMachine.isPublished(job.stage)) rebuilt++
@@ -689,6 +696,15 @@ class KnowledgeRepository(
                 "WHERE kb.deleted_at IS NULL GROUP BY kb.id,kb.name,kb.created_at ORDER BY kb.created_at",
         ).map { KnowledgeBaseDisplaySummary(it.string("id"), it.string("name"), it.long("document_count").toInt()) }
 
+    fun documentScope(knowledgeBaseId: String): KnowledgeDocumentScope {
+        val rows = db.query(
+            "SELECT id,blob_hash,active_version_id FROM documents WHERE kb_id = ? AND deleted_at IS NULL ORDER BY id",
+            listOf(knowledgeBaseId),
+        )
+        val fingerprint = rows.joinToString("\n") { "${it.string("id")}:${it.string("blob_hash")}:${it.string("active_version_id")}" }
+        return KnowledgeDocumentScope(sha256Hex(fingerprint.toByteArray(Charsets.UTF_8)), rows.size)
+    }
+
     /**
      * Suspending API import entry point.  Parsing, CAS writes, cache commits,
      * and short SQLite transitions remain synchronous, but the selected API
@@ -726,9 +742,8 @@ class KnowledgeRepository(
         if (format == SourceFormat.KNOWLEDGE_ARCHIVE) {
             require(bytes.size <= KnowledgeArchive.MAX_TOTAL_BYTES) { "RESOURCE_LIMIT" }
             return expandKnowledgeArchive(
-                displayName, bytes, visionConfigured, kbId, visionConsent, embeddingIsApi, embeddingConsent,
-                pauseAt,
-            )
+                displayName, visionConfigured, kbId, visionConsent, embeddingIsApi, embeddingConsent, pauseAt,
+            ) { visit -> KnowledgeArchive.forEachEntry(bytes, visit) }
         }
         require(bytes.size <= MediaKind.MAX_IMPORT_BYTES) { "RESOURCE_LIMIT" }
         val stored = putManagedBlob(bytes, mediaType.ifBlank { guessedMime(format) })
@@ -851,7 +866,7 @@ class KnowledgeRepository(
         val format = recordedFormat.takeIf { it.isNotBlank() }?.let { runCatching { SourceFormat.valueOf(it) }.getOrNull() }
             ?: MediaKind.detect(displayName, "", payload.copyOf(minOf(payload.size, 64)))
         val effectiveStage = if (stage == ImportStage.FAILED) ImportStage.COPYING else stage
-        val job = importJobFromRow(row, visionConfigured, effectiveStage, documentId, kbId).apply {
+        val job = row.importJob(visionConfigured, effectiveStage, documentId, kbId).apply {
             if (stage == ImportStage.FAILED) error = null
         }
         val batchId = row.string("batch_id").ifBlank { null }
@@ -913,7 +928,7 @@ class KnowledgeRepository(
             check(visionTargetAvailable(it)) { "Vision destination changed; no image was sent" }
         }
         expectedDocumentsFingerprintHash?.let {
-            check(it == documentsFingerprintHash(row.string("kb_id"))) {
+            check(it == documentScope(row.string("kb_id")).sha256) {
                 "Vision consent documents changed; no image was sent"
             }
         }
@@ -969,7 +984,7 @@ class KnowledgeRepository(
         check(document.string("deleted_at").isBlank()) { "document deleted" }
         val bytes = blobs.get(document.string("blob_hash")) ?: error("CAS blob is missing")
         val format = runCatching { SourceFormat.valueOf(document.string("format")) }.getOrDefault(SourceFormat.UNKNOWN)
-        val job = importJobFromRow(row, visionConfigured, ImportStage.QUEUED, documentId, kbId).also {
+        val job = row.importJob(visionConfigured, ImportStage.QUEUED, documentId, kbId).also {
             it.embeddingIsApi = true
             it.embeddingConsent = true
         }
@@ -1223,9 +1238,8 @@ class KnowledgeRepository(
         if (format == SourceFormat.KNOWLEDGE_ARCHIVE) {
             require(bytes.size <= KnowledgeArchive.MAX_TOTAL_BYTES) { "RESOURCE_LIMIT" }
             return expandKnowledgeArchive(
-                displayName, bytes, visionConfigured, kbId, visionConsent, embeddingIsApi, embeddingConsent,
-                pauseAt,
-            )
+                displayName, visionConfigured, kbId, visionConsent, embeddingIsApi, embeddingConsent, pauseAt,
+            ) { visit -> KnowledgeArchive.forEachEntry(bytes, visit) }
         }
         require(bytes.size <= MediaKind.MAX_IMPORT_BYTES) { "RESOURCE_LIMIT" }
         val stored = putManagedBlob(bytes, mediaType.ifBlank { guessedMime(format) })
@@ -1336,15 +1350,8 @@ class KnowledgeRepository(
             "Office packages must be imported as documents, not knowledge archives"
         }
         return expandKnowledgeArchive(
-            displayName,
-            file,
-            visionConfigured,
-            kbId,
-            visionConsent,
-            embeddingIsApi,
-            embeddingConsent,
-            pauseAt,
-        )
+            displayName, visionConfigured, kbId, visionConsent, embeddingIsApi, embeddingConsent, pauseAt,
+        ) { visit -> KnowledgeArchive.forEachEntry(file, visit) }
     }
 
     fun resumeImport(jobId: String, bytes: ByteArray? = null, visionConfigured: Boolean): ImportJob {
@@ -1501,7 +1508,7 @@ class KnowledgeRepository(
             check(visionTargetAvailable(it)) { "Vision destination changed; no image was sent" }
         }
         expectedDocumentsFingerprintHash?.let {
-            check(it == documentsFingerprintHash(row.string("kb_id"))) {
+            check(it == documentScope(row.string("kb_id")).sha256) {
                 "Vision consent documents changed; no image was sent"
             }
         }
@@ -1575,7 +1582,7 @@ class KnowledgeRepository(
         check(document.string("deleted_at").isBlank()) { "document deleted" }
         val bytes = blobs.get(document.string("blob_hash")) ?: error("CAS blob is missing")
         val format = runCatching { SourceFormat.valueOf(document.string("format")) }.getOrDefault(SourceFormat.UNKNOWN)
-        val job = importJobFromRow(row, visionConfigured = true, stage = stage)
+        val job = row.importJob(visionConfigured = true, stage = stage)
         job.visualGapsAccepted = true
         return continueImportCancellable(job, row.string("display_name"), bytes, format)
     }
@@ -1597,7 +1604,7 @@ class KnowledgeRepository(
         check(document.string("deleted_at").isBlank()) { "document deleted" }
         val bytes = blobs.get(document.string("blob_hash")) ?: error("CAS blob is missing")
         val format = runCatching { SourceFormat.valueOf(document.string("format")) }.getOrDefault(SourceFormat.UNKNOWN)
-        val job = importJobFromRow(row, visionConfigured = row.boolean("has_images"), stage = stage)
+        val job = row.importJob(visionConfigured = row.boolean("has_images"), stage = stage)
         job.visualGapsAccepted = true
         return continueImport(job, row.string("display_name"), bytes, format)
     }
@@ -1624,7 +1631,7 @@ class KnowledgeRepository(
                 check(authorizedVisionTargetLocked(jobId) == selected) { "Vision batch authorization changed" }
             }
             expectedDocumentsFingerprintHash?.let {
-                check(it == documentsFingerprintHash(row.string("kb_id"))) { "Vision consent documents changed; no image was sent" }
+                check(it == documentScope(row.string("kb_id")).sha256) { "Vision consent documents changed; no image was sent" }
             }
             val retryTargets = mutableListOf(selected)
             legacyVisionCacheTarget(selected)?.takeIf { it.unambiguous }?.let { retryTargets += it.fingerprint }
@@ -2026,41 +2033,14 @@ class KnowledgeRepository(
     private fun List<SearchHit>.rankOrdered(): List<SearchHit> =
         sortedWith(compareByDescending<SearchHit> { it.score }.thenBy { it.chunkId }.thenBy { it.knowledgeBaseId })
 
-    fun waitingForVisionCount(): Int =
-        db.query(
-            "SELECT COUNT(*) AS n FROM import_jobs WHERE stage = ?",
-            listOf(ImportStage.WAITING_FOR_VISION_MODEL.name),
-        ).singleOrNull()?.long("n")?.toInt() ?: 0
+    fun waitingForVisionCount(): Int = jobDisplay.waitingForVisionCount()
 
-    fun listJobs(): List<Triple<ImportJob, String, String>> =
-        importJobViews(db.query("SELECT * FROM import_jobs ORDER BY updated_at DESC"))
+    fun findJob(id: String): ImportJob? = jobDisplay.find(id)
+
+    fun listJobs(): List<Triple<ImportJob, String, String>> = jobDisplay.list()
 
     /** Filter before sorting/decoding; the global read remains available for recovery. */
-    fun listJobs(knowledgeBaseId: String): List<Triple<ImportJob, String, String>> =
-        importJobViews(db.query("SELECT * FROM import_jobs WHERE kb_id=? ORDER BY updated_at DESC", listOf(knowledgeBaseId)))
-
-    private fun importJobViews(rows: List<SqlRow>): List<Triple<ImportJob, String, String>> =
-        rows.map { row ->
-            val stage = ImportStage.valueOf(row.string("stage"))
-            Triple(
-                ImportJob(
-                    id = row.string("id"),
-                    knowledgeBaseId = row.string("kb_id"),
-                    documentId = row.string("document_id"),
-                    stage = stage,
-                    hasImages = row.boolean("has_images"),
-                    visionConsent = row.boolean("vision_consent"),
-                    consentedVisionFingerprint = row.string("vision_binding_json").ifBlank { null },
-                    embeddingIsApi = row.boolean("embedding_is_api"),
-                    embeddingConsent = row.boolean("embedding_consent"),
-                    error = row.string("error").ifBlank { null },
-                    visualGapsAccepted = stage == ImportStage.READY_WITH_VISUAL_GAPS ||
-                        row.string("error").startsWith(TEXT_ONLY_VISUAL_GAPS_PREFIX),
-                ),
-                row.string("display_name"),
-                row.string("updated_at"),
-            )
-        }
+    fun listJobs(knowledgeBaseId: String): List<Triple<ImportJob, String, String>> = jobDisplay.list(knowledgeBaseId)
 
     fun blobRefCount(hash: String): Long =
         db.query("SELECT ref_count FROM blobs WHERE hash = ?", listOf(hash)).singleOrNull()?.long("ref_count") ?: 0L
@@ -2690,29 +2670,6 @@ class KnowledgeRepository(
             "AND active_version_id IS NOT NULL AND active_version_id!='' LIMIT 1", listOf(kbId)).isEmpty()
     }
 
-    private fun importJobFromRow(
-        row: SqlRow,
-        visionConfigured: Boolean,
-        stage: ImportStage,
-        documentId: String = row.string("document_id"),
-        knowledgeBaseId: String = row.string("kb_id"),
-    ): ImportJob = ImportJob(
-        id = row.string("id"),
-        knowledgeBaseId = knowledgeBaseId,
-        documentId = documentId,
-        stage = stage,
-        hasImages = row.boolean("has_images"),
-        visionConfigured = visionConfigured,
-        visionConsent = row.boolean("vision_consent"),
-        embeddingIsApi = row.boolean("embedding_is_api"),
-        embeddingConsent = row.boolean("embedding_consent"),
-        localEmbeddingAvailable = true,
-        error = row.string("error").ifBlank { null },
-        consentedVisionFingerprint = row.string("vision_binding_json").ifBlank { null },
-        visualGapsAccepted = stage == ImportStage.READY_WITH_VISUAL_GAPS ||
-            row.string("error").startsWith(TEXT_ONLY_VISUAL_GAPS_PREFIX),
-    )
-
     private suspend fun continueImportCancellable(
         job: ImportJob,
         displayName: String,
@@ -2764,22 +2721,8 @@ class KnowledgeRepository(
         }
         try {
             advanceThrough(job, ImportStage.PARSING)
-            when (format) {
-                SourceFormat.IMAGE -> indexPublicationCancellable(job, bytes, KnowledgeSourceParser.parse(bytes, format, displayName))
-                SourceFormat.TEXT, SourceFormat.MARKDOWN -> indexTextDocumentCancellable(job, bytes, format)
-                SourceFormat.PDF -> indexPublicationCancellable(job, bytes, KnowledgeSourceParser.parse(bytes, format, displayName))
-                SourceFormat.OFFICE_ARCHIVE -> {
-                    val inspection = ZipSafety.inspect(bytes)
-                    if (!inspection.ok) {
-                        fail(job, inspection.reason)
-                    } else {
-                        indexPublicationCancellable(job, bytes, KnowledgeSourceParser.parse(bytes, SourceFormat.OFFICE_ARCHIVE, displayName))
-                    }
-                }
-                SourceFormat.KNOWLEDGE_ARCHIVE -> {
-                    fail(job, "Knowledge ZIP datasets must be expanded as a batch and cannot resume as one document.")
-                }
-                SourceFormat.UNKNOWN -> fail(job, "Unsupported file type. The file was copied and was not dropped.")
+            if (!rejectUnsupportedImport(job, bytes, format)) {
+                prepareDocument(job, displayName, bytes, format)?.let { publishChunksCancellable(job, bytes, it) }
             }
             persistJob(job, displayName)
             return job
@@ -2857,120 +2800,6 @@ class KnowledgeRepository(
         db.query("SELECT display_name FROM import_jobs WHERE id = ?", listOf(jobId))
             .singleOrNull()?.string("display_name")?.ifBlank { jobId } ?: jobId
 
-    private suspend fun indexTextDocumentCancellable(job: ImportJob, bytes: ByteArray, format: SourceFormat) {
-        if (!materializePlan(job,bytes,planSource(bytes,format.name,displayNameForJob(job.id)))) return
-        val text = String(bytes, Charsets.UTF_8)
-        job.hasImages = format == SourceFormat.MARKDOWN && MediaKind.markdownReferencesImages(text)
-        if (job.hasImages && !job.visualGapsAccepted) {
-            advanceThrough(job, ImportStage.WAITING_FOR_VISION_MODEL)
-            if (job.stage == ImportStage.WAITING_FOR_VISION_MODEL) {
-                job.error = "Markdown references images. They were not downloaded and the document is not READY."
-            } else if (job.stage == ImportStage.AWAITING_UPLOAD_CONSENT) {
-                job.error = "Markdown image files are not fetched automatically. Import the image files or grant Vision after they exist in CAS."
-            }
-            return
-        }
-        if (job.hasImages && job.visualGapsAccepted) {
-            val chunks = TextChunker.chunk(text).map { IndexedChunk(it, null, emptyList(), null) }
-            if (chunks.isEmpty()) {
-                throw TextOnlyUnavailable("This file has no indexable text. Visual items stay waiting and were not marked READY.")
-            }
-            publishChunksCancellable(job, bytes, chunks, PARSER_FINGERPRINT)
-            return
-        }
-        publishChunksCancellable(
-            job,
-            bytes,
-            TextChunker.chunk(text).map { IndexedChunk(it, null, emptyList(), null) },
-            PARSER_FINGERPRINT,
-        )
-    }
-
-    private suspend fun indexPublicationCancellable(job: ImportJob, bytes: ByteArray, parsed: ParsedPublication) {
-        if (!materializePlan(job,bytes,planPublication(bytes,parsed,job.consentedVisionFingerprint))) return
-        val processable = parsed.assets.filter { it.kind == "IMAGE" && it.byteLength > 0 }
-        val blocked = parsed.assets.filter {
-            it.kind == "EXTERNAL" || it.kind == "MISSING" || it.kind == "UNSUPPORTED" || it.kind == "PAGE" ||
-                (it.kind == "IMAGE" && it.byteLength == 0)
-        }
-        job.hasImages = parsed.needsVision || processable.isNotEmpty() || blocked.isNotEmpty()
-        // A durable batch authorization is not a blanket consent: it is re-validated against the
-        // current destination and this batch's own member scope before it can arm this job.
-        applyBatchVisionAuthorization(job)
-        pipeline.selectTarget(job.id,job.consentedVisionFingerprint)
-        val visionTexts = mutableListOf<IndexedChunk>()
-        var nativePreparation: NativePreparationHandle? = null
-        if (job.hasImages && job.visualGapsAccepted) {
-            val chunks = textChunksSkippingVision(parsed)
-            if (chunks.isEmpty()) {
-                throw TextOnlyUnavailable("This file has no indexable text. Visual items stay waiting and were not marked READY.")
-            }
-            publishChunksCancellable(job, bytes, chunks, parsed.parserFingerprint)
-            return
-        }
-        if (job.hasImages) {
-            advanceThrough(job, if (job.visionConfigured) ImportStage.AWAITING_UPLOAD_CONSENT else ImportStage.WAITING_FOR_VISION_MODEL)
-            if (job.stage == ImportStage.WAITING_FOR_VISION_MODEL) {
-                job.error = "Visual content is waiting for a Vision model and is not READY."
-                return
-            }
-            if (job.stage == ImportStage.AWAITING_UPLOAD_CONSENT && !job.visionConsent) {
-                job.error = "Vision upload has not been approved. No image bytes left the device."
-                return
-            }
-            if (!visionBindingMatches(job)) {
-                job.visionConsent = false
-                job.stage = ImportStage.AWAITING_UPLOAD_CONSENT
-                job.error = "Vision destination changed. Approve upload to the current Provider and model. No image bytes left the device."
-                return
-            }
-            job.visionConsent = true
-            if (job.consentedVisionFingerprint.isNullOrBlank()) {
-                job.consentedVisionFingerprint = visionFingerprint()
-            }
-            advanceThrough(job, ImportStage.VISION_PROCESSING)
-            // Persist the externally observable processing state before entering
-            // a provider call.  A consent Worker can otherwise appear stuck at
-            // WAITING while Vision is already running.
-            persistJob(job, displayNameForJob(job.id))
-            nativePreparation = startNativePreparation(job, parsed)
-            val outcome = try { processVisualAssets(job, bytes, parsed, processable, blocked) }
-                catch (error: Throwable) { nativePreparation.cancel(); throw error }
-            if (outcome !is VisionBatch.Ok) nativePreparation.cancel()
-            when (outcome) {
-                is VisionBatch.Deferred -> {
-                    persistJob(job, displayNameForJob(job.id))
-                    return
-                }
-                is VisionBatch.Failed -> {
-                    fail(job, outcome.message)
-                    return
-                }
-                is VisionBatch.Unknown -> {
-                    job.stage = ImportStage.FAILED
-                    job.error = outcome.message
-                    return
-                }
-                is VisionBatch.Ok -> visionTexts += outcome.chunks
-            }
-        }
-        val native = nativePreparation?.join()
-        val pageChunks = native?.chunks ?: nativePageChunks(parsed)
-        val chunks = (pageChunks + visionTexts).ifEmpty {
-            if (!parsed.needsVision && parsed.text.isNotBlank()) {
-                TextChunker.chunk(parsed.text).map { IndexedChunk(it, 1, emptyList(), null) }
-            } else {
-                emptyList()
-            }
-        }
-        if (chunks.isEmpty()) {
-            fail(job, "The file produced no indexable text. Visual items were not dropped.")
-            return
-        }
-        publishChunksCancellable(job, bytes, chunks, parsed.parserFingerprint, processable,
-            native?.vectors.orEmpty())
-    }
-
     private fun continueImport(job: ImportJob, displayName: String, bytes: ByteArray, format: SourceFormat): ImportJob {
         return blobs.protect(sha256Hex(bytes)).use { continueImportOwned(job, displayName, bytes, format) }
             .also { if (automaticStorageMaintenance) collectStorage() }
@@ -2978,77 +2807,55 @@ class KnowledgeRepository(
 
     private fun continueImportOwned(job: ImportJob, displayName: String, bytes: ByteArray, format: SourceFormat): ImportJob {
         advanceThrough(job, ImportStage.PARSING)
-        when (format) {
-            SourceFormat.IMAGE -> {
-                try {
-                    indexPublication(job, bytes, KnowledgeSourceParser.parse(bytes, format, displayName))
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (interrupted: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    throw interrupted
-                } catch (unavailable: TextOnlyUnavailable) {
-                    throw unavailable
-                } catch (t: Throwable) {
-                    fail(job, t.message ?: "image import failed")
+        if (!rejectUnsupportedImport(job, bytes, format)) {
+            try {
+                prepareDocument(job, displayName, bytes, format)?.let { publishChunks(job, bytes, it) }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw interrupted
+            } catch (unavailable: TextOnlyUnavailable) {
+                throw unavailable
+            } catch (failure: Throwable) {
+                val fallback = when (format) {
+                    SourceFormat.IMAGE -> "image import failed"
+                    SourceFormat.PDF -> "PDF import failed"
+                    SourceFormat.OFFICE_ARCHIVE -> "DOCX/EPUB import failed"
+                    else -> "indexing failed"
                 }
+                fail(job, failure.message ?: fallback)
             }
-            SourceFormat.TEXT, SourceFormat.MARKDOWN -> {
-                try {
-                    indexTextDocument(job, bytes, format)
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (interrupted: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    throw interrupted
-                } catch (unavailable: TextOnlyUnavailable) {
-                    throw unavailable
-                } catch (t: Throwable) {
-                    fail(job, t.message ?: "indexing failed")
-                }
-            }
-            SourceFormat.PDF -> {
-                try {
-                    indexPublication(job, bytes, KnowledgeSourceParser.parse(bytes, format, displayName))
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (interrupted: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    throw interrupted
-                } catch (unavailable: TextOnlyUnavailable) {
-                    throw unavailable
-                } catch (t: Throwable) {
-                    fail(job, t.message ?: "PDF import failed")
-                }
-            }
-            SourceFormat.OFFICE_ARCHIVE -> {
-                val inspection = ZipSafety.inspect(bytes)
-                if (!inspection.ok) {
-                    fail(job, inspection.reason)
-                } else {
-                    try {
-                        indexPublication(job, bytes, KnowledgeSourceParser.parse(bytes, SourceFormat.OFFICE_ARCHIVE, displayName))
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (interrupted: InterruptedException) {
-                        Thread.currentThread().interrupt()
-                        throw interrupted
-                    } catch (unavailable: TextOnlyUnavailable) {
-                        throw unavailable
-                    } catch (t: Throwable) {
-                        fail(job, t.message ?: "DOCX/EPUB import failed")
-                    }
-                }
-            }
-            SourceFormat.KNOWLEDGE_ARCHIVE -> fail(job, "Knowledge ZIP datasets must be expanded as a batch and cannot resume as one document.")
-            SourceFormat.UNKNOWN -> fail(job, "Unsupported file type. The file was copied and was not dropped.")
         }
         persistJob(job, displayName)
         return job
     }
 
-    private fun indexTextDocument(job: ImportJob, bytes: ByteArray, format: SourceFormat) {
-        if (!materializePlan(job,bytes,planSource(bytes,format.name,displayNameForJob(job.id)))) return
+    private data class PreparedDocument(
+        val chunks: List<IndexedChunk>,
+        val fingerprint: String,
+        val assets: List<ExtractedAsset> = emptyList(),
+        val preparedVectors: Map<String, ByteArray> = emptyMap(),
+    )
+
+    private fun rejectUnsupportedImport(job: ImportJob, bytes: ByteArray, format: SourceFormat): Boolean {
+        val reason = when (format) {
+            SourceFormat.OFFICE_ARCHIVE -> ZipSafety.inspect(bytes).takeUnless { it.ok }?.reason
+            SourceFormat.KNOWLEDGE_ARCHIVE -> "Knowledge ZIP datasets must be expanded as a batch and cannot resume as one document."
+            SourceFormat.UNKNOWN -> "Unsupported file type. The file was copied and was not dropped."
+            SourceFormat.TEXT, SourceFormat.MARKDOWN, SourceFormat.IMAGE, SourceFormat.PDF -> null
+        } ?: return false
+        fail(job, reason)
+        return true
+    }
+
+    /** A waiting or failed job has no chunks to publish. Each caller owns its publication and cancellation. */
+    private fun prepareDocument(job: ImportJob, displayName: String, bytes: ByteArray, format: SourceFormat): PreparedDocument? =
+        if (format == SourceFormat.TEXT || format == SourceFormat.MARKDOWN) prepareTextDocument(job, bytes, format)
+        else preparePublication(job, bytes, KnowledgeSourceParser.parse(bytes, format, displayName))
+
+    private fun prepareTextDocument(job: ImportJob, bytes: ByteArray, format: SourceFormat): PreparedDocument? {
+        if (!materializePlan(job, bytes, planSource(bytes, format.name, displayNameForJob(job.id)))) return null
         val text = String(bytes, Charsets.UTF_8)
         job.hasImages = format == SourceFormat.MARKDOWN && MediaKind.markdownReferencesImages(text)
         if (job.hasImages && !job.visualGapsAccepted) {
@@ -3058,21 +2865,17 @@ class KnowledgeRepository(
             } else if (job.stage == ImportStage.AWAITING_UPLOAD_CONSENT) {
                 job.error = "Markdown image files are not fetched automatically. Import the image files or grant Vision after they exist in CAS."
             }
-            return
+            return null
         }
-        if (job.hasImages && job.visualGapsAccepted) {
-            val chunks = TextChunker.chunk(text).map { IndexedChunk(it, null, emptyList(), null) }
-            if (chunks.isEmpty()) {
-                throw TextOnlyUnavailable("This file has no indexable text. Visual items stay waiting and were not marked READY.")
-            }
-            publishChunks(job, bytes, chunks, PARSER_FINGERPRINT)
-            return
+        val chunks = TextChunker.chunk(text).map { IndexedChunk(it, null, emptyList(), null) }
+        if (job.hasImages && job.visualGapsAccepted && chunks.isEmpty()) {
+            throw TextOnlyUnavailable("This file has no indexable text. Visual items stay waiting and were not marked READY.")
         }
-        publishChunks(job, bytes, textChunks = TextChunker.chunk(text).map { IndexedChunk(it, null, emptyList(), null) }, fingerprint = PARSER_FINGERPRINT)
+        return PreparedDocument(chunks, PARSER_FINGERPRINT)
     }
 
-    private fun indexPublication(job: ImportJob, bytes: ByteArray, parsed: ParsedPublication) {
-        if (!materializePlan(job,bytes,planPublication(bytes,parsed,job.consentedVisionFingerprint))) return
+    private fun preparePublication(job: ImportJob, bytes: ByteArray, parsed: ParsedPublication): PreparedDocument? {
+        if (!materializePlan(job,bytes,planPublication(bytes,parsed,job.consentedVisionFingerprint))) return null
         val processable = parsed.assets.filter { it.kind == "IMAGE" && it.byteLength > 0 }
         val blocked = parsed.assets.filter {
             it.kind == "EXTERNAL" || it.kind == "MISSING" || it.kind == "UNSUPPORTED" || it.kind == "PAGE" ||
@@ -3090,24 +2893,23 @@ class KnowledgeRepository(
             if (chunks.isEmpty()) {
                 throw TextOnlyUnavailable("This file has no indexable text. Visual items stay waiting and were not marked READY.")
             }
-            publishChunks(job, bytes, chunks, parsed.parserFingerprint)
-            return
+            return PreparedDocument(chunks, parsed.parserFingerprint)
         }
         if (job.hasImages) {
             advanceThrough(job, if (job.visionConfigured) ImportStage.AWAITING_UPLOAD_CONSENT else ImportStage.WAITING_FOR_VISION_MODEL)
             if (job.stage == ImportStage.WAITING_FOR_VISION_MODEL) {
                 job.error = "Visual content is waiting for a Vision model and is not READY."
-                return
+                return null
             }
             if (job.stage == ImportStage.AWAITING_UPLOAD_CONSENT && !job.visionConsent) {
                 job.error = "Vision upload has not been approved. No image bytes left the device."
-                return
+                return null
             }
             if (!visionBindingMatches(job)) {
                 job.visionConsent = false
                 job.stage = ImportStage.AWAITING_UPLOAD_CONSENT
                 job.error = "Vision destination changed. Approve upload to the current Provider and model. No image bytes left the device."
-                return
+                return null
             }
             job.visionConsent = true
             if (job.consentedVisionFingerprint.isNullOrBlank()) {
@@ -3125,16 +2927,16 @@ class KnowledgeRepository(
             when (outcome) {
                 is VisionBatch.Deferred -> {
                     persistJob(job, displayNameForJob(job.id))
-                    return
+                    return null
                 }
                 is VisionBatch.Failed -> {
                     fail(job, outcome.message)
-                    return
+                    return null
                 }
                 is VisionBatch.Unknown -> {
                     job.stage = ImportStage.FAILED
                     job.error = outcome.message
-                    return
+                    return null
                 }
                 is VisionBatch.Ok -> visionTexts += outcome.chunks
             }
@@ -3150,9 +2952,9 @@ class KnowledgeRepository(
         }
         if (chunks.isEmpty()) {
             fail(job, "The file produced no indexable text. Visual items were not dropped.")
-            return
+            return null
         }
-        publishChunks(job, bytes, chunks, parsed.parserFingerprint, processable, native?.vectors.orEmpty())
+        return PreparedDocument(chunks, parsed.parserFingerprint, processable, native?.vectors.orEmpty())
     }
 
     private sealed interface VisionBatch {
@@ -4485,17 +4287,15 @@ class KnowledgeRepository(
     private suspend fun publishChunksCancellable(
         job: ImportJob,
         bytes: ByteArray,
-        textChunks: List<IndexedChunk>,
-        fingerprint: String,
-        assets: List<ExtractedAsset> = emptyList(),
-        preparedVectors: Map<String, ByteArray> = emptyMap(),
+        prepared: PreparedDocument,
     ) {
+        val (textChunks, fingerprint, assets, preparedVectors) = prepared
         if (pipeline.publication(job.id,chunkVersion) != null) {
             finishPublished(job)
             return
         }
         if (!job.embeddingIsApi) {
-            publishChunks(job, bytes, textChunks, fingerprint, assets, preparedVectors)
+            publishChunks(job, bytes, prepared)
             return
         }
         if (!job.embeddingConsent) {
@@ -4587,11 +4387,9 @@ class KnowledgeRepository(
     private fun publishChunks(
         job: ImportJob,
         bytes: ByteArray,
-        textChunks: List<IndexedChunk>,
-        fingerprint: String,
-        assets: List<ExtractedAsset> = emptyList(),
-        preparedVectors: Map<String, ByteArray> = emptyMap(),
+        prepared: PreparedDocument,
     ) {
+        val (textChunks, fingerprint, assets, preparedVectors) = prepared
         if (pipeline.publication(job.id,chunkVersion) != null) {
             finishPublished(job)
             return
@@ -5929,35 +5727,10 @@ class KnowledgeRepository(
         db.query("SELECT batch_id FROM import_jobs WHERE id = ?", listOf(jobId))
             .singleOrNull()?.string("batch_id")?.ifBlank { null }
 
-    fun listBatches(knowledgeBaseId: String): List<ImportBatch> =
-        db.query("SELECT * FROM import_batches WHERE kb_id = ? ORDER BY updated_at DESC", listOf(knowledgeBaseId))
-            .map(::batchFromRow)
-    /** Read one durable batch, including the v19 authorization/pause/block columns. */
-    fun findBatch(batchId: String): ImportBatch? = synchronized(indexLock) {
-        db.query("SELECT * FROM import_batches WHERE id = ?", listOf(batchId)).singleOrNull()?.let(::batchFromRow)
-    }
+    fun listBatches(knowledgeBaseId: String): List<ImportBatch> = batchReads.list(knowledgeBaseId)
 
-    private fun batchFromRow(row: SqlRow): ImportBatch = ImportBatch(
-        id = row.string("id"),
-        knowledgeBaseId = row.string("kb_id"),
-        generationId = row.string("generation_id").ifBlank { null },
-        kind = ImportBatchKind.valueOf(row.string("kind")),
-        displayName = row.string("display_name"),
-        state = ImportBatchState.valueOf(row.string("state")),
-        totalItems = row.long("total_items").toInt(),
-        copied = row.long("copied").toInt(),
-        processing = row.long("processing").toInt(),
-        waiting = row.long("waiting").toInt(),
-        failed = row.long("failed").toInt(),
-        error = row.string("error").ifBlank { null },
-        published = row.long("published_items").toInt(),
-        unknown = row.long("unknown_items").toInt(),
-        visionTarget = row.string("vision_target").ifBlank { null },
-        visionAuthorizedAt = row.string("vision_authorized_at").ifBlank { null },
-        pausedAt = row.string("paused_at").ifBlank { null },
-        blockedReason = row.string("blocked_reason").ifBlank { null }
-            ?.let { reason -> runCatching { ImportBatchBlockReason.valueOf(reason) }.getOrNull() },
-    )
+    /** Read one durable batch, including the v19 authorization/pause/block columns. */
+    fun findBatch(batchId: String): ImportBatch? = synchronized(indexLock) { batchReads.find(batchId) }
 
     /**
      * Reconcile durable batches after process recreation, then re-arm those
@@ -6109,7 +5882,7 @@ class KnowledgeRepository(
             val existing = db.query("SELECT job_id FROM import_items WHERE batch_id = ? AND item_key = ?",
                 listOf(batchId, sourceKey)).singleOrNull()?.string("job_id")
             if (!existing.isNullOrBlank()) {
-                return@transaction listJobs().first { it.first.id == existing }.first
+                return@transaction findJob(existing) ?: throw NoSuchElementException("Import item references a missing job")
             }
             require(MediaKind.detect(displayName, mediaType, bytes.copyOf(minOf(bytes.size, 64))) != SourceFormat.KNOWLEDGE_ARCHIVE) {
                 "请使用 ZIP 导入入口导入压缩包。"
@@ -6518,25 +6291,9 @@ class KnowledgeRepository(
         return ImportBatchScope.hash(members)
     }
 
-    /** Per-item detail for the user-opened batch section.  Not wired to diagnostics. */
-    fun listBatchItemViews(batchId: String): List<ImportBatchItemView> = synchronized(indexLock) {
-        val fullyStaged = db.query("SELECT staging_complete FROM import_batches WHERE id = ?", listOf(batchId))
-            .singleOrNull()?.long("staging_complete") == 1L
-        db.query(
-            "SELECT i.job_id AS job_id, COALESCE(NULLIF(j.display_name, ''), i.relative_path) AS display_name, " +
-                "i.state AS state, i.error AS error FROM import_items i " +
-                "LEFT JOIN import_jobs j ON j.id = i.job_id WHERE i.batch_id = ? ORDER BY i.rowid",
-            listOf(batchId),
-        ).map { row ->
-            ImportBatchItemView(
-                jobId = row.string("job_id").ifBlank { null },
-                displayName = row.string("display_name"),
-                state = if (fullyStaged && row.string("job_id").isNotBlank() &&
-                    row.string("state") in setOf("PENDING", "COPYING")) "QUEUED" else row.string("state"),
-                error = row.string("error").ifBlank { null },
-            )
-        }
-    }
+    /** Per-item detail for the user-opened batch section. Not wired to diagnostics. */
+    fun listBatchItemViews(batchId: String): List<ImportBatchItemView> = synchronized(indexLock) { batchReads.itemViews(batchId) }
+
     /** Honest, derived batch progress.  Completion is only ever reported from published items. */
     fun batchProgress(batchId: String): ImportBatchProgress = synchronized(indexLock) { batchProgressLocked(batchId) }
 
@@ -6575,7 +6332,7 @@ class KnowledgeRepository(
         // this job during this invocation. Consumed tickets never re-arm recovery.
         val legacy = activeLegacyVisionTickets[jobId]?.split('\n') ?: return null
         return legacy.getOrNull(1)?.takeIf {
-            visionTargetAvailable(it) && legacy.getOrNull(2) == documentsFingerprintHash(job.string("kb_id"))
+            visionTargetAvailable(it) && legacy.getOrNull(2) == documentScope(job.string("kb_id")).sha256
         }
     }
 
@@ -6652,7 +6409,7 @@ class KnowledgeRepository(
             ImportBatchEventPhase.AUTHORIZATION_SAVED, batchId, null, 0,
             reasonCode = "vision_batch_scope", count = 1,
         )
-        batchFromRow(requireNotNull(db.query("SELECT * FROM import_batches WHERE id = ?", listOf(batchId)).singleOrNull()))
+        requireNotNull(batchReads.find(batchId))
     }
 
     /** Reject the batch authorization (for example after the user picked a different destination). */
@@ -6694,7 +6451,7 @@ class KnowledgeRepository(
             refreshBatchProgressLocked(batchId)
         }
         emitBatchEvent(ImportBatchEventPhase.CHECKPOINT, batchId, null, 0, reasonCode = "paused", count = 1)
-        batchFromRow(requireNotNull(db.query("SELECT * FROM import_batches WHERE id = ?", listOf(batchId)).singleOrNull()))
+        requireNotNull(batchReads.find(batchId))
     }
 
     /** Resume a user-paused batch.  A blocked batch only resumes through a fresh authorization. */
@@ -6737,7 +6494,7 @@ class KnowledgeRepository(
             refreshBatchProgressLocked(batchId)
         }
         emitBatchEvent(ImportBatchEventPhase.STATE_CHANGED, batchId, null, 0, reasonCode = "resumed", count = 1)
-        batchFromRow(requireNotNull(db.query("SELECT * FROM import_batches WHERE id = ?", listOf(batchId)).singleOrNull()))
+        requireNotNull(batchReads.find(batchId))
     }
 
     /** Pre-dispatch reason a batch must stop dispatching, or null when a member may proceed. */
@@ -6814,7 +6571,7 @@ class KnowledgeRepository(
         }
         if (ticket.kind == "VISION" || ticket.kind == "API_EMBEDDING") {
             check(documentHash.matches(QUERY_HASH_PATTERN)) { "consent ticket document fingerprint is missing or invalid" }
-            check(documentHash == documentsFingerprintHash(ticket.knowledgeBaseId)) {
+            check(documentHash == documentScope(ticket.knowledgeBaseId).sha256) {
                 "consent ticket documents changed; no data was sent"
             }
         }
@@ -6936,14 +6693,6 @@ class KnowledgeRepository(
             else -> error("unsupported consent ticket kind")
         }
     }
-
-    private fun documentsFingerprintHash(knowledgeBaseId: String): String = sha256Hex(
-        db.query(
-            "SELECT id,blob_hash,active_version_id FROM documents WHERE kb_id = ? AND deleted_at IS NULL ORDER BY id",
-            listOf(knowledgeBaseId),
-        ).joinToString("\n") { "${it.string("id")}:${it.string("blob_hash")}:${it.string("active_version_id")}" }
-            .toByteArray(Charsets.UTF_8),
-    )
 
     private fun claimNextBatchJob(batchId: String): String? = synchronized(indexLock) {
         db.transaction {
@@ -7273,13 +7022,13 @@ class KnowledgeRepository(
 
     private fun expandKnowledgeArchive(
         displayName: String,
-        bytes: ByteArray,
         visionConfigured: Boolean,
         knowledgeBaseId: String,
         visionConsent: Boolean,
         embeddingIsApi: Boolean,
         embeddingConsent: Boolean,
         pauseAt: ImportStage?,
+        readEntries: (onEntry: (KnowledgeArchiveEntry, ByteArray) -> Unit) -> KnowledgeArchiveSummary,
     ): ImportJob {
         // Persist the batch before walking the archive.  Entry payloads are
         // handed to the repository one at a time and immediately reduced to
@@ -7288,7 +7037,7 @@ class KnowledgeRepository(
         val batchId = beginBatch(knowledgeBaseId, ImportBatchKind.ZIP, displayName)
         var last: ImportJob? = null
         val summary = try {
-            KnowledgeArchive.forEachEntry(bytes) { entry, payload ->
+            readEntries { entry, payload ->
                 val child = importBytes(
                     displayName = entry.name,
                     mediaType = guessedMime(entry.format),
@@ -7314,61 +7063,7 @@ class KnowledgeRepository(
         refreshBatchProgress(batchId)
         if (pauseAt != ImportStage.COPYING) {
             processBatch(batchId, visionConfigured)
-            last = db.query(
-                "SELECT id FROM import_jobs WHERE batch_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1",
-                listOf(batchId),
-            ).singleOrNull()?.string("id")?.let { id ->
-                listJobs().firstOrNull { it.first.id == id }?.first
-            } ?: last
-        }
-        return last ?: error("Archive has no importable files")
-    }
-
-    private fun expandKnowledgeArchive(
-        displayName: String,
-        file: File,
-        visionConfigured: Boolean,
-        knowledgeBaseId: String,
-        visionConsent: Boolean,
-        embeddingIsApi: Boolean,
-        embeddingConsent: Boolean,
-        pauseAt: ImportStage?,
-    ): ImportJob {
-        val batchId = beginBatch(knowledgeBaseId, ImportBatchKind.ZIP, displayName)
-        var last: ImportJob? = null
-        val summary = try {
-            KnowledgeArchive.forEachEntry(file) { entry, payload ->
-                val child = importBytes(
-                    displayName = entry.name,
-                    mediaType = guessedMime(entry.format),
-                    bytes = payload,
-                    visionConfigured = visionConfigured,
-                    knowledgeBaseId = knowledgeBaseId,
-                    pauseAt = ImportStage.COPYING,
-                    visionConsent = visionConsent,
-                    embeddingIsApi = embeddingIsApi,
-                    embeddingConsent = embeddingConsent,
-                )
-                bindJobToBatch(batchId, child, entry.name)
-                last = child
-            }
-        } catch (failure: Throwable) {
-            failBatch(batchId, failure.message ?: "Archive expansion failed")
-            throw failure
-        }
-        if (!summary.ok) {
-            failBatch(batchId, summary.reason)
-            error(summary.reason)
-        }
-        refreshBatchProgress(batchId)
-        if (pauseAt != ImportStage.COPYING) {
-            processBatch(batchId, visionConfigured)
-            last = db.query(
-                "SELECT id FROM import_jobs WHERE batch_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1",
-                listOf(batchId),
-            ).singleOrNull()?.string("id")?.let { id ->
-                listJobs().firstOrNull { it.first.id == id }?.first
-            } ?: last
+            last = jobDisplay.latestInBatch(batchId) ?: last
         }
         return last ?: error("Archive has no importable files")
     }
@@ -7418,7 +7113,6 @@ class KnowledgeRepository(
             "Knowledge base generation changed; this batch cannot publish."
         private const val API_EMBEDDING_FAILED_ERROR =
             "API embedding failed; inspect the configured provider and retry only when safe"
-        private const val TEXT_ONLY_VISUAL_GAPS_PREFIX = "TEXT_ONLY_VISUAL_GAPS: "
         private const val TEXT_ONLY_VISUAL_GAPS_MESSAGE =
             "Indexed text only; visual evidence remains unprocessed and is not READY."
         private const val ACTIVE_GENERATION_POINTER = "\u0000active_generation"
@@ -7427,12 +7121,6 @@ class KnowledgeRepository(
 }
 
 private class TextOnlyUnavailable(message: String) : IllegalStateException(message)
-
-private fun SqlRow.boolean(name: String): Boolean = when (val value = columns[name]) {
-    is Boolean -> value
-    is Number -> value.toLong() != 0L
-    else -> value?.toString()?.let { it == "1" || it.equals("true", ignoreCase = true) } ?: false
-}
 
 /** TextEmbedder facade for a query vector restored from the immutable cache. */
 private class CachedQueryEmbedder(

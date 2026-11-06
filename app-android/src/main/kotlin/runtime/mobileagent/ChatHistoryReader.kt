@@ -25,22 +25,20 @@ internal suspend fun readChatHistory(
     previous: ChatUiState,
     savedSessionId: String?,
     savedAgentId: String?,
-    inspectorOpen: Boolean,
     seedCitations: Map<String, Pair<Citation, String>>,
     messageUi: (Message) -> ChatMessageUi,
     restoreCitations: (String, MutableMap<String, Pair<Citation, String>>) -> Unit,
     citationUi: (Map<String, Pair<Citation, String>>) -> List<ChatCitationUi>,
     compactionUi: (ContextCompactionRecord) -> ChatCompactionUi,
     workspaceUi: (String?, String?, String?) -> ChatWorkspaceAccessUi,
-    persistedPreviewHint: (String?) -> Boolean,
 ): ChatReadResult {
     val repository = container.conversations
     val active = repository.page()
     val archived = repository.page(archived = true)
-    val selected = listOf(previous.selectedSessionId, savedSessionId,
+    val selectedConversation = sequenceOf(previous.selectedSessionId, savedSessionId,
         container.uiPreferences.getString("selected-conversation", null))
-        .firstOrNull { it != null && repository.get(it) != null }
-    val selectedConversation = selected?.let(repository::get)
+        .filterNotNull().distinct().firstNotNullOfOrNull(repository::get)
+    val selected = selectedConversation?.id
     val conversations = (active.conversations + archived.conversations + listOfNotNull(selectedConversation)).distinctBy { it.id }
     val agents = container.agents.listOverviews()
     val snapshotAgents = container.agents.snapshotAgentIds(conversations.map { it.snapshotId })
@@ -70,7 +68,6 @@ internal suspend fun readChatHistory(
             agentId = owner, workspaceLabel = labels.getValue(conversation.id))
     }
     val draftOwner = chatDraftOwner(selected, agentId)
-    val inspector = container.uiPreferences.getBoolean("request-inspector", true)
     return ChatReadResult(previous.copy(
         sessions = conversations.filterNot { it.archived }.map(::session),
         archivedSessions = conversations.filter { it.archived }.map(::session),
@@ -83,10 +80,6 @@ internal suspend fun readChatHistory(
         citations = citationUi(source),
         compactions = selected?.let { container.contextCompactions.list(it).map(compactionUi) }.orEmpty(),
         workspaceAccess = workspaceUi(selected, agentId, agentId?.let { names[it]?.name }),
-        requestPreview = previous.requestPreview?.takeIf { inspector },
-        requestInspectorAvailability = resolveRequestInspectorAvailability(inspector,
-            inspector && previous.requestPreview != null, persistedPreviewHint(selected)),
-        inspectorOpen = inspectorOpen,
         loading = false,
         error = null,
         hasMoreSessions = active.nextCursor != null,

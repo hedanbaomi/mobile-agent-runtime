@@ -7,7 +7,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.test.DeviceConfigurationOverride
+import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.FontScale
+import androidx.compose.ui.test.ForcedSize
+import androidx.compose.ui.test.then
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
@@ -19,8 +23,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeUp
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
@@ -79,10 +82,13 @@ class ChatToolApprovalDetailUiTest {
     }
 
     @Test
+    @OptIn(ExperimentalTestApi::class)
     fun shellApprovalActionsRemainReachableAtLargeFontAndImeLikeViewport() {
         val choices = mutableListOf<ToolApprovalChoice>()
         compose.setContent {
-            CompositionLocalProvider(LocalDensity provides Density(1f, fontScale = 2f)) {
+            DeviceConfigurationOverride(
+                DeviceConfigurationOverride.ForcedSize(DpSize(320.dp, 260.dp)) then DeviceConfigurationOverride.FontScale(2f),
+            ) {
                 Box(Modifier.width(320.dp).height(260.dp)) {
                     MaterialTheme {
                         ChatScreen(

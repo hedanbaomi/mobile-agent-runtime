@@ -17,6 +17,8 @@ import kotlinx.coroutines.*
 import org.junit.Assert.*
 import org.junit.Test
 import runtime.mobileagent.domain.*
+import runtime.mobileagent.feature.chat.ChatPromptLayerUi
+import runtime.mobileagent.feature.chat.ChatRequestPreviewUi
 
 /** Synthetic local persistence only; no real provider, secret, or device authority is used. */
 class ChatStorageProjectionDeviceTest {
@@ -86,6 +88,25 @@ class ChatStorageProjectionDeviceTest {
                 assertTrue(vm.state.value.messages.none { it.text == "from A" })
             }
         } finally { release.countDown(); instrumentation.runOnMainSync { store.clear() }; pool.shutdownNow() }
+    }
+
+    @Test fun fallbackDuringHistoryReloadNeverProjectsTheMissingConversationsRequest() {
+        val (app, ids) = fixture()
+        val saved = ids.first()
+        withVm(app, SavedStateHandle(mapOf("chat.selectedSessionId" to saved))) { vm ->
+            await { !vm.state.value.loading && vm.state.value.selectedSessionId == saved }
+            instrumentation.runOnMainSync {
+                vm.state.value = vm.state.value.copy(
+                    selectedSessionId = "missing-${UUID.randomUUID()}",
+                    requestPreview = ChatRequestPreviewUi("POST", "https://example.invalid", body = "old conversation body"),
+                    promptLayers = listOf(ChatPromptLayerUi("SYSTEM", "old conversation prompt")),
+                )
+                vm.reload()
+            }
+            await { !vm.state.value.loading && vm.state.value.selectedSessionId == saved }
+            assertNull(vm.state.value.requestPreview)
+            assertTrue(vm.state.value.promptLayers.isEmpty())
+        }
     }
 
     @Test fun uiPagesRecoverAllMessagesWithoutTruncatingDurableExecutionHistory() {

@@ -131,17 +131,6 @@ class ChatRequestInspectorUiTest {
         compose.onAllNodesWithText("stale-prompt-marker", useUnmergedTree = true).assertCountEquals(0)
     }
 
-    @Test
-    fun disabledAvailabilityWinsOverPreviewAndPersistedHint() {
-        assertEquals(
-            ChatRequestInspectorAvailability.DISABLED,
-            resolveRequestInspectorAvailability(
-                inspectorEnabled = false,
-                previewAvailable = true,
-                persistedPreviewHint = true,
-            ),
-        )
-    }
 
     @Test
     fun approvalCardOffersOnlyOneInvocationApproval() {

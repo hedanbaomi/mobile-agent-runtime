@@ -6,6 +6,8 @@ import groovy.json.JsonSlurper
 import java.io.File
 import java.util.function.Function
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.util.HexFormat
 import java.util.UUID
 import java.util.zip.ZipFile
 import javax.xml.parsers.DocumentBuilderFactory
@@ -382,6 +384,14 @@ fun sbomProperty(report: Map<*, *>, name: String): String {
         ?: error("SBOM property is missing: " + name)
 }
 
+data class VerifiedSbomEvidence(
+    val head: String,
+    val dirty: Boolean,
+    val sourceHash: String,
+    val artifactHash: String,
+    val sbomHash: String,
+)
+
 fun verifySbom(
     variant: String,
     configurationName: String,
@@ -389,16 +399,18 @@ fun verifySbom(
     sbom: File,
     expectedDebuggable: Boolean? = null,
     expectedControlPlaneEnabled: Boolean? = null,
-) {
+    requireClean: Boolean = false,
+): VerifiedSbomEvidence {
     check(sbom.isFile) { "Missing SBOM: " + sbom.absolutePath }
-    val parsed = JsonSlurper().parse(sbom) as? Map<*, *>
+    val bytes = sbom.readBytes()
+    val parsed = JsonSlurper().parse(bytes, "UTF-8") as? Map<*, *>
         ?: error("SBOM is not a JSON object: " + sbom.absolutePath)
     check(parsed["bomFormat"] == "CycloneDX") { "SBOM bomFormat is not CycloneDX" }
     check(parsed["specVersion"] == "1.6") { "SBOM specVersion is not 1.6" }
     check((parsed["components"] as? List<*>)?.isNotEmpty() == true) {
         "SBOM has no components"
     }
-    val (head, dirty) = gitState(requireClean = false)
+    val (head, dirty) = gitState(requireClean)
     val sourceHash = sourceArchiveSha256()
     val artifactHash = sha256(artifact)
     val artifactPath = artifact.relativeTo(rootProject.projectDir).invariantSeparatorsPath
@@ -450,6 +462,8 @@ fun verifySbom(
         }
         verifyVariantSecurity(variant, artifact, expectedDebuggable, expectedControlPlaneEnabled)
     }
+    return VerifiedSbomEvidence(head, dirty, sourceHash, artifactHash,
+        HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)))
 }
 
 fun writeVariantProvenance(
@@ -461,7 +475,7 @@ fun writeVariantProvenance(
     expectedDebuggable: Boolean,
     expectedControlPlaneEnabled: Boolean,
 ) {
-    verifySbom(
+    val (head, dirty, sourceHash, artifactHash, sbomHash) = verifySbom(
         variant,
         configurationName,
         artifact,
@@ -469,10 +483,6 @@ fun writeVariantProvenance(
         expectedDebuggable,
         expectedControlPlaneEnabled,
     )
-    val (head, dirty) = gitState(requireClean = false)
-    val sourceHash = sourceArchiveSha256()
-    val artifactHash = sha256(artifact)
-    val sbomHash = sha256(sbom)
     val artifactPath = artifact.relativeTo(rootProject.projectDir).invariantSeparatorsPath
     val sbomPath = sbom.relativeTo(rootProject.projectDir).invariantSeparatorsPath
     val report = linkedMapOf<String, Any>(
@@ -522,10 +532,9 @@ fun verifyVariantProvenance(
         ?: error("Provenance is not a JSON object: " + manifest.absolutePath)
     check(parsed["schemaVersion"] == 1) { "Unsupported provenance schema" }
     check(parsed["variant"] == variant) { "Provenance variant does not match the requested gate" }
-    val (head, dirty) = gitState(requireClean = false)
-    val sourceHash = sourceArchiveSha256()
-    val artifactHash = sha256(artifact)
-    val sbomHash = sha256(sbom)
+    val (head, dirty, sourceHash, artifactHash, sbomHash) = verifySbom(
+        variant, configurationName, artifact, sbom, expectedDebuggable, expectedControlPlaneEnabled,
+    )
     val artifactPath = artifact.relativeTo(rootProject.projectDir).invariantSeparatorsPath
     val sbomPath = sbom.relativeTo(rootProject.projectDir).invariantSeparatorsPath
     check(parsed["gitDirty"] == dirty) { "Provenance dirty-state evidence is stale" }
@@ -553,19 +562,30 @@ fun verifyVariantProvenance(
     check(sbomRecord["format"] == "CycloneDX-1.6") { "Provenance SBOM format is invalid" }
     check(sbomRecord["path"] == sbomPath) { "Provenance SBOM path is stale" }
     check(sbomRecord["sha256"] == sbomHash) { "Provenance SBOM hash is stale" }
-    verifySbom(
-        variant,
-        configurationName,
-        artifact,
-        sbom,
-        expectedDebuggable,
-        expectedControlPlaneEnabled,
-    )
-    verifyVariantSecurity(variant, artifact, expectedDebuggable, expectedControlPlaneEnabled)
 }
 
 val debugSbom = layout.buildDirectory.file("reports/sbom/debug.cdx.json")
 val debugProvenance = layout.buildDirectory.file("reports/provenance/debug.provenance.json")
+
+fun verifyDevelopmentAbis(apk: File) {
+    val libraries = ZipFile(apk).use { zip ->
+        val nativePath = Regex("""lib/([^/]+)/([^/]+\.so)""")
+        zip.entries().asSequence().mapNotNull { entry ->
+            nativePath.matchEntire(entry.name)?.let {
+                check(entry.size > 0) { "Empty native library: ${entry.name}" }
+                it.groupValues[1] to it.groupValues[2]
+            }
+        }.groupBy({ it.first }, { it.second }).mapValues { it.value.toSet() }
+    }
+    check(libraries.keys == setOf("arm64-v8a", "x86_64")) {
+        "Standard development APK must contain both supported ABIs, found ${libraries.keys}"
+    }
+    val arm = libraries.getValue("arm64-v8a")
+    val x86 = libraries.getValue("x86_64")
+    check(arm == x86) {
+        "Standard development APK has incomplete native payloads: arm64-only=${arm - x86}, x86_64-only=${x86 - arm}"
+    }
+}
 
 fun verifyNativePageAlignment(apk: File) {
     val python = if (System.getProperty("os.name").startsWith("Windows")) "python" else "python3"
@@ -587,6 +607,7 @@ val verifyDebugArtifact = tasks.register("verifyDebugArtifact") {
     description = "Verify the debug APK is debuggable and excluded from the elevated control plane."
     dependsOn("assembleDebug")
     doLast {
+        verifyDevelopmentAbis(variantApkFile("debug"))
         verifyVariantSecurity("debug", variantApkFile("debug"), expectedDebuggable = true, expectedControlPlaneEnabled = false)
         verifyNativePageAlignment(variantApkFile("debug"))
     }
@@ -688,6 +709,7 @@ val verifyReviewArtifact = tasks.register("verifyReviewArtifact") {
     description = "Verify the review APK is non-debuggable before security evidence is generated."
     dependsOn("assembleReview")
     doLast {
+        verifyDevelopmentAbis(variantApkFile("review"))
         verifyVariantSecurity("review", variantApkFile("review"), expectedDebuggable = false, expectedControlPlaneEnabled = true)
         verifyShizukuUserServiceEntrypoint(variantApkFile("review"))
         verifyNativePageAlignment(variantApkFile("review"))
@@ -892,24 +914,22 @@ tasks.register("generateReleaseProvenance") {
     outputs.file(manifest)
     outputs.upToDateWhen { false }
     doLast {
-        val (head, dirty) = gitState(requireClean = true)
-        check(!dirty) { "Release provenance cannot be generated from a dirty worktree" }
         val apk = variantApkFile("release")
         val sbom = layout.buildDirectory.file("reports/sbom/release.cdx.json").get().asFile
-        verifySbom("release", "releaseRuntimeClasspath", apk, sbom,
-            expectedDebuggable = false, expectedControlPlaneEnabled = true)
+        val evidence = verifySbom("release", "releaseRuntimeClasspath", apk, sbom,
+            expectedDebuggable = false, expectedControlPlaneEnabled = true, requireClean = true)
         val report = linkedMapOf<String, Any>(
             "schemaVersion" to 1,
             "gitDirty" to false,
             "git" to mapOf(
-                "sha" to head,
+                "sha" to evidence.head,
                 "sourceUrl" to "https://github.com/hedanbaomi/mobile-agent-runtime",
             ),
-            "sourceArchiveSha256" to sourceArchiveSha256(),
+            "sourceArchiveSha256" to evidence.sourceHash,
             "artifact" to mapOf(
                 "type" to "android-apk",
                 "path" to apk.relativeTo(rootProject.projectDir).invariantSeparatorsPath,
-                "sha256" to sha256(apk),
+                "sha256" to evidence.artifactHash,
                 "abi" to listOf("arm64-v8a"),
                 "debuggable" to false,
             ),
@@ -917,7 +937,7 @@ tasks.register("generateReleaseProvenance") {
             "sbom" to mapOf(
                 "format" to "CycloneDX-1.6",
                 "path" to sbom.relativeTo(rootProject.projectDir).invariantSeparatorsPath,
-                "sha256" to sha256(sbom),
+                "sha256" to evidence.sbomHash,
             ),
         )
         val file = manifest.get().asFile

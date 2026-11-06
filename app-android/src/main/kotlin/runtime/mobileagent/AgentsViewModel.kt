@@ -16,6 +16,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import runtime.mobileagent.data.InstalledSkill
+import runtime.mobileagent.workspace.READ_ONLY_WORKSPACE_CAPABILITIES
+import runtime.mobileagent.workspace.WorkspaceGrantSet
 import runtime.mobileagent.domain.AgentProfile
 import runtime.mobileagent.domain.AgentSearchPermission
 import runtime.mobileagent.domain.AgentSnapshot
@@ -310,13 +312,6 @@ internal fun reauthorizeStaleAgentGrant(
     return saved
 }
 
-private val READ_ONLY_WORKSPACE_CAPABILITIES = listOf(
-    CapabilityId(CapabilityId.WORKSPACE_ENUMERATE),
-    CapabilityId(CapabilityId.FILE_LIST),
-    CapabilityId(CapabilityId.FILE_STAT),
-    CapabilityId(CapabilityId.FILE_READ_TEXT),
-)
-
 private val READ_WRITE_WORKSPACE_CAPABILITIES = READ_ONLY_WORKSPACE_CAPABILITIES + listOf(
     CapabilityId(CapabilityId.FILE_WRITE_TEXT),
     CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY),
@@ -349,53 +344,20 @@ internal fun saveAgentWorkspaceGrantPreset(
         AgentWorkspaceAccessPreset.READ_WRITE -> READ_WRITE_WORKSPACE_CAPABILITIES
     }
     val policyVersion = grantPort.currentPolicyVersion()
-    val liveGrants = grantPort.listGrants(agentId, includeRevoked = false)
-        .filter { it.agentId == agentId && it.workspaceId == workspace.id && !it.revoked }
+    val bundle = WorkspaceGrantSet(agentId, workspace.id, grantPort.listGrants(agentId, includeRevoked = false))
     if (preset.access == AgentWorkspaceAccessPreset.READ_ONLY) {
-        // The preset owns only ordinary whole-directory persistent grants.
-        // Scoped, one-shot and Skill grants remain separate explicit decisions.
-        liveGrants.filter {
-            it.capability !in READ_ONLY_WORKSPACE_CAPABILITIES &&
-                it.pathScope == null && it.skillInstallId == null && it.packageHash == null &&
-                it.lifetime == GrantLifetime.PERSISTENT && it.taskId == null && it.sessionId == null
+        bundle.rows.filter { !it.revoked && it.capability !in READ_ONLY_WORKSPACE_CAPABILITIES }.forEach { grant ->
+            val revoked = grantPort.revokeGrant(grant.grantId, grant.revision)
+            require(revoked.revoked) { "Workspace read-only preset revoke did not persist" }
         }
-            .forEach { grant ->
-                val revoked = grantPort.revokeGrant(grant.grantId, grant.revision)
-                require(revoked.revoked) { "Workspace read-only preset revoke did not persist" }
-            }
     }
-    val existing = liveGrants.asSequence()
-        .filter {
-            it.policyVersion == policyVersion &&
-                it.pathScope == null &&
-                it.skillInstallId == null &&
-                it.packageHash == null &&
-                it.lifetime == GrantLifetime.PERSISTENT &&
-                it.taskId == null && it.sessionId == null &&
-                !it.consumed && it.isActiveFor(java.time.Instant.now(), null, null)
-        }
-        .map { it.capability }
-        .toSet()
-    val missing = capabilities.filterNot(existing::contains)
-    if (missing.isEmpty()) return emptyList()
-    return missing.map { capability ->
-        val grant = CapabilityGrant(
-            grantId = EntityId.random().value,
-            agentId = agentId,
-            capability = capability,
-            workspaceId = workspace.id,
-            lifetime = GrantLifetime.PERSISTENT,
-            policyVersion = policyVersion,
-            createdAt = createdAt,
-        )
-        grantPort.saveGrant(grant).also { persisted ->
+    val now = java.time.Instant.now()
+    val existing = bundle.activeAt(policyVersion, now).map { it.capability }.toSet()
+    return (capabilities - existing).map { capability ->
+        grantPort.saveGrant(bundle.newGrant(capability, policyVersion, createdAt)).also { saved ->
             require(
-                persisted.agentId == agentId &&
-                    persisted.capability == capability &&
-                    persisted.workspaceId == workspace.id &&
-                    persisted.pathScope == null &&
-                    persisted.skillInstallId == null &&
-                    persisted.lifetime == GrantLifetime.PERSISTENT,
+                bundle.matchesScope(saved) && saved.capability == capability &&
+                    saved.policyVersion == policyVersion && saved.isActiveFor(now),
             ) { "Workspace preset grant save returned an unexpected binding" }
         }
     }

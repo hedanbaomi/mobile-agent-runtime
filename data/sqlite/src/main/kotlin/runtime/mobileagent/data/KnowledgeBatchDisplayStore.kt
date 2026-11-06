@@ -73,13 +73,7 @@ class KnowledgeBatchDisplayStore(private val db: SqlConnection) {
                         val policy = if (row.string("policy_batch_id").isEmpty()) PipelinePolicy() else
                             PipelinePolicy(row.long("max_concurrency").toInt(),row.long("failure_limit").toInt(),
                                 row.longOrNull("token_ceiling"),row.longOrNull("reservation_tokens"))
-                        val views = items[id].orEmpty().map { item ->
-                            val jobId = item.string("job_id").ifBlank { null }
-                            val state = item.string("state")
-                            ImportBatchItemView(jobId, item.string("display_name"),
-                                if (staged == 1L && jobId != null && state in setOf("PENDING", "COPYING")) "QUEUED" else state,
-                                item.string("error").ifBlank { null })
-                        }
+                        val views = items[id].orEmpty().map { it.batchItemView(staged == 1L) }
                         put(id, KnowledgeBatchDisplay(staged, views, policy))
                     }
                 }
@@ -181,4 +175,15 @@ class KnowledgeBatchDisplayStore(private val db: SqlConnection) {
             listOf(knowledgeBaseId),
         ).mapNotNull { it.string("job_id").ifBlank { null } }.toSet()
     }
+}
+
+internal fun SqlRow.batchItemView(stagingComplete: Boolean): ImportBatchItemView {
+    val jobId = string("job_id").ifBlank { null }
+    val state = string("state")
+    return ImportBatchItemView(
+        jobId = jobId,
+        displayName = string("display_name"),
+        state = if (stagingComplete && jobId != null && state in setOf("PENDING", "COPYING")) "QUEUED" else state,
+        error = string("error").ifBlank { null },
+    )
 }

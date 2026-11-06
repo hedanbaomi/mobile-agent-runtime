@@ -37,6 +37,68 @@ class PinnedArtifactDownloadTest {
     private val responseSent = CountDownLatch(1)
 
     @Test
+    fun twoCheckoutsReuseOneVerifiedOfflineInput() = withHttpServer({ exchange ->
+        exchangeCounter.incrementAndGet()
+        respond(exchange, 500, byteArrayOf())
+    }) { baseUrl ->
+        val digest = sha256(payload)
+        val target = tempDir.resolve("shared").resolve(digest).toFile()
+        val seed = tempDir.resolve("first-checkout.bin").toFile().apply { writeBytes(payload) }
+        val missing = tempDir.resolve("fresh-checkout.bin").toFile()
+        fun resolve(local: java.io.File) = PinnedArtifactDownload.download(
+            "$baseUrl/input", target, digest, localSeed = local, offline = true,
+        )
+        assertEquals(target, resolve(seed))
+        assertArrayEquals(payload, target.readBytes())
+        val before = Files.getLastModifiedTime(target.toPath())
+        assertEquals(target, resolve(missing))
+        assertEquals(before, Files.getLastModifiedTime(target.toPath()))
+        assertFalse(missing.exists())
+
+        target.writeText("damaged cache")
+        seed.writeText("damaged seed")
+        assertThrows(PinnedArtifactDownloadException::class.java) { resolve(seed) }
+        assertEquals("damaged cache", target.readText())
+        assertEquals(0, exchangeCounter.get())
+        assertEquals(listOf(digest), target.parentFile.list()!!.toList())
+    }
+
+    @Test
+    fun unreadableLegacySeedFallsThroughToVerifiedOnlineDownload() = withHttpServer({ exchange ->
+        exchangeCounter.incrementAndGet()
+        respond(exchange, 200, payload)
+    }) { baseUrl ->
+        val target = tempDir.resolve("shared.bin").toFile()
+        PinnedArtifactDownload.download("$baseUrl/input", target, sha256(payload), localSeed = tempDir.toFile())
+        assertEquals(1, exchangeCounter.get())
+        assertArrayEquals(payload, target.readBytes())
+        assertOnly("shared.bin")
+    }
+
+    @Test
+    fun parallelOfflineSeedsPublishOneCompleteInput() {
+        val digest = sha256(payload)
+        val target = tempDir.resolve("shared").resolve(digest).toFile()
+        val seed = tempDir.resolve("seed.bin").toFile().apply { writeBytes(payload) }
+        val start = CountDownLatch(1)
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(4)
+        try {
+            val requests = (1..4).map {
+                pool.submit {
+                    start.await()
+                    PinnedArtifactDownload.download("http://127.0.0.1:1/input", target, digest, localSeed = seed, offline = true)
+                }
+            }
+            start.countDown()
+            requests.forEach { it.get(10, TimeUnit.SECONDS) }
+            assertArrayEquals(payload, target.readBytes())
+            assertEquals(listOf(digest), target.parentFile.list()!!.toList())
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
     fun reusesValidCacheWithoutRequestOrMtimeChange() = withHttpServer({ exchange ->
         exchangeCounter.incrementAndGet()
         respond(exchange, 200, payload)

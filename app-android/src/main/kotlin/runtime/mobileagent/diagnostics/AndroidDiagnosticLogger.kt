@@ -7,6 +7,7 @@ import android.content.Context
 import android.os.Build
 import android.os.Process
 import runtime.mobileagent.BuildConfig
+import runtime.mobileagent.packagedBuildTimeUtc
 import java.io.File
 import java.io.OutputStream
 
@@ -50,7 +51,7 @@ class AndroidDiagnosticLogger internal constructor(
                     revision = BuildConfig.GIT_REVISION,
                     dirty = BuildConfig.GIT_DIRTY,
                     schemaVersion = BuildConfig.DB_SCHEMA_VERSION,
-                    buildTimeUtc = BuildConfig.BUILD_TIME_UTC,
+                    buildTimeUtc = context.packagedBuildTimeUtc(),
                     fingerprint = Build.FINGERPRINT,
                 ),
                 processId = Process::myPid,

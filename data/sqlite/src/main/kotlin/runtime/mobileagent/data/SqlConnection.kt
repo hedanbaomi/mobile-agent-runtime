@@ -5,6 +5,11 @@ package runtime.mobileagent.data
 
 data class SqlRow(val columns: Map<String, Any?>) {
     fun string(name: String): String = columns[name]?.toString().orEmpty()
+    internal fun boolean(name: String): Boolean = when (val value = columns[name]) {
+        is Boolean -> value
+        is Number -> value.toLong() != 0L
+        else -> value?.toString()?.let { it == "1" || it.equals("true", ignoreCase = true) } ?: false
+    }
     fun long(name: String): Long =
         (columns[name] as? Number)?.toLong() ?: columns[name]?.toString()?.toLongOrNull() ?: 0L
 

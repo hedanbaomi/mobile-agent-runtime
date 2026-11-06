@@ -18,7 +18,6 @@ import runtime.mobileagent.knowledge.ApiEmbeddingBinding
 import runtime.mobileagent.knowledge.ImportBatchKind
 import runtime.mobileagent.knowledge.ImportBatchState
 import runtime.mobileagent.knowledge.ImportStage
-import runtime.mobileagent.knowledge.sha256Hex
 import android.content.Intent
 import java.util.UUID
 import runtime.mobileagent.provider.SecretRedactor
@@ -380,7 +379,7 @@ class KnowledgeViewModel(
         val jobId: String?,
         val binding: ApiEmbeddingBinding,
         val previousSpace: String?,
-        val documentsFingerprint: String,
+        val documentsHash: String,
         val retry: Boolean,
         val queryHash: String? = null,
     )
@@ -678,7 +677,7 @@ class KnowledgeViewModel(
         val revision = ++embeddingRevision
         val selection = selectionRevision
         readOnIo({
-            require(repo.listJobs().none { it.first.knowledgeBaseId == id && it.first.stage.name in ACTIVE }) {
+            require(repo.listJobs(id).none { it.first.stage.name in ACTIVE }) {
                 "请先取消或等待当前导入任务，再重建索引。"
             }
             val api = repo.embeddingSpaceId(id)?.let(ApiEmbeddingBinding::parseSpaceId)
@@ -693,7 +692,7 @@ class KnowledgeViewModel(
         val kbId = state.value.selectedBaseId ?: run { fail(IllegalStateException("请先选择知识库。")); return }
         val wasLoading = state.value.loading
         requestEmbeddingRead {
-            require(!wasLoading && repo.listJobs().none { it.first.knowledgeBaseId == kbId && it.first.stage.name in ACTIVE }) {
+            require(!wasLoading && repo.listJobs(kbId).none { it.first.stage.name in ACTIVE }) {
                 "请等待当前导入结束或取消任务，再更换 Embedding。"
             }
             val binding = app.container.apiEmbeddings.binding(modelProfileId, dimension, kbId)
@@ -715,7 +714,7 @@ class KnowledgeViewModel(
     }
     private fun requestJobEmbedding(jobId: String, retry: Boolean) {
         requestEmbeddingRead {
-            val job = repo.listJobs().firstOrNull { it.first.id == jobId }?.first ?: error("导入任务不存在。")
+            val job = repo.findJob(jobId) ?: error("导入任务不存在。")
             require(job.embeddingIsApi && !isRebindUnknown(job.error)) { "请使用对应阶段的授权操作。" }
             require(if (retry) job.error?.contains("UNKNOWN_OUTCOME") == true && job.error?.contains("embedding", true) == true
                 else job.stage == ImportStage.AWAITING_EMBEDDING_CONSENT) { "任务状态已变更，请刷新后重试。" }
@@ -737,12 +736,12 @@ class KnowledgeViewModel(
         queryHash: String? = null): Pair<PendingEmbedding, EmbeddingConfirmation> {
             require(app.container.apiEmbeddings.binding(binding.modelProfileId, binding.dimension, kbId) == binding &&
                 app.container.apiEmbeddings.resolve(binding.spaceId) != null) { "Embedding 目标已变更或不可用，请重新选择。" }
-            val fingerprint = documentsFingerprint(kbId)
-            val pending = PendingEmbedding(kind, kbId, jobId, binding, repo.embeddingSpaceId(kbId), fingerprint, retry, queryHash)
+            val scope = repo.documentScope(kbId)
+            val pending = PendingEmbedding(kind, kbId, jobId, binding, repo.embeddingSpaceId(kbId), scope.sha256, retry, queryHash)
             return pending to EmbeddingConfirmation(app.container.apiEmbeddings.label(binding) +
                 queryHash?.let { "\nQuery SHA-256: $it" }.orEmpty(), retry,
                 kind == EmbeddingAction.REBIND || kind == EmbeddingAction.REBUILD,
-                app.container.db.query("SELECT count(*) AS count FROM documents WHERE kb_id=? AND deleted_at IS NULL", listOf(kbId)).single().long("count").toInt(),
+                scope.documentCount,
                 queryRetry = kind == EmbeddingAction.QUERY_RETRY)
     }
     fun dismissEmbedding() { embeddingRevision += 1; embeddingRequest.value = null; pendingEmbedding = null }
@@ -751,7 +750,7 @@ class KnowledgeViewModel(
         dismissEmbedding()
         action {
             require(repo.embeddingSpaceId(pending.knowledgeBaseId) == pending.previousSpace &&
-                documentsFingerprint(pending.knowledgeBaseId) == pending.documentsFingerprint &&
+                repo.documentScope(pending.knowledgeBaseId).sha256 == pending.documentsHash &&
                 app.container.apiEmbeddings.binding(pending.binding.modelProfileId, pending.binding.dimension, pending.knowledgeBaseId) == pending.binding) {
                 "知识库或 Embedding 目标已变更，请重新确认；未发送文本。"
             }
@@ -763,7 +762,6 @@ class KnowledgeViewModel(
                 }
                 EmbeddingAction.REBIND, EmbeddingAction.REBUILD, EmbeddingAction.GRANT, EmbeddingAction.RETRY -> {
                     val actionName = pending.kind.name
-                    val documentsHash = sha256Hex(pending.documentsFingerprint.toByteArray(Charsets.UTF_8))
                     val fingerprint = buildString {
                         appendLine(actionName)
                         if (pending.kind == EmbeddingAction.REBIND) {
@@ -773,7 +771,7 @@ class KnowledgeViewModel(
                             append(pending.binding.fingerprint)
                         }
                         append('\n')
-                        append(documentsHash)
+                        append(pending.documentsHash)
                     }
                     val ticket = repo.issueConsentTicket(
                         "API_EMBEDDING",
@@ -787,9 +785,6 @@ class KnowledgeViewModel(
             }
         }
     }
-    private fun documentsFingerprint(kbId: String): String = app.container.db.query(
-        "SELECT id,blob_hash,active_version_id FROM documents WHERE kb_id=? AND deleted_at IS NULL ORDER BY id", listOf(kbId))
-        .joinToString("\n") { "${it.string("id")}:${it.string("blob_hash")}:${it.string("active_version_id")}" }
     private fun isRebindUnknown(error: String?): Boolean = error?.contains("UNKNOWN_OUTCOME") == true && error.contains("API rebind", true)
     fun grantVision(id: String) { requestVision(id, false) }
     fun retryVision(id: String) { requestVision(id, true) }
@@ -819,9 +814,9 @@ class KnowledgeViewModel(
         dismissVision()
         action {
             require(fingerprint != null && currentVisionTarget(fingerprint)?.fingerprint == fingerprint) { "Vision 目标已变更，请重新确认。" }
-            val job = repo.listJobs().firstOrNull { it.first.id == request.first }?.first
+            val job = repo.findJob(request.first)
                 ?: error("导入任务不存在。")
-            val documentsHash = sha256Hex(documentsFingerprint(job.knowledgeBaseId).toByteArray(Charsets.UTF_8))
+            val documentsHash = repo.documentScope(job.knowledgeBaseId).sha256
             val ticket = repo.issueConsentTicket(
                 "VISION",
                 job.id,

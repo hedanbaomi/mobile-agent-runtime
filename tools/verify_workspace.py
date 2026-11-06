@@ -17,6 +17,7 @@ LOCAL_RECORDS = {
     "docs/evidence/2026-10-05/announcements-access-fetch-deploy.md",
     "docs/evidence/2026-10-05/announcements-visual-admin.md",
 }
+HANDOFF_SUMMARIES = ("current-task.md", "current-status.md", "open-items.md")
 
 
 def version(text):
@@ -45,9 +46,14 @@ def check(root, publication=False):
             failures.append("HANDOFF exceeds current-summary budget; archive completed history")
         if handoff.count("## 当前任务") != 1:
             failures.append("HANDOFF must contain exactly one current-task section")
+        # These summaries are maintained locally. Fresh checkouts may omit them.
+        summaries = [root / "docs" / "agents" / "handoff" / name for name in HANDOFF_SUMMARIES]
+        hot = [p.read_bytes() for p in summaries if p.is_file()]
+        if sum(map(len, hot)) > 12000 or sum(len(data.splitlines()) for data in hot) > 150:
+            failures.append("Current handoff summaries exceed 12 KB / 150 lines; link completed history")
     # Archived evidence keeps its historical interpretation and is not a live
     # requirement. Only current entry points are checked here; no disk-wide scan.
-    docs = [] if publication else [root / "HANDOFF.md"]
+    docs = [] if publication else [root / "HANDOFF.md", *(p for p in summaries if p.is_file())]
     # Local reports are intentionally untracked WIP, not portable requirements.
     tracked = set(subprocess.check_output(["git", "ls-files"], cwd=root, text=True, encoding="utf-8").splitlines())
     tree = subprocess.run(["git", "ls-tree", "-r", "--name-only", "HEAD"], cwd=root, capture_output=True, text=True, encoding="utf-8")

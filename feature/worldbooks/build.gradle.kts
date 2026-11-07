@@ -7,22 +7,10 @@ plugins {
     alias(libs.plugins.compose.compiler)
 }
 
+apply(from = rootProject.file("gradle/android-feature.gradle"))
+
 android {
     namespace = "runtime.mobileagent.feature.worldbooks"
-    compileSdk = libs.versions.compileSdk.get().toInt()
-    defaultConfig {
-        minSdk = libs.versions.minSdk.get().toInt()
-    }
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-    buildFeatures {
-        compose = true
-    }
     testOptions {
         unitTests.all { it.useJUnitPlatform() }
     }
@@ -34,12 +22,7 @@ dependencies {
     // also keeps this module's resolved graph on the same coroutines/stdlib versions as
     // its siblings instead of dragging in an older transitive set.
     implementation(project(":shared:domain"))
-    implementation(libs.androidx.lifecycle.viewmodel.compose)
-    implementation(libs.androidx.lifecycle.runtime.compose)
 
-    implementation(platform(libs.androidx.compose.bom))
-    implementation(libs.androidx.compose.ui)
-    implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.activity.compose)
 
     // Pure-JVM tests for the presentation model and the bilingual resource contract.

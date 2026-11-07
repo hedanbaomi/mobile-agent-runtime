@@ -62,6 +62,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import runtime.mobileagent.resolveRequestInspectorAvailability
+import runtime.mobileagent.requestInspectorEnabled
 import runtime.mobileagent.MobileAgentApp
 import runtime.mobileagent.ShellViewModel
 import runtime.mobileagent.WorkspacePickerTarget
@@ -523,7 +525,7 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
                                 vm = chatVm,
                                 chinese = chinese,
                                 showBack = navigationAffordance == ShellNavigationAffordance.BACK,
-                                inspectorEnabled = app.container.uiPreferences.getBoolean("request-inspector", true),
+                                inspectorEnabled = app.container.uiPreferences.requestInspectorEnabled,
                                 onBack = { handleBack(compact) },
                             )
                         }
@@ -651,14 +653,8 @@ internal fun requestInspectorAvailability(
     state: runtime.mobileagent.feature.chat.ChatUiState,
     inspectorEnabled: Boolean,
 ): runtime.mobileagent.feature.chat.ChatRequestInspectorAvailability =
-    if (!inspectorEnabled) {
-        runtime.mobileagent.feature.chat.ChatRequestInspectorAvailability.DISABLED
-    } else {
-        state.requestInspectorAvailability ?: when {
-            state.requestPreview == null -> runtime.mobileagent.feature.chat.ChatRequestInspectorAvailability.NOT_PREPARED
-            else -> runtime.mobileagent.feature.chat.ChatRequestInspectorAvailability.READY
-        }
-    }
+    state.requestInspectorAvailability?.takeIf { inspectorEnabled }
+        ?: resolveRequestInspectorAvailability(inspectorEnabled, state.requestPreview != null, persistedPreviewHint = false)
 
 @Composable
 private fun ChatRoute(vm: runtime.mobileagent.ChatViewModel, chinese: Boolean, onRoute: (String) -> Unit,

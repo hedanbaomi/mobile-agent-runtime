@@ -54,6 +54,17 @@ import runtime.mobileagent.workspace.SharedWorkspaceBackendAdapter
 class UnifiedWorkspaceToolExecutorSearchTest {
 
     @Test
+    fun ordinaryCatalogKeepsSchemaOrderAndInputAliases() {
+        assertEquals(
+            listOf("workspace_list", "file_list", "file_glob", "file_stat", "file_read_text", "file_grep",
+                "file_write_text", "file_create_directory", "file_delete", "file_apply_patch"),
+            WorkspaceOperation.entries.map { it.spec.name },
+        )
+        assertEquals(WorkspaceOperation.APPLY_PATCH, WorkspaceOperation.forInput("apply_patch"))
+        assertEquals(null, WorkspaceOperation.forInput("file_move"))
+    }
+
+    @Test
     fun ordinaryReadBatchDoesNotAcquireRootConfirmationFromAnIdenticalSharedSchema(): Unit = runBlocking {
         val fixture = readFixture()
         val tools = runtime.mobileagent.RunProductivityTools(fixture.executor, this, { true }, { it },

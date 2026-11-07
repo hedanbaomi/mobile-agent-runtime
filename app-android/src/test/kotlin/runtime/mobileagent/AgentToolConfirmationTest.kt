@@ -442,6 +442,7 @@ class AgentToolConfirmationTest {
         for (batch in listOf(
             """{"calls":[]}""",
             """{"calls":[{"tool":"file_read_text","arguments":{"workspace_id":"ordinary-workspace"}}]}""",
+            """{"calls":[{"call_id":"c1","tool":"file_read_text","arguments":{"workspace_id":"ordinary-workspace"}}],"extra":1}""",
             """{"calls":[{"call_id":"c1","tool":"file_read_text","arguments":{"workspace_id":"ordinary-workspace"},"extra":1}]}""",
             """{"calls":[{"call_id":"c1","tool":"file_write_text","arguments":{"workspace_id":"ordinary-workspace"}}]}""",
             """{"calls":[{"call_id":"c1","tool":"file_read_text","arguments":{}}]}""",
@@ -472,6 +473,23 @@ class AgentToolConfirmationTest {
                 authorityForWorkspace = { error("workspace authority unavailable") },
             ),
         )
+    }
+
+    @Test fun duplicateChildIdsRejectTheWholeApprovalButRoutingStaysLenient() {
+        val batch = """
+            {"calls":[
+              {"call_id":"dup","tool":"file_read_text","arguments":{"workspace_id":"root-workspace"}},
+              {"call_id":"dup","tool":"file_read_text","arguments":{"workspace_id":"ordinary-workspace"}}
+            ]}
+        """.trimIndent()
+        // Route evidence is diagnostic only and keeps every child, including duplicates.
+        assertEquals(
+            listOf("root-workspace", "ordinary-workspace"),
+            AgentToolConfirmation.invocationWorkspaceIds("read_batch", batch),
+        )
+        // Approval is all-or-nothing: the executor would report one child as a
+        // replay failure, so the outer call must not be auto-approved.
+        assertFalse(batchAutoApproval(batch, rootRun = false, rootReadConfirmed = true, ordinarySkip = true))
     }
 
     private fun batchAutoApproval(

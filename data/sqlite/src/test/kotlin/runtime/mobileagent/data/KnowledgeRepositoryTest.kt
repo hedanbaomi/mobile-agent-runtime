@@ -1378,6 +1378,85 @@ class KnowledgeRepositoryTest {
     }
 
     @Test
+    fun cancellableByteImportSharesPauseDuplicateAndDeletedDocumentAdmission() = runBlocking {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val binding = testApiBinding()
+        val api = CountingEmbedder(binding.spaceId, binding.dimension)
+        val blobs = MemoryBlobSink()
+        val repo = KnowledgeRepository(db, blobs, apiEmbedder = api)
+        val kb = repo.createApiKnowledgeBase("API library", binding)
+        val payload = "cancellable duplicate admission evidence".toByteArray()
+        suspend fun importSame(pauseAt: ImportStage? = null) = repo.importBytesCancellable(
+            "same.txt", "text/plain", payload, visionConfigured = false, knowledgeBaseId = kb,
+            pauseAt = pauseAt, embeddingIsApi = true, embeddingConsent = true,
+        )
+        fun document(id: String) = db.query(
+            "SELECT active_version_id, deleted_at FROM documents WHERE id = ?", listOf(id),
+        ).singleOrNull()
+
+        assertEquals(ImportStage.COPYING, importSame(ImportStage.COPYING).stage)
+        assertEquals(0, api.calls)
+        val first = importSame()
+        assertEquals(ImportStage.READY, first.stage, first.error)
+        val publishedVersion = requireNotNull(document(first.documentId)).string("active_version_id")
+        val callsAfterPublish = api.calls
+        assertTrue(callsAfterPublish > 0)
+        val duplicate = importSame()
+        assertEquals(ImportStage.READY, duplicate.stage, duplicate.error)
+        assertEquals(first.documentId, duplicate.documentId)
+        assertEquals(publishedVersion, requireNotNull(document(first.documentId)).string("active_version_id"))
+        assertEquals(callsAfterPublish, api.calls)
+        assertEquals(1L, db.query("SELECT COUNT(*) AS n FROM document_versions WHERE document_id = ?",
+            listOf(first.documentId)).single().long("n"))
+
+        // An active CAS reader keeps the soft-deleted row available for restoration.
+        blobs.protect(sha256Hex(payload)).use {
+            repo.deleteDocument(first.documentId)
+            assertTrue(requireNotNull(document(first.documentId)).string("deleted_at").isNotBlank())
+            val restored = importSame()
+            assertEquals(ImportStage.READY, restored.stage, restored.error)
+            assertEquals(first.documentId, restored.documentId)
+            val row = requireNotNull(document(restored.documentId))
+            assertTrue(row.string("deleted_at").isBlank())
+            assertTrue(row.string("active_version_id").isNotBlank())
+        }
+        repo.deleteDocument(first.documentId)
+        assertNull(document(first.documentId))
+        val fresh = importSame()
+        assertEquals(ImportStage.READY, fresh.stage, fresh.error)
+        assertNotEquals(first.documentId, fresh.documentId)
+    }
+
+    @Test
+    fun cancellableByteImportDoesNotRepeatUnknownApiEmbeddingForDuplicate() = runBlocking {
+        val db = JdbcSqlConnection()
+        Migrations.apply(db)
+        val binding = testApiBinding()
+        val api = UnknownEmbedder(binding.spaceId, binding.dimension)
+        val repo = KnowledgeRepository(db, MemoryBlobSink(), apiEmbedder = api)
+        val kb = repo.createApiKnowledgeBase("API library", binding)
+        val payload = "uncertain cancellable embedding".toByteArray()
+
+        val first = repo.importBytesCancellable(
+            "unknown.txt", "text/plain", payload, visionConfigured = false,
+            knowledgeBaseId = kb, embeddingIsApi = true, embeddingConsent = true,
+        )
+        assertEquals(ImportStage.FAILED, first.stage)
+        assertTrue(first.error.orEmpty().contains("UNKNOWN_OUTCOME"))
+        assertEquals(1, api.calls)
+
+        val duplicate = repo.importBytesCancellable(
+            "unknown.txt", "text/plain", payload, visionConfigured = false,
+            knowledgeBaseId = kb, embeddingIsApi = true, embeddingConsent = true,
+        )
+
+        assertEquals(ImportStage.FAILED, duplicate.stage)
+        assertTrue(duplicate.error.orEmpty().contains("UNKNOWN_OUTCOME"))
+        assertEquals(1, api.calls)
+    }
+
+    @Test
     fun successfulApiVectorsAreReusedAcrossRebuildAndKnowledgeBases() {
         val db = JdbcSqlConnection()
         Migrations.apply(db)

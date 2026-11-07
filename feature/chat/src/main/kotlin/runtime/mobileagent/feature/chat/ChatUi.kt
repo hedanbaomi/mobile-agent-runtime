@@ -812,86 +812,6 @@ private fun UnboundWorkspaceDefaultCard(state: ChatUiState, actions: ChatActions
 }
 
 @Composable
-private fun ChatSessionList(state: ChatUiState, onSelect: (String) -> Unit, modifier: Modifier) {
-    val zh = state.language.equals("zh-CN", true)
-    Column(modifier.fillMaxHeight().background(MaterialTheme.colorScheme.surfaceVariant).padding(12.dp)) {
-        Text(stringResource(R.string.ui_conversations_23a085e0), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(12.dp))
-        if (state.loading) {
-            CircularProgressIndicator(Modifier.size(24.dp))
-        } else if (state.sessions.isEmpty()) {
-            Text(emptyConversationMessage(state, zh), style = MaterialTheme.typography.bodySmall)
-        } else {
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                items(state.sessions, key = { it.id }) { session ->
-                    val selected = session.id == state.selectedSessionId
-                    Surface(
-                        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.fillMaxWidth().clickable { onSelect(session.id) },
-                    ) {
-                        Column(Modifier.padding(10.dp)) {
-                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                Text(session.title, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                if (session.unread) Box(Modifier.size(8.dp).background(MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp)))
-                            }
-                            if (session.preview.isNotBlank()) Text(session.preview, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            if (session.timeLabel.isNotBlank()) Text(session.timeLabel, style = MaterialTheme.typography.labelSmall)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SessionChooser(state: ChatUiState, onSelect: (String) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    val zh = state.language.equals("zh-CN", true)
-    val selected = state.sessions.firstOrNull { it.id == state.selectedSessionId }
-    Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(
-            stringResource(R.string.ui_conversations_23a085e0),
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.weight(1f),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Box {
-            OutlinedButton(
-                onClick = { expanded = true },
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onSurface),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                modifier = Modifier.widthIn(max = 220.dp),
-            ) {
-                Text(
-                    selected?.title ?: if (zh) "选择会话" else "Choose conversation",
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                if (state.sessions.isEmpty()) DropdownMenuItem(text = { Text(stringResource(R.string.ui_no_conversations_81fbc382)) }, onClick = { expanded = false }, enabled = false)
-                else state.sessions.forEach { session ->
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                session.title,
-                                modifier = Modifier.widthIn(max = 220.dp),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        },
-                        onClick = { expanded = false; onSelect(session.id) },
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
 @OptIn(ExperimentalLayoutApi::class)
 private fun ChatHeader(
     state: ChatUiState,
@@ -1987,16 +1907,4 @@ fun RequestInspectorScreen(
             }
         }
     }
-}
-
-@Composable
-private fun RequestInspectorDialog(request: ChatRequestPreviewUi, layers: List<ChatPromptLayerUi>, onClose: () -> Unit, zh: Boolean) {
-    AlertDialog(
-        onDismissRequest = onClose,
-        title = { Text(stringResource(R.string.ui_request_inspector_4337f973)) },
-        text = {
-            RequestInspectorScreen(request, layers, onClose, zh)
-        },
-        confirmButton = { Button(onClick = onClose) { Text(stringResource(R.string.ui_close_6cf4a777)) } },
-    )
 }

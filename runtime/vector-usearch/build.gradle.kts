@@ -13,13 +13,15 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+val debugNativeAbis: List<String> by rootProject.extra
+
 android {
     namespace = "runtime.mobileagent.vector"
     compileSdk = libs.versions.compileSdk.get().toInt()
     defaultConfig {
         minSdk = libs.versions.minSdk.get().toInt()
         ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            abiFilters += debugNativeAbis
         }
         externalNativeBuild {
             cmake {
@@ -49,16 +51,14 @@ val usearchSourceUrl = "https://github.com/unum-cloud/USearch/archive/refs/tags/
 // SHA-256 of the official GitHub tag archive downloaded for this build.
 val usearchSourceSha256 = "30dd99efab891a6385a89ecd3a3a8a85ed7d3f064b7657588fc3ef5ccd2d52e3"
 val usearchSourceZip = layout.buildDirectory.file("source/usearch-v2.25.1.zip")
+val pinnedArtifactCacheRoot: File by rootProject.extra
 val usearchSourceDir = layout.buildDirectory.dir("source/USearch-2.25.1")
 val usearchGeneratedAssets = layout.buildDirectory.dir("generated/vector-assets")
 val usearchGeneratedLicense = layout.buildDirectory.file("generated/vector-assets/licenses/usearch-2.25.1/LICENSE.txt")
 val usearchGeneratedNotice = layout.buildDirectory.file("generated/vector-assets/licenses/usearch-2.25.1/NOTICE.txt")
 
-fun downloadUsearch(url: String, destination: File, expectedSha256: String) {
-    PinnedArtifactDownload.download(url, destination, expectedSha256, followRedirects = true)
-}
-
 val prepareUsearchSource = tasks.register("prepareUsearchSource") {
+    mustRunAfter("clean")
     inputs.property("usearchRevision", usearchRevision)
     inputs.property("usearchSourceSha256", usearchSourceSha256)
     inputs.property("usearchSourceUrl", usearchSourceUrl)
@@ -66,16 +66,20 @@ val prepareUsearchSource = tasks.register("prepareUsearchSource") {
     outputs.dir(usearchGeneratedAssets)
     outputs.file(usearchGeneratedLicense)
     outputs.file(usearchGeneratedNotice)
+    outputs.upToDateWhen { pinnedArtifactCacheRoot.resolve(usearchSourceSha256).isFile }
     doLast {
-        val zip = usearchSourceZip.get().asFile
+        val zip = PinnedArtifactDownload.download(
+            usearchSourceUrl, pinnedArtifactCacheRoot.resolve(usearchSourceSha256), usearchSourceSha256,
+            offline = gradle.startParameter.isOffline, localSeed = usearchSourceZip.get().asFile,
+        )
         val sourceDir = usearchSourceDir.get().asFile
-        downloadUsearch(usearchSourceUrl, zip, usearchSourceSha256)
-        if (!sourceDir.resolve("include/usearch/index_dense.hpp").isFile) {
-            sourceDir.parentFile.mkdirs()
-            copy {
-                from(zipTree(zip))
-                into(sourceDir.parentFile)
+        sync {
+            from(zipTree(zip)) {
+                include("${sourceDir.name}/**")
+                includeEmptyDirs = false
+                eachFile { path = path.removePrefix("${sourceDir.name}/") }
             }
+            into(sourceDir)
         }
         check(sourceDir.resolve("include/usearch/index_dense.hpp").isFile) {
             "USearch source archive did not contain include/usearch/index_dense.hpp"
@@ -100,7 +104,9 @@ val prepareUsearchSource = tasks.register("prepareUsearchSource") {
 }
 
 tasks.named("preBuild").configure { dependsOn(prepareUsearchSource) }
-tasks.matching { it.name.startsWith("externalNativeBuild") }.configureEach { dependsOn(prepareUsearchSource) }
+// Native clean may run before the module's clean deletes build/. Prepare inputs for the consumers.
+tasks.matching { it.name.startsWith("configureCMake") || it.name.startsWith("buildCMake") }
+    .configureEach { dependsOn(prepareUsearchSource) }
 
 dependencies {
     implementation(project(":shared:domain"))

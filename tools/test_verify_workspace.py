@@ -62,5 +62,20 @@ class WorkspaceGuardTest(unittest.TestCase):
         self.assertEqual([], check(self.root, publication=True))
 
 
+    def test_clean_public_clone_needs_no_private_handoff_but_checks_local_edits(self):
+        self.identity(15, "1.1.5")
+        (self.root / "HANDOFF.md").write_text("old\n" * 121, encoding="utf-8")
+        doc = self.root / "docs/CURRENT.md"
+        doc.write_text("[local archive](test-report.md)\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                        "commit", "-qm", "published tree"], cwd=self.root, check=True)
+        self.assertEqual([], check(self.root))
+        doc.write_text("[broken](missing-portable-file.md)\n", encoding="utf-8")
+        self.assertTrue(any("missing link" in error for error in check(self.root)))
+        (self.root / "docs/agents/handoff").mkdir()
+        self.assertTrue(any("budget" in error for error in check(self.root)))
+
+
 if __name__ == "__main__":
     unittest.main()

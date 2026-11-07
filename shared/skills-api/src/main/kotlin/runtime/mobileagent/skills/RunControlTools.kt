@@ -13,6 +13,7 @@ object RunControlTools {
     const val JOB_OUTPUT = "job_output"
     const val JOB_LIST = "job_list"
     const val JOB_CANCEL = "job_cancel"
+    /** Child arguments and model schema are defined by [ReadBatchProtocol]. */
     const val READ_BATCH = "read_batch"
 
     val JOB_NAMES: Set<String> = setOf(JOB_START, JOB_OUTPUT, JOB_LIST, JOB_CANCEL)

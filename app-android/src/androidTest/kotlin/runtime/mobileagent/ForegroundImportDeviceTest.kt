@@ -16,6 +16,7 @@ import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.work.Data
+import androidx.work.ListenableWorker
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.testing.TestListenableWorkerBuilder
@@ -34,6 +35,9 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import kotlinx.coroutines.runBlocking
+import runtime.mobileagent.background.ConsentFailureHandler
+import runtime.mobileagent.background.ConsentWorker
+import runtime.mobileagent.background.ImportBatchWorker
 import runtime.mobileagent.background.ImportCancellationHandler
 import runtime.mobileagent.background.ImportJobHandler
 import runtime.mobileagent.background.ImportWorkScheduler
@@ -101,6 +105,17 @@ class ForegroundImportDeviceTest {
         assertTrue(info.notification.extras.getBoolean(Notification.EXTRA_PROGRESS_INDETERMINATE))
         assertEquals(ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC, info.foregroundServiceType)
 
+        val batch = runBlocking { TestListenableWorkerBuilder<ImportBatchWorker>(context).build().getForegroundInfo() }
+        val consent = runBlocking { TestListenableWorkerBuilder<ConsentWorker>(context).build().getForegroundInfo() }
+        assertEquals(listOf(0x4D42, 0x4D43), listOf(batch.notificationId, consent.notificationId))
+        assertEquals("Knowledge import", batch.notification.extras.getCharSequence(Notification.EXTRA_TITLE))
+        assertEquals("Knowledge consent", consent.notification.extras.getCharSequence(Notification.EXTRA_TITLE))
+        for (other in listOf(batch, consent)) {
+            assertEquals(info.notification.channelId, other.notification.channelId)
+            assertEquals(info.foregroundServiceType, other.foregroundServiceType)
+            assertEquals(0, other.notification.extras.getInt(Notification.EXTRA_PROGRESS_MAX))
+        }
+
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channel = notificationManager.getNotificationChannel(info.notification.channelId)
         assertNotNull("Worker must create its real notification channel", channel)
@@ -127,6 +142,34 @@ class ForegroundImportDeviceTest {
             )
         }
         Log.i(TAG, "foreground_contract api=${Build.VERSION.SDK_INT} target=${context.applicationInfo.targetSdkVersion} type=${info.foregroundServiceType}")
+    }
+
+    @Test
+    fun missingHandlersRetryBelowTheCutoffAndRecordConsentFailureOnlyOnExhaustion() = runBlocking {
+        val previousBatch = ImportWorkerRegistry.batchHandler
+        val previousConsent = ImportWorkerRegistry.consentHandler
+        val previousFailure = ImportWorkerRegistry.consentFailureHandler
+        val failures = mutableListOf<String>()
+        val data = Data.Builder().putString(ImportWorkScheduler.INPUT_JOB_ID, "job")
+            .putString(ImportWorkScheduler.INPUT_BATCH_ID, "batch")
+            .putString(ImportWorkScheduler.INPUT_TICKET_ID, "ticket").build()
+        try {
+            ImportWorkerRegistry.batchHandler = null
+            ImportWorkerRegistry.consentHandler = null
+            ImportWorkerRegistry.consentFailureHandler = ConsentFailureHandler { failures.add(it) }
+            for (attempt in listOf(2, 3)) {
+                val expected = if (attempt == 2) ListenableWorker.Result.retry() else ListenableWorker.Result.failure()
+                val single = TestListenableWorkerBuilder<ImportWorker>(context, inputData = data, runAttemptCount = attempt).build()
+                val batch = TestListenableWorkerBuilder<ImportBatchWorker>(context, inputData = data, runAttemptCount = attempt).build()
+                val consent = TestListenableWorkerBuilder<ConsentWorker>(context, inputData = data, runAttemptCount = attempt).build()
+                for (worker in listOf(single, batch, consent)) assertEquals(expected, worker.doWork())
+                assertEquals(if (attempt == 2) emptyList() else listOf("ticket"), failures)
+            }
+        } finally {
+            ImportWorkerRegistry.batchHandler = previousBatch
+            ImportWorkerRegistry.consentHandler = previousConsent
+            ImportWorkerRegistry.consentFailureHandler = previousFailure
+        }
     }
 
     @Test(timeout = 90_000)

@@ -1,12 +1,13 @@
 // SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.TimeZone
+import java.io.IOException
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
+import java.time.Instant
+import java.time.temporal.ChronoUnit
+import com.android.build.api.variant.BuildConfigField
 import javax.inject.Inject
 import com.android.build.api.artifact.ScopedArtifact
 import com.android.build.api.variant.ScopedArtifacts
@@ -20,6 +21,38 @@ plugins {
 }
 
 apply(from = rootProject.file("tools/debug-sbom.gradle.kts"))
+
+// Put the actual Debug packaging time in the APK without changing the JVM
+// compilation inputs on every invocation. Review and Release keep BuildConfig.
+abstract class WriteDebugPackagingTime : DefaultTask() {
+    @get:OutputDirectory abstract val assetDirectory: DirectoryProperty
+
+    @TaskAction fun write() {
+        assetDirectory.get().file("mar-build-time-utc.txt").asFile.apply {
+            parentFile.mkdirs()
+            writeText(Instant.now().truncatedTo(ChronoUnit.SECONDS).toString(), Charsets.US_ASCII)
+        }
+    }
+}
+
+androidComponents.onVariants(androidComponents.selector().withBuildType("debug")) { variant ->
+    variant.buildConfigFields.put("BUILD_TIME_UTC", BuildConfigField("String", "\"\"", null))
+    val stamp = tasks.register<WriteDebugPackagingTime>("writeDebugPackagingTime") {
+        outputs.upToDateWhen { false } // Each packaged timestamp describes this invocation.
+    }
+    checkNotNull(variant.sources.assets).addGeneratedSourceDirectory(stamp, WriteDebugPackagingTime::assetDirectory)
+}
+
+abstract class BuildUtcClock : ValueSource<String, ValueSourceParameters.None> {
+    override fun obtain(): String = Instant.now().truncatedTo(ChronoUnit.SECONDS).toString()
+}
+
+androidComponents.onVariants { variant ->
+    if (variant.buildType != "debug") {
+        val clock = providers.of(BuildUtcClock::class) {}
+        variant.buildConfigFields.put("BUILD_TIME_UTC", clock.map { BuildConfigField("String", "\"$it\"", null) })
+    }
+}
 
 // Infer the ABI exposed to the separate instrumentation APK from bytecode,
 // including Runner dependencies. No test reachability rules enter Release.
@@ -151,22 +184,31 @@ val verifyReleaseSigning = tasks.register("verifyReleaseSigning") {
     }
 }
 
-fun gitCapture(vararg args: String): String = try {
-    val process = ProcessBuilder(listOf("git") + args.toList())
-        .directory(rootProject.projectDir)
-        .redirectErrorStream(true)
-        .start()
-    val text = process.inputStream.bufferedReader(Charsets.UTF_8).readText().trim()
-    if (process.waitFor() == 0) text else "unknown"
-} catch (_: Exception) {
-    "unknown"
+abstract class GitBuildIdentity : ValueSource<String, GitBuildIdentity.Parameters> {
+    interface Parameters : ValueSourceParameters { val repository: DirectoryProperty }
+
+    override fun obtain(): String {
+        val records = try {
+            val process = ProcessBuilder("git", "--no-optional-locks", "status", "--porcelain=v2",
+                "--branch", "--no-ahead-behind", "--untracked-files=normal", "-z")
+                .directory(parameters.repository.get().asFile).redirectError(ProcessBuilder.Redirect.DISCARD).start()
+            val output = process.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            if (process.waitFor() != 0) return "unknown:dirty"
+            output.split('\u0000')
+        } catch (_: IOException) { return "unknown:dirty" }
+        val oid = records.firstOrNull { it.startsWith("# branch.oid ") }?.substringAfter("# branch.oid ")
+        val head = oid?.takeIf { it.matches(Regex("(?:[0-9a-f]{40}|[0-9a-f]{64})")) } ?: return "unknown:dirty"
+        val dirty = records.any { it.isNotEmpty() && !it.startsWith("# ") }
+        return "$head:${if (dirty) "dirty" else "clean"}"
+    }
 }
 
 fun buildConfigString(value: String): String =
     "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
 
-val gitHead = gitCapture("rev-parse", "HEAD")
-val gitDirty = gitCapture("status", "--porcelain").isNotEmpty()
+val buildIdentity = providers.of(GitBuildIdentity::class) { parameters.repository.set(rootProject.layout.projectDirectory) }.get()
+val gitHead = buildIdentity.substringBefore(':')
+val gitDirty = buildIdentity.endsWith(":dirty")
 val gitRevision = when {
     gitHead == "unknown" -> "unknown"
     gitDirty -> "$gitHead-dirty"
@@ -175,9 +217,7 @@ val gitRevision = when {
 val dbSchemaVersion = Regex("""const val VERSION = (\d+)""")
     .find(rootProject.file("data/sqlite/src/main/kotlin/runtime/mobileagent/data/Migrations.kt").readText())
     ?.groupValues?.get(1) ?: "0"
-val buildTimeUtc = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'").apply {
-    timeZone = TimeZone.getTimeZone("UTC")
-}.format(Date())
+val debugNativeAbis: List<String> by rootProject.extra
 
 android {
     namespace = "runtime.mobileagent"
@@ -202,7 +242,6 @@ android {
         buildConfigField("String", "GIT_REVISION", buildConfigString(gitRevision))
         buildConfigField("boolean", "GIT_DIRTY", gitDirty.toString())
         buildConfigField("int", "DB_SCHEMA_VERSION", dbSchemaVersion)
-        buildConfigField("String", "BUILD_TIME_UTC", buildConfigString(buildTimeUtc))
         buildConfigField("String", "ANNOUNCEMENTS_BASE_URL", "\"https://announcements.luotianyi.fun\"")
         buildConfigField("String", "ANNOUNCEMENTS_KEY_ID", "\"mar-prod-20260829-1\"")
         buildConfigField("String", "ANNOUNCEMENTS_PUBLIC_KEY_HEX", "\"e89c5b55f45a303f5c721a568493edfb9f268b39967ac597b2e105725a552df8\"")
@@ -256,7 +295,7 @@ android {
             buildConfigField("boolean", "HIGH_PRIVILEGE_CONTROL_PLANE_ENABLED", "false")
             ndk {
                 abiFilters.clear()
-                abiFilters += listOf("arm64-v8a", "x86_64")
+                abiFilters += debugNativeAbis
             }
         }
         create("review") {

@@ -50,7 +50,6 @@ import runtime.mobileagent.domain.ModelOperation
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.RetryClass
-import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.domain.isChatEndpoint
 import runtime.mobileagent.domain.withEndpoint
 import runtime.mobileagent.provider.AssistantToolCall
@@ -97,16 +96,10 @@ class OpenAiResponsesAdapter(
         CommandCodeContextCatalog(http).read(baseUrl, profile)
 
     override suspend fun probe(profile: ModelProfile): CapabilityReport =
-        CapabilityReport(
-            modelId = profile.modelId,
-            supportsStream = "stream" in profile.capabilities,
-            supportsTools = "tools" in profile.capabilities,
-            supportsImages = "image" in profile.capabilities || profile.role == ModelRole.VISION,
+        openAiProfileReport(
+            profile = profile,
             source = "profile-only;format=OPENAI_RESPONSES",
-            probedAt = Utc.nowIso(),
-            charged = false,
-            status = CapabilityProbeStatus.PROFILE_ONLY,
-            checks = profileChecks(profile),
+            supportsImages = "image" in profile.capabilities || profile.role == ModelRole.VISION,
         )
 
     override suspend fun testConnection(
@@ -215,17 +208,7 @@ class OpenAiResponsesAdapter(
             )
         }
         if (secret.isEmpty()) {
-            return profileReport.copy(
-                supportsStream = false,
-                supportsTools = false,
-                supportsImages = false,
-                source = "metadata=not-run;stream=not-run;tools=not-run;image=not-run;secret=unavailable",
-                status = CapabilityProbeStatus.FAILED,
-                operationId = operationId,
-                checks = profileChecks(profile).map { check ->
-                    if (check.capability == CapabilityCheck.METADATA) check.copy(status = CapabilityCheckStatus.FAILED) else check
-                },
-            )
+            return missingOpenAiProbeCredentialReport(profileReport, profile, operationId)
         }
         val token = secret.concatToString()
         return try {
@@ -269,7 +252,7 @@ class OpenAiResponsesAdapter(
                 supportsTools = tools.supported,
                 supportsImages = image.supported,
                 source = "metadata=${metadata.summary};stream=${stream.summary};tools=${tools.summary};image=${image.summary}",
-                status = capabilityProbeStatus(features),
+                status = openAiCapabilityProbeStatus(features),
                 charged = metadata.charged || features.any { it.charged },
                 operationId = operationId,
                 checks = listOf(
@@ -282,21 +265,21 @@ class OpenAiResponsesAdapter(
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (_: SecretUnavailableException) {
-            failedProbeReport(profileReport, operationId, "secret-unavailable")
+            failedOpenAiProbeReport(profileReport, operationId, "secret-unavailable")
         } catch (_: InvalidHeaderException) {
-            failedProbeReport(profileReport, operationId, "invalid-config")
+            failedOpenAiProbeReport(profileReport, operationId, "invalid-config")
         } catch (_: TimeoutCancellationException) {
-            failedProbeReport(profileReport, operationId, "timeout")
+            failedOpenAiProbeReport(profileReport, operationId, "timeout")
         } catch (_: SSLException) {
-            failedProbeReport(profileReport, operationId, "tls-failure")
+            failedOpenAiProbeReport(profileReport, operationId, "tls-failure")
         } catch (_: UnknownHostException) {
-            failedProbeReport(profileReport, operationId, "network-unreachable")
+            failedOpenAiProbeReport(profileReport, operationId, "network-unreachable")
         } catch (_: ConnectException) {
-            failedProbeReport(profileReport, operationId, "network-unreachable")
+            failedOpenAiProbeReport(profileReport, operationId, "network-unreachable")
         } catch (_: IOException) {
-            failedProbeReport(profileReport, operationId, "network-unreachable")
+            failedOpenAiProbeReport(profileReport, operationId, "network-unreachable")
         } catch (_: Exception) {
-            failedProbeReport(profileReport, operationId, "unknown-outcome")
+            failedOpenAiProbeReport(profileReport, operationId, "unknown-outcome")
         }
     }
 
@@ -1005,7 +988,7 @@ class OpenAiResponsesAdapter(
         token: String,
         request: ModelRequest,
         require: ProbeRequirement,
-    ): FeatureProbeResult = try {
+    ): OpenAiFeatureProbeResult = try {
         withTimeout(CONNECTION_TIMEOUT_MS) {
             http.preparePost(url(baseUrl, "/responses")) {
                 contentType(ContentType.Application.Json)
@@ -1021,7 +1004,7 @@ class OpenAiResponsesAdapter(
                 val status = response.status.value
                 val raw = readBounded(response.bodyAsChannel())
                 if (status !in 200..299) {
-                    FeatureProbeResult(
+                    OpenAiFeatureProbeResult(
                         summary = probeHttpSummary(status, raw),
                         supported = false,
                         charged = true,
@@ -1033,7 +1016,7 @@ class OpenAiResponsesAdapter(
                 } else {
                     val responseType = response.headers[HttpHeaders.ContentType].orEmpty().lowercase()
                     if (require == ProbeRequirement.STREAM && !responseType.contains("text/event-stream")) {
-                        return@execute FeatureProbeResult(
+                        return@execute OpenAiFeatureProbeResult(
                             summary = "wrong-content-type",
                             supported = false,
                             charged = true,
@@ -1041,7 +1024,7 @@ class OpenAiResponsesAdapter(
                         )
                     }
                     if (require == ProbeRequirement.IMAGE && imageProbeBudgetExhausted(raw, responses = true)) {
-                        return@execute FeatureProbeResult("inconclusive", false, true, status = CapabilityCheckStatus.UNKNOWN)
+                        return@execute OpenAiFeatureProbeResult("inconclusive", false, true, status = CapabilityCheckStatus.UNKNOWN)
                     }
                     val events = parseResponseBody(raw, responseType, listOf(token) + headers.secrets)
                     val hasTerminal = events.any { it is ModelEvent.Completed }
@@ -1054,7 +1037,7 @@ class OpenAiResponsesAdapter(
                         ProbeRequirement.TOOL -> hasTool
                         ProbeRequirement.IMAGE -> hasText
                     }
-                    FeatureProbeResult(
+                    OpenAiFeatureProbeResult(
                         // A refusal proves the provider answered, but it does
                         // not verify the probed text/tool capability.  Keep it
                         // distinct from a malformed response.
@@ -1073,17 +1056,17 @@ class OpenAiResponsesAdapter(
     } catch (cancel: CancellationException) {
         throw cancel
     } catch (_: TimeoutCancellationException) {
-        FeatureProbeResult("timeout", false, true, status = CapabilityCheckStatus.UNKNOWN)
+        OpenAiFeatureProbeResult("timeout", false, true, status = CapabilityCheckStatus.UNKNOWN)
     } catch (_: SSLException) {
-        FeatureProbeResult("tls-failure", false, true, status = CapabilityCheckStatus.UNKNOWN)
+        OpenAiFeatureProbeResult("tls-failure", false, true, status = CapabilityCheckStatus.UNKNOWN)
     } catch (_: UnknownHostException) {
-        FeatureProbeResult("network-unreachable", false, true, status = CapabilityCheckStatus.UNKNOWN)
+        OpenAiFeatureProbeResult("network-unreachable", false, true, status = CapabilityCheckStatus.UNKNOWN)
     } catch (_: ConnectException) {
-        FeatureProbeResult("network-unreachable", false, true, status = CapabilityCheckStatus.UNKNOWN)
+        OpenAiFeatureProbeResult("network-unreachable", false, true, status = CapabilityCheckStatus.UNKNOWN)
     } catch (_: IOException) {
-        FeatureProbeResult("network-unreachable", false, true, status = CapabilityCheckStatus.UNKNOWN)
+        OpenAiFeatureProbeResult("network-unreachable", false, true, status = CapabilityCheckStatus.UNKNOWN)
     } catch (_: Exception) {
-        FeatureProbeResult("unknown-outcome", false, true, status = CapabilityCheckStatus.UNKNOWN)
+        OpenAiFeatureProbeResult("unknown-outcome", false, true, status = CapabilityCheckStatus.UNKNOWN)
     }
 
     private suspend fun probeFeature(
@@ -1092,7 +1075,7 @@ class OpenAiResponsesAdapter(
         token: String,
         feature: ProbeFeature,
         operationId: String,
-    ): FeatureProbeResult {
+    ): OpenAiFeatureProbeResult {
         val configured = profile.withEndpoint()
         val chat = configured.isChatEndpoint()
         val declared = when (feature) {
@@ -1100,7 +1083,7 @@ class OpenAiResponsesAdapter(
             ProbeFeature.TOOLS -> ModelFeature.TOOL_CALLING in configured.endpoint.features || "tools" in configured.capabilities
             ProbeFeature.IMAGE -> InputModality.IMAGE in configured.endpoint.inputModalities || "image" in configured.capabilities || configured.role == ModelRole.VISION
         }
-        if (!declared || !chat) return FeatureProbeResult("not-declared", false, false, status = CapabilityCheckStatus.NOT_DECLARED)
+        if (!declared || !chat) return OpenAiFeatureProbeResult("not-declared", false, false, status = CapabilityCheckStatus.NOT_DECLARED)
         val request = ModelRequest(
             modelId = profile.modelId,
             messages = listOf(
@@ -1137,50 +1120,6 @@ class OpenAiResponsesAdapter(
             ProbeFeature.TOOLS -> ProbeRequirement.TOOL
             ProbeFeature.IMAGE -> ProbeRequirement.IMAGE
         })
-    }
-
-    private fun profileChecks(profile: ModelProfile): List<CapabilityCheckResult> {
-        val configured = profile.withEndpoint()
-        val chat = configured.isChatEndpoint()
-        fun declared(feature: ProbeFeature): Boolean = when (feature) {
-            ProbeFeature.STREAM -> ModelFeature.STREAMING in configured.endpoint.features || "stream" in configured.capabilities
-            ProbeFeature.TOOLS -> ModelFeature.TOOL_CALLING in configured.endpoint.features || "tools" in configured.capabilities
-            ProbeFeature.IMAGE -> InputModality.IMAGE in configured.endpoint.inputModalities || "image" in configured.capabilities || configured.role == ModelRole.VISION
-        }
-        fun status(feature: ProbeFeature) = if (chat && declared(feature)) CapabilityCheckStatus.NOT_RUN else CapabilityCheckStatus.NOT_DECLARED
-        return listOf(
-            CapabilityCheckResult(CapabilityCheck.METADATA, CapabilityCheckStatus.NOT_RUN),
-            CapabilityCheckResult(CapabilityCheck.STREAM, status(ProbeFeature.STREAM)),
-            CapabilityCheckResult(CapabilityCheck.TOOLS, status(ProbeFeature.TOOLS)),
-            CapabilityCheckResult(CapabilityCheck.IMAGE, status(ProbeFeature.IMAGE)),
-        )
-    }
-
-    private fun failedProbeReport(
-        profileReport: CapabilityReport,
-        operationId: String,
-        reason: String,
-    ): CapabilityReport = profileReport.copy(
-        supportsStream = false,
-        supportsTools = false,
-        supportsImages = false,
-        source = "metadata=$reason;stream=not-run;tools=not-run;image=not-run",
-        status = CapabilityProbeStatus.FAILED,
-        charged = false,
-        operationId = operationId,
-        checks = listOf(
-            CapabilityCheckResult(CapabilityCheck.METADATA, CapabilityCheckStatus.UNKNOWN),
-            CapabilityCheckResult(CapabilityCheck.STREAM, CapabilityCheckStatus.NOT_RUN),
-            CapabilityCheckResult(CapabilityCheck.TOOLS, CapabilityCheckStatus.NOT_RUN),
-            CapabilityCheckResult(CapabilityCheck.IMAGE, CapabilityCheckStatus.NOT_RUN),
-        ),
-    )
-
-    private fun capabilityProbeStatus(results: List<FeatureProbeResult>): CapabilityProbeStatus = when {
-        results.all { it.status == CapabilityCheckStatus.VERIFIED || it.status == CapabilityCheckStatus.NOT_DECLARED } -> CapabilityProbeStatus.SUCCEEDED
-        results.any { it.status == CapabilityCheckStatus.UNSUPPORTED } -> CapabilityProbeStatus.PARTIAL
-        results.any { it.status == CapabilityCheckStatus.VERIFIED || it.status == CapabilityCheckStatus.NOT_DECLARED } -> CapabilityProbeStatus.PARTIAL
-        else -> CapabilityProbeStatus.FAILED
     }
 
     private fun featureHttpStatus(status: Int) = when {
@@ -1256,13 +1195,6 @@ class OpenAiResponsesAdapter(
 
     private fun elapsedMillis(started: Long): Long = ((System.nanoTime() - started) / 1_000_000L).coerceAtLeast(0L)
 
-    private data class FeatureProbeResult(
-        val summary: String,
-        val supported: Boolean,
-        val charged: Boolean,
-        val httpStatus: Int? = null,
-        val status: CapabilityCheckStatus,
-    )
     private enum class ProbeRequirement { TEXT, STREAM, TOOL, IMAGE }
     private class InvalidConnectionConfigException : RuntimeException()
 

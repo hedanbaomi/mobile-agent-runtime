@@ -3,7 +3,6 @@
 
 plugins {
     alias(libs.plugins.kotlin.jvm)
-    alias(libs.plugins.kotlin.serialization)
 }
 
 kotlin {
@@ -16,7 +15,6 @@ tasks.withType<Test>().configureEach {
 
 dependencies {
     implementation(project(":shared:domain"))
-    implementation(project(":shared:serialization"))
     implementation(libs.ktor.client.core)
     testImplementation(libs.ktor.client.mock)
 

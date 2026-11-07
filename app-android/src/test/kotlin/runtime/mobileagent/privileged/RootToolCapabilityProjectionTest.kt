@@ -30,6 +30,17 @@ class RootToolCapabilityProjectionTest {
     }
 
     @Test
+    fun rootCatalogKeepsReadOnlyFlagsAndWorkspaceRoutingSeparate() {
+        assertEquals(
+            setOf("file_list", "file_glob", "file_stat", "file_read_text", "file_grep", "file_get_metadata"),
+            RootToolArguments.specs().filterNot { it.sideEffect }.map { it.name }.toSet(),
+        )
+        val reserved = RootToolArguments.workspaceToolNames
+        assertTrue("workspace_list" in reserved && "file_move" in reserved)
+        assertFalse("shell_exec" in reserved || "apply_patch" in reserved)
+    }
+
+    @Test
     fun conditionalToolsExposeOpaqueVersionsAndTheirActualPatchProtocol() {
         val write = RootToolArguments.specs().single { it.name == "file_write_text" }
         val patch = RootToolArguments.specs().single { it.name == "file_apply_patch" }

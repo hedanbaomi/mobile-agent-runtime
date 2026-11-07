@@ -23,6 +23,7 @@ import runtime.mobileagent.agent.ContextPreflight
 import runtime.mobileagent.agent.ContextSource
 import runtime.mobileagent.agent.RuntimeContext
 import runtime.mobileagent.agent.RunBudget
+import runtime.mobileagent.agent.RunState
 import runtime.mobileagent.agent.toDiffPartOrNull
 import runtime.mobileagent.agent.toMessagePartOrNull
 import runtime.mobileagent.agent.toSafeErrorPart
@@ -105,37 +106,6 @@ internal fun persistChatApprovalInvocation(
     return invocation
 }
 
-/** Diagnostic classification uses the declared contract, never substrings in model tool names. */
-internal fun chatDiagnosticToolCapability(capability: String?): DiagnosticToolCapability = when (capability) {
-    "python.execute" -> DiagnosticToolCapability.PYTHON_EXECUTE
-    CapabilityId.SHELL_EXECUTE -> DiagnosticToolCapability.SHELL_EXECUTE
-    CapabilityId.WORKSPACE_ENUMERATE, CapabilityId.FILE_LIST, CapabilityId.FILE_STAT, CapabilityId.FILE_READ_TEXT,
-    CapabilityId.FILE_METADATA_READ, "workspace.read", "shizuku.workspace.read" ->
-        DiagnosticToolCapability.WORKSPACE_READ
-    CapabilityId.FILE_WRITE_TEXT, CapabilityId.FILE_CREATE_DIRECTORY, CapabilityId.FILE_MOVE, CapabilityId.FILE_DELETE,
-    CapabilityId.FILE_METADATA_WRITE, "file.apply_patch", "workspace.write", "shizuku.workspace.write" -> DiagnosticToolCapability.WORKSPACE_WRITE
-    CapabilityId.MEMORY_READ, CapabilityId.MEMORY_SEARCH -> DiagnosticToolCapability.MEMORY_READ
-    CapabilityId.MEMORY_APPEND, CapabilityId.MEMORY_REPLACE -> DiagnosticToolCapability.MEMORY_WRITE
-    "network.search", "knowledge.search" -> DiagnosticToolCapability.SEARCH
-    else -> DiagnosticToolCapability.UNKNOWN
-}
-
-internal fun chatDiagnosticAuthority(
-    capability: DiagnosticToolCapability,
-    selectedAuthority: String,
-    workspaceAuthority: DiagnosticAuthority = DiagnosticAuthority.NONE,
-): DiagnosticAuthority = when (capability) {
-    DiagnosticToolCapability.SHELL_EXECUTE -> when (selectedAuthority) {
-        "SHIZUKU" -> DiagnosticAuthority.SHIZUKU
-        "WIRED_ADB" -> DiagnosticAuthority.WIRED_ADB
-        "ROOT_DIRECT" -> DiagnosticAuthority.ROOT_DIRECT
-        "SHIZUKU_ROOT" -> DiagnosticAuthority.SHIZUKU_ROOT
-        else -> DiagnosticAuthority.NONE
-    }
-    DiagnosticToolCapability.WORKSPACE_READ, DiagnosticToolCapability.WORKSPACE_WRITE -> workspaceAuthority
-    else -> DiagnosticAuthority.NONE
-}
-
 private class ChatInputBudgetExceeded(
     val estimated: Long,
     val limit: Long,
@@ -203,7 +173,7 @@ class ChatViewModel internal constructor(
     private val citations = linkedMapOf<String, Pair<Citation, String>>()
     private var selectedImage: Pair<String, ByteArray>? = null
     private val imageDraft = ChatImageDraft(state)
-    private val sessionPreviews = mutableMapOf<String, Pair<ChatRequestPreviewUi, List<ChatPromptLayerUi>>>()
+    private val requestPreviews = ChatRequestPreviews()
     private var readGeneration = 0L
     private var inputRevision = 0L
     private var readJob: Job? = null
@@ -265,25 +235,21 @@ class ChatViewModel internal constructor(
         val authority: DiagnosticAuthority,
     )
 
-    init { reload() }
+    init {
+        addCloseable(requestPreviews.observe(container.uiPreferences) { state.value = state.value.withInspector() })
+        reload()
+    }
 
     fun reload() = reloadChat(preserveTerminalStatus = false)
 
     private fun reloadChat(preserveTerminalStatus: Boolean) {
-        val inspector = requestInspectorEnabled()
-        if (!inspector) {
-            sessionPreviews.clear()
-            state.value = state.value.copy(requestPreview = null,
-                requestInspectorAvailability = ChatRequestInspectorAvailability.DISABLED)
-        }
         if (state.value.streaming) return
         invalidateRead()
         val generation = readGeneration
         val edit = inputRevision
-        val previous = state.value
+        val previous = state.value.copy(requestPreview = null, promptLayers = emptyList())
         val savedSession = savedStateHandle.get<String>(SELECTED_SESSION_KEY)
         val savedAgent = savedStateHandle.get<String>(SELECTED_AGENT_KEY)
-        val inspectorOpen = savedStateHandle.get<Boolean>(INSPECTOR_KEY) ?: false
         val sourceCitations = LinkedHashMap(citations)
         val legacy = legacyDrafts()
         state.value = state.value.copy(loading = true, loadingEarlierMessages = false)
@@ -295,9 +261,9 @@ class ChatViewModel internal constructor(
                 }
                 val (result, invalidated) = withContext(storageDispatcher) {
                     val closed = closeOrphanedToolApprovals()
-                    readChatHistory(container, previous, savedSession, savedAgent, inspectorOpen,
+                    readChatHistory(container, previous, savedSession, savedAgent,
                         sourceCitations, ::messageUi, ::restoreCitations, ::citationUis, ::compactionUi,
-                        ::projectWorkspaceAccess, ::hasPersistedRequestPreviewHint) to closed
+                        ::projectWorkspaceAccess) to closed
                 }
                 if (generation != readGeneration || state.value.streaming) return@launch
                 citations.clear()
@@ -308,7 +274,8 @@ class ChatViewModel internal constructor(
                 val statusChanged = preserveTerminalStatus || state.value.status != previous.status
                 state.value = result.state.copy(input = if (edit == inputRevision) result.state.input else state.value.input,
                     status = if (statusChanged) state.value.status else result.state.status,
-                    statusKind = if (statusChanged) state.value.statusKind else result.state.statusKind)
+                    statusKind = if (statusChanged) state.value.statusKind else result.state.statusKind,
+                    inspectorOpen = savedStateHandle.get<Boolean>(INSPECTOR_KEY) ?: false).withInspector()
                 draftCache[draftOwner()] = state.value.input
                 imageDraft.sync()
                 if (invalidated > 0 && !preserveTerminalStatus) state.value = state.value.copy(
@@ -376,22 +343,13 @@ class ChatViewModel internal constructor(
 
     fun selectAgent(id: String) {
         if (blockedSessionChange()) return
-        invalidateRead()
-        inputRevision++
-        detachRunPage()
-        saveDraft()
-        state.value.selectedSessionId?.let { previous ->
-            state.value.requestPreview?.let { sessionPreviews[previous] = it to state.value.promptLayers }
-        }
+        leaveSelectedSession()
         container.uiPreferences.edit().putString("selected-agent", id).remove("selected-conversation").apply()
         savedStateHandle[SELECTED_AGENT_KEY] = id
         savedStateHandle.remove<String>(SELECTED_SESSION_KEY)
         state.value = state.value.copy(selectedAgentId = id, selectedSessionId = null, input = peekDraft(null, id), messages = emptyList(), citations = emptyList(),
-            requestPreview = null,
-            requestInspectorAvailability = resolveRequestInspectorAvailability(
-                inspectorEnabled = requestInspectorEnabled(), previewAvailable = false, persistedPreviewHint = false,
-            ),
             status = "新会话将冻结所选 Agent 的当前配置。", loading = false)
+            .withInspector()
         citations.clear()
         reload()
     }
@@ -473,14 +431,7 @@ class ChatViewModel internal constructor(
     }
 
     private fun selectCommittedSession(id: String, knownAgentId: String? = null) {
-        invalidateRead()
-        inputRevision++
-        detachRunPage()
-        saveDraft()
-        state.value.selectedSessionId?.let { previous ->
-            state.value.requestPreview?.let { sessionPreviews[previous] = it to state.value.promptLayers }
-        }
-        val cached = sessionPreviews[id].takeIf { requestInspectorEnabled() }
+        leaveSelectedSession()
         val agent = knownAgentId ?: (state.value.sessions + state.value.archivedSessions).firstOrNull { it.id == id }?.agentId
         container.uiPreferences.edit().putString("selected-conversation", id).apply()
         savedStateHandle[SELECTED_SESSION_KEY] = id
@@ -489,14 +440,8 @@ class ChatViewModel internal constructor(
             selectedAgentId = agent,
             input = peekDraft(id, agent),
             messages = emptyList(), citations = emptyList(), hasMoreMessages = false,
-            requestPreview = cached?.first,
-            requestInspectorAvailability = resolveRequestInspectorAvailability(
-                inspectorEnabled = requestInspectorEnabled(), previewAvailable = cached != null,
-                persistedPreviewHint = hasPersistedRequestPreviewHint(id),
-            ),
-            promptLayers = cached?.second.orEmpty(),
             status = "会话使用已保存的配置快照。",
-        )
+        ).withInspector()
         citations.clear()
         messageCursor = null
         reload()
@@ -504,19 +449,8 @@ class ChatViewModel internal constructor(
     fun input(value: String) { inputRevision++; state.value = state.value.copy(input = value); saveDraft() }
     fun degrade(value: Boolean) { if (!state.value.streaming) state.value = state.value.copy(textDegradation = value) }
     fun inspector(open: Boolean) {
-        val inspectorEnabled = requestInspectorEnabled()
-        if (!inspectorEnabled) sessionPreviews.clear()
-        val requestPreview = state.value.requestPreview?.takeIf { inspectorEnabled }
         savedStateHandle[INSPECTOR_KEY] = open
-        state.value = state.value.copy(
-            inspectorOpen = open,
-            requestPreview = requestPreview,
-            requestInspectorAvailability = resolveRequestInspectorAvailability(
-                inspectorEnabled = inspectorEnabled,
-                previewAvailable = requestPreview != null,
-                persistedPreviewHint = hasPersistedRequestPreviewHint(state.value.selectedSessionId),
-            ),
-        )
+        state.value = state.value.copy(inspectorOpen = open).withInspector()
     }
     fun closeCitation() { selectedImage = null; state.value = state.value.copy(selectedCitationId = null); locator.value = null }
     fun cancelUnknownRetry() { unknownRetry.value = null }
@@ -634,6 +568,10 @@ class ChatViewModel internal constructor(
         preflight: ChatRunPreflight,
     ) {
         val conversationId = owner.conversationId
+        val sentInputRevision = inputRevision
+        val captureGeneration = requestPreviews.generation
+        fun canCapturePreview() = canProjectRun(owner) &&
+            requestPreviews.canCapture(captureGeneration, container.uiPreferences.requestInspectorEnabled)
         // Durable data and authorization use this run's own evidence, never the selected page.
         val runCitations = LinkedHashMap(citations)
         val threadWorkspacePort = (container as? ThreadWorkspacePortProvider)?.threadWorkspacePort
@@ -683,23 +621,20 @@ class ChatViewModel internal constructor(
                 "此会话的工作区已固定，但运行时暂不可用；不会切换到其他通道。"
             else -> "会话工作区已固定，正在检查配置、授权与上下文预算…"
         }
+        if (canProjectRun(owner)) requestPreviews.begin(conversationId)
         publishRunState(owner, state.value.copy(
             streaming = true,
             input = "",
-            requestPreview = null,
-            requestInspectorAvailability = resolveRequestInspectorAvailability(
-                inspectorEnabled = requestInspectorEnabled(), previewAvailable = false,
-                persistedPreviewHint = hasPersistedRequestPreviewHint(conversationId),
-            ),
             error = null,
             status = workspacePreflightStatus,
             statusKind = "",
-        ))
+        ).withInspector())
         currentCoroutineContext().ensureActive()
         runJob = viewModelScope.launch {
             resources.job = currentCoroutineContext()[Job]
             var foregroundStarted = false
             var runAdmitted = false
+            var archivedBeforeAdmission = false
             val run = AgentRun(owner.runId, binding.snapshot.id, conversationId,
                 budget = RunBudget(maxModelRounds = contextPolicy.maxModelRequestsPerRun,
                     maxToolCalls = contextPolicy.maxToolCalls, maxRuntimeMs = contextPolicy.maxRuntimeMs.toLong()))
@@ -1328,8 +1263,11 @@ class ChatViewModel internal constructor(
                 secret = withContext(Dispatchers.IO) { container.secrets.resolveForHost(provider.secretRef) }
                 preparationStage = "request"
                 publishRunCitations(owner, runCitations)
-                publishRunState(owner, state.value.copy(promptLayers = prompt.assemble().blocks.map { ChatPromptLayerUi(it.trust.name, it.text) },
-                    citations = citationUis(runCitations), status = listOfNotNull(
+                if (canCapturePreview()) {
+                    requestPreviews.setLayers(conversationId, binding.snapshot.agentId,
+                        prompt.assemble().blocks.map { ChatPromptLayerUi(it.trust.name, it.text) })
+                }
+                publishRunState(owner, state.value.copy(citations = citationUis(runCitations), status = listOfNotNull(
                         "发送至 ${URI(provider.baseUrl).host} · ${model.modelId}。",
                         when {
                             threadWorkspaceBindingReadFailed -> "会话工作区绑定读取失败；工作区工具已关闭。"
@@ -1349,7 +1287,7 @@ class ChatViewModel internal constructor(
                             }
                         } else null,
                         result.warnings.joinToString(" ").takeIf { it.isNotBlank() },
-                    ).joinToString(" ")))
+                    ).joinToString(" ")).withInspector())
                 // Model transport observability (review-APK QA P2): the chat run
                 // previously wrote no model request evidence at all, so a stalled
                 // or failed dispatch left nothing to diagnose.  Observability
@@ -1465,7 +1403,7 @@ class ChatViewModel internal constructor(
                         },
                     )
                     if (autoApproved) {
-                        markPendingApprovalDecision(run.runId, approvalAudit.invocationId, call.callId, "APPROVED")
+                        markPendingApprovalApproved(approvalAudit)
                         recordToolApprovalState(approvalAudit, DiagnosticApprovalState.APPROVED, "agent_auto_skip")
                         approvedToolInFlight = true
                         approvedToolCallId = call.callId
@@ -1497,12 +1435,12 @@ class ChatViewModel internal constructor(
                     }
                     }
                 }
-                execution.approvalReady(onApprove)
+                execution.approvalReady(toolExecutor, onApprove)
                 val runtime = AgentRuntime(adapter, executor = toolExecutor, onApprove = onApprove, secretsForRedaction = {
                     secret?.let { listOf(String(it)) }.orEmpty()
                 })
                 val runtimeEvents = runtime.run(AgentRuntimeRequest(run, prompt, model.modelId, secret!!, "tools" in model.capabilities,
-                    parameters = layers, headers = headers, emitRequestPreview = container.uiPreferences.getBoolean("request-inspector", true),
+                    parameters = layers, headers = headers, emitRequestPreview = canCapturePreview(),
                     confirmedToolResultAfterTimeout = runTools::confirmedDeviceActionAfterTimeout,
                     toolImages = { call, result ->
                         if (productivity.ownsTool(call.name)) emptyList() else runTools.toolImages(call, result)
@@ -1567,6 +1505,19 @@ class ChatViewModel internal constructor(
                 ))
                     // Rendezvous keeps durable old exchanges ahead of a later compaction checkpoint.
                     .flowOn(Dispatchers.IO).buffer(0)
+                fun captureRequestPreview(body: String?, headerNames: Iterable<String>) {
+                    if (!canCapturePreview()) return
+                    val preview = body?.let {
+                        ChatRequestPreviewUi("POST",
+                            OpenAiAdapterFactory.requestEndpoint(provider.apiFormat, provider.baseUrl, model.modelId),
+                            headerNames.joinToString("\n") { name -> "$name: [redacted]" }, it,
+                        )
+                    }
+                    requestPreviews.prepared(conversationId, binding.snapshot.agentId, preview)
+                    if (preview != null) container.uiPreferences.rememberRequestPreview(conversationId)
+                    publishRunState(owner, state.value.withInspector())
+                }
+
                 execution.collectEvents(runtimeEvents) { event ->
                         lastProgressAt.set(SystemClock.elapsedRealtime())
                         var persistRun = false
@@ -1624,20 +1575,7 @@ class ChatViewModel internal constructor(
                                     answer, status = "STREAMING", metadataJson = metadata,
                                     messageId = event.assistantMessageId ?: EntityId.random().value).id }
                                 record = record.copy(state = RunStatus.MODEL_STREAMING, modelRounds = run.modelRounds)
-                                val inspectorEnabled = requestInspectorEnabled()
-                                val requestPreview = event.requestPreview?.takeIf { inspectorEnabled }?.let { ChatRequestPreviewUi("POST",
-                                    OpenAiAdapterFactory.requestEndpoint(provider.apiFormat, provider.baseUrl, model.modelId),
-                                    event.headerNames.joinToString("\n") { "$it: [redacted]" },
-                                    it,
-                                ) }
-                                if (requestPreview != null) rememberRequestPreviewHint(conversationId)
-                                publishRunState(owner, state.value.copy(requestPreview = requestPreview,
-                                    requestInspectorAvailability = resolveRequestInspectorAvailability(
-                                        inspectorEnabled = inspectorEnabled,
-                                        previewAvailable = requestPreview != null,
-                                        persistedPreviewHint = hasPersistedRequestPreviewHint(conversationId),
-                                    ),
-                                ))
+                                captureRequestPreview(event.requestPreview, event.headerNames)
                                 refreshMessages(owner)
                                 persistRun = true
                             }
@@ -1780,12 +1718,7 @@ class ChatViewModel internal constructor(
                                 observed.clear(); reasoning = ""
                                 modelInFlight = true
                                 record = record.copy(state = RunStatus.MODEL_STREAMING, modelRounds = run.modelRounds)
-                                if (event.requestPreview != null) {
-                                    rememberRequestPreviewHint(conversationId)
-                                    publishRunState(owner, state.value.copy(requestPreview = ChatRequestPreviewUi("POST",
-                                        OpenAiAdapterFactory.requestEndpoint(provider.apiFormat, provider.baseUrl, model.modelId),
-                                        headers.keys.joinToString("\n") { it + ": [redacted]" }, requireNotNull(event.requestPreview))))
-                                }
+                                event.requestPreview?.let { captureRequestPreview(it, headers.keys) }
                                 publishRunState(owner, state.value.copy(status = "正在读取图片（本组" + event.imageCount + "张）"))
                                 persistRun = true
                             }
@@ -1858,39 +1791,19 @@ class ChatViewModel internal constructor(
                                     )
                                 }
                                 pendingApprovalFor(run.runId)?.let { pending ->
-                                    when (event.state.name) {
-                                        RunStatus.BUDGET_EXHAUSTED.name -> settleActiveApproval(resources, pending.invocationId ?: pending.callId, expired = true)
-                                        RunStatus.CANCELLED.name, RunStatus.FAILED.name -> settleActiveApproval(resources, pending.invocationId ?: pending.callId, expired = false)
-                                        else -> Unit
-                                    }
-                                    val transition = when (event.state.name) {
-                                        RunStatus.BUDGET_EXHAUSTED.name -> {
-                                            recordToolApprovalState(pending, DiagnosticApprovalState.EXPIRED, "resource_limit")
-                                            Triple("CANCELLED", "EXPIRED", "APPROVAL_EXPIRED")
-                                        }
-                                        RunStatus.CANCELLED.name -> {
-                                            recordToolApprovalState(pending, DiagnosticApprovalState.INVALIDATED, "cancelled")
-                                            Triple("CANCELLED", "DENIED", "APPROVAL_INVALIDATED")
-                                        }
-                                        RunStatus.FAILED.name -> {
-                                            // AgentRuntime finishes immediately after an explicit
-                                            // rejection and emits no ToolResultProduced event. Close
-                                            // the durable invocation here so it cannot remain replayable.
-                                            recordToolApprovalState(pending, DiagnosticApprovalState.DENIED, "rejected")
-                                            Triple("FAILED", "DENIED", "APPROVAL_DENIED")
-                                        }
+                                    val outcome = when (event.state) {
+                                        RunState.BUDGET_EXHAUSTED -> ChatApprovalOutcome.EXPIRED
+                                        RunState.CANCELLED -> ChatApprovalOutcome.INVALIDATED
+                                        // Rejection finishes the run without producing a tool result.
+                                        RunState.FAILED -> ChatApprovalOutcome.DENIED
                                         else -> null
                                     }
-                                    transition?.let { (state, decision, errorCode) ->
-                                        val closed = terminalizePendingApproval(
-                                            runId = run.runId,
-                                            invocationId = pending.invocationId,
-                                            callId = pending.callId,
-                                            permissionDecision = decision,
-                                            state = state,
-                                            errorCode = errorCode,
-                                        )
-                                        if (closed != null) invocations[closed.invocationId] = closed
+                                    if (outcome != null) {
+                                        settleActiveApproval(resources, pending, outcome)
+                                        recordToolApprovalState(pending, outcome.auditState, outcome.reasonCode)
+                                        terminalizePendingApproval(pending.runId, outcome, pending)?.let {
+                                            invocations[it.invocationId] = it
+                                        }
                                     }
                                 }
                                 flushStreamingAnswer(assistantId, answer, force = true)
@@ -1907,7 +1820,7 @@ class ChatViewModel internal constructor(
                 if (record.state !in TERMINAL) record = record.copy(state = RunStatus.FAILED, stopReason = "No terminal outcome")
                 publishRunState(owner, state.value.copy(status = when (record.state) {
                     RunStatus.COMPLETED -> buildString {
-                        append("已完成。输入 ${record.inputTokens} / 输出 ${record.outputTokens} tokens。")
+                        append(completedUsageNotice(record))
                         if (run.compactionRequests > 0) append("包含 ${run.compactionRequests} 次上下文摘要请求。")
                         // R3 QA P3: a completed run with no visible answer must not read
                         // as a silent non-reply.  UI-only notice; fabricated assistant
@@ -1946,41 +1859,12 @@ class ChatViewModel internal constructor(
                         val terminal = when {
                             record.state == RunStatus.BUDGET_EXHAUSTED ||
                                 persisted?.state == RunStatus.BUDGET_EXHAUSTED ->
-                                Triple("CANCELLED", "EXPIRED", "APPROVAL_EXPIRED")
+                                ChatApprovalOutcome.EXPIRED
                             approvedToolInFlight || approvedToolCallId != null ->
-                                Triple("UNKNOWN_OUTCOME", "APPROVED", "UNKNOWN_OUTCOME")
-                                else -> Triple("CANCELLED", "DENIED", "APPROVAL_INVALIDATED")
+                                ChatApprovalOutcome.UNKNOWN
+                            else -> ChatApprovalOutcome.INVALIDATED
                         }
-                        settleActiveApproval(resources,
-                            pending.invocationId ?: pending.callId,
-                            expired = terminal.third == "APPROVAL_EXPIRED",
-                        )
-                        if (terminalizePendingApproval(
-                                runId = pending.runId,
-                                invocationId = pending.invocationId,
-                                callId = pending.callId,
-                                permissionDecision = terminal.second,
-                                state = terminal.first,
-                                errorCode = terminal.third,
-                            ) != null
-                        ) {
-                            val (state, _, errorCode) = terminal
-                            recordToolApprovalState(
-                                pending,
-                                when (state) {
-                                    "UNKNOWN_OUTCOME" -> DiagnosticApprovalState.UNKNOWN
-                                    "CANCELLED" -> if (errorCode == "APPROVAL_EXPIRED") {
-                                        DiagnosticApprovalState.EXPIRED
-                                    } else DiagnosticApprovalState.INVALIDATED
-                                    else -> DiagnosticApprovalState.INVALIDATED
-                                },
-                                when (errorCode) {
-                                    "APPROVAL_EXPIRED" -> "resource_limit"
-                                    "UNKNOWN_OUTCOME" -> "unknown"
-                                    else -> "cancelled"
-                                },
-                            )
-                        }
+                        settleInterruptedApproval(resources, pending, terminal)
                     }
                     // A late Cancel cannot erase an already observed terminal event. A child's
                     // durable UNKNOWN still takes precedence if its event did not reach us.
@@ -1996,13 +1880,12 @@ class ChatViewModel internal constructor(
                                 errorCode = if (unknown) "UNKNOWN_OUTCOME" else null)
                         }
                     }
+                    val interruption = interruptionNotice(record.state)
                     publishRunState(owner, state.value.copy(status = when (record.state) {
-                        RunStatus.UNKNOWN_OUTCOME -> "已取消接收，部分响应保留；外部结果未知，可能已产生费用或操作，继续前需要再次确认。"
-                        RunStatus.COMPLETED -> "已完成。输入 ${record.inputTokens} / 输出 ${record.outputTokens} tokens。"
-                        RunStatus.CANCELLED -> "已取消，部分响应保留。"
-                        else -> record.stopReason ?: state.value.status
+                        RunStatus.COMPLETED -> completedUsageNotice(record)
+                        else -> interruption ?: record.stopReason ?: state.value.status
                     }))
-                    if (assistantId != null && record.state in setOf(RunStatus.CANCELLED, RunStatus.UNKNOWN_OUTCOME)) {
+                    if (assistantId != null && interruption != null) {
                         // The in-memory delta can be newer than the periodic checkpoint. Persist
                         // it with an explicit terminal marker before reload replaces the UI row.
                         terminalError = if (record.state == RunStatus.UNKNOWN_OUTCOME) {
@@ -2016,7 +1899,7 @@ class ChatViewModel internal constructor(
                 }
             } catch (failure: Exception) {
                 val queryUnknown = failure is ApiQueryUnknownOutcomeException
-                val archivedBeforeAdmission = !runAdmitted && withContext(Dispatchers.IO) {
+                archivedBeforeAdmission = !runAdmitted && withContext(Dispatchers.IO) {
                     runCatching { container.conversations.get(conversationId)?.archived == true }.getOrDefault(false)
                 }
                 val errorPart = when {
@@ -2056,11 +1939,16 @@ class ChatViewModel internal constructor(
                 record = record.copy(state = if (queryUnknown) RunStatus.UNKNOWN_OUTCOME else if (record.state in TERMINAL) record.state else RunStatus.FAILED,
                     errorCode = if (queryUnknown) "UNKNOWN_OUTCOME" else record.errorCode ?: errorPart.code.name,
                     stopReason = errorPart.message)
-                // The preflight already persisted and projected the user message before this run
-                // coroutine started, so restoring `text` into the input box would persist a second
-                // identical message on the next send. Keep the input empty and make the failure
-                // visible as its own message, which is also what the admitted path does.
-                persistTerminalError(errorPart)
+                if (archivedBeforeAdmission) {
+                    // The user message was saved before the archive won admission. Keep the draft
+                    // for an explicit restore and leave the newly read-only history alone.
+                    if (inputRevision == sentInputRevision) {
+                        publishRunState(owner, state.value.copy(input = text))
+                        saveRunDraft(owner)
+                    }
+                } else {
+                    persistTerminalError(errorPart)
+                }
                 publishRunState(owner, state.value.copy(status = errorPart.message, statusKind = "error", error = null))
             } finally {
                 watchdogJob.cancel()
@@ -2086,42 +1974,14 @@ class ChatViewModel internal constructor(
                             // remain safe when a provider/runtime failure prevents that event.
                             val terminal = when {
                                 record.state == RunStatus.BUDGET_EXHAUSTED ->
-                                    Triple("CANCELLED", "EXPIRED", "APPROVAL_EXPIRED")
+                                    ChatApprovalOutcome.EXPIRED
                                 record.state == RunStatus.UNKNOWN_OUTCOME || approvedToolInFlight || approvedToolCallId != null ->
-                                    Triple("UNKNOWN_OUTCOME", "APPROVED", "UNKNOWN_OUTCOME")
+                                    ChatApprovalOutcome.UNKNOWN
                                 record.state == RunStatus.CANCELLED ->
-                                    Triple("CANCELLED", "DENIED", "APPROVAL_INVALIDATED")
-                                else -> Triple("FAILED", "DENIED", "APPROVAL_DENIED")
+                                    ChatApprovalOutcome.INVALIDATED
+                                else -> ChatApprovalOutcome.DENIED
                             }
-                            settleActiveApproval(resources,
-                                pending.invocationId ?: pending.callId,
-                                expired = terminal.third == "APPROVAL_EXPIRED",
-                            )
-                            if (terminalizePendingApproval(
-                                    runId = pending.runId,
-                                    invocationId = pending.invocationId,
-                                    callId = pending.callId,
-                                    permissionDecision = terminal.second,
-                                    state = terminal.first,
-                                    errorCode = terminal.third,
-                                ) != null
-                            ) {
-                                recordToolApprovalState(
-                                    pending,
-                                    when (terminal.third) {
-                                        "APPROVAL_EXPIRED" -> DiagnosticApprovalState.EXPIRED
-                                        "UNKNOWN_OUTCOME" -> DiagnosticApprovalState.UNKNOWN
-                                        "APPROVAL_DENIED" -> DiagnosticApprovalState.DENIED
-                                        else -> DiagnosticApprovalState.INVALIDATED
-                                    },
-                                    when (terminal.third) {
-                                        "APPROVAL_EXPIRED" -> "resource_limit"
-                                        "UNKNOWN_OUTCOME" -> "unknown"
-                                        "APPROVAL_DENIED" -> "rejected"
-                                        else -> "cancelled"
-                                    },
-                                )
-                            }
+                            settleInterruptedApproval(resources, pending, terminal)
                         }
                         checkpoint(if (record.state == RunStatus.COMPLETED) "COMPLETE" else record.state.name)
                         // The cancelled producer can persist an attempt without delivering its
@@ -2145,15 +2005,9 @@ class ChatViewModel internal constructor(
                     container.runCoordinator.release(run.runId, runOwnerKey)
                     publishRunState(owner, state.value.copy(streaming = false, pendingTool = null))
                     if (foregroundStarted) runCatching { ChatRunForegroundService.stop(getApplication(), owner.runId) }
-                    if (canProjectRun(owner)) reloadChat(preserveTerminalStatus = record.state in setOf(RunStatus.UNKNOWN_OUTCOME, RunStatus.CANCELLED))
-                    if (canProjectRun(owner)) {
-                        val interruptionStatus = when (record.state) {
-                            RunStatus.UNKNOWN_OUTCOME -> "已取消接收，部分响应保留；外部结果未知，可能已产生费用或操作，继续前需要再次确认。"
-                            RunStatus.CANCELLED -> "已取消，部分响应保留。"
-                            else -> null
-                        }
-                        if (interruptionStatus != null) publishRunState(owner, state.value.copy(status = interruptionStatus))
-                    }
+                    val interruption = interruptionNotice(record.state)
+                    if (canProjectRun(owner)) reloadChat(preserveTerminalStatus = interruption != null || archivedBeforeAdmission)
+                    if (interruption != null && canProjectRun(owner)) publishRunState(owner, state.value.copy(status = interruption))
                     runOwnership.finish(owner)
                     if (activeRunResources === resources) activeRunResources = null
                     if (runJob === resources.job) runJob = null
@@ -2173,7 +2027,7 @@ class ChatViewModel internal constructor(
             resources.approvalCallId = null
             if (approved) {
                 audit?.let {
-                    markPendingApprovalDecision(it.runId, it.invocationId, it.callId, "APPROVED")
+                    markPendingApprovalApproved(it)
                     recordToolApprovalState(it, DiagnosticApprovalState.APPROVED, "permission")
                 }
                 deferred.complete(true)
@@ -2182,15 +2036,7 @@ class ChatViewModel internal constructor(
                 // rejection normally produces RunFinished(FAILED), but the immediate write also
                 // covers cancellation and event-delivery races.  The explicit executor rejection
                 // clears its one-shot approval state using the runtime invocation id.
-                terminalizePendingApproval(
-                    runId = audit.runId,
-                    invocationId = audit.invocationId,
-                    callId = audit.callId,
-                    permissionDecision = "DENIED",
-                    state = "FAILED",
-                    errorCode = "APPROVAL_DENIED",
-                )
-                recordToolApprovalState(audit, DiagnosticApprovalState.DENIED, "rejected")
+                closeApprovalFromUi(audit, ChatApprovalOutcome.DENIED)
                 val executor = resources.executor
                 val runtimeId = audit.invocationId ?: audit.callId
                 viewModelScope.launch(Dispatchers.IO + NonCancellable) {
@@ -2218,15 +2064,7 @@ class ChatViewModel internal constructor(
             pendingApprovalFor(resources.owner.runId)?.takeIf { audit -> audit.callId == it }?.let { audit ->
                 // Cancellation is terminal for an approval wait. Persist it before cancelling
                 // the collector so reload cannot present or replay the same request.
-                terminalizePendingApproval(
-                    runId = audit.runId,
-                    invocationId = audit.invocationId,
-                    callId = audit.callId,
-                    permissionDecision = "DENIED",
-                    state = "CANCELLED",
-                    errorCode = "APPROVAL_INVALIDATED",
-                )
-                recordToolApprovalState(audit, DiagnosticApprovalState.INVALIDATED, "cancelled")
+                closeApprovalFromUi(audit, ChatApprovalOutcome.INVALIDATED)
                 val runtimeId = audit.invocationId ?: audit.callId
                 explicitRejectScheduled = true
                 viewModelScope.launch(Dispatchers.IO + NonCancellable) {
@@ -2244,21 +2082,9 @@ class ChatViewModel internal constructor(
         if (preparing) publishRunState(resources.owner, state.value.copy(streaming = false))
     }
 
-    /** Settings hold only a boolean hint; request headers/body/secret never enter preferences. */
-    private fun requestInspectorEnabled(): Boolean =
-        container.uiPreferences.getBoolean("request-inspector", true)
-
-    private fun requestPreviewHintKey(sessionId: String?): String? =
-        sessionId?.takeIf { it.isNotBlank() }?.let { REQUEST_PREVIEW_HINT_PREFIX + it }
-
-    private fun hasPersistedRequestPreviewHint(sessionId: String?): Boolean =
-        requestPreviewHintKey(sessionId)?.let { container.uiPreferences.getBoolean(it, false) } == true
-
-    private fun rememberRequestPreviewHint(sessionId: String) {
-        requestPreviewHintKey(sessionId)?.let {
-            container.uiPreferences.edit().putBoolean(it, true).apply()
-        }
-    }
+    private fun ChatUiState.withInspector() = requestPreviews.project(
+        this, container.uiPreferences.requestInspectorEnabled, container.uiPreferences.hadRequestPreview(selectedSessionId),
+    )
 
     fun openCitation(id: String) {
         val entry = citations[id] ?: return
@@ -2277,13 +2103,17 @@ class ChatViewModel internal constructor(
     private fun canProjectRun(owner: ChatRunOwner): Boolean =
         runOwnership.canProject(owner, state.value.selectedSessionId)
 
-    private fun detachRunPage() {
+    private fun leaveSelectedSession() {
+        invalidateRead()
+        inputRevision++
+        requestPreviews.leave(state.value.selectedSessionId)
         runOwnership.active?.let(runOwnership::detach)
         imageDraft.detach()
         selectedImage = null
         locator.value = null
         unknownRetry.value = null
         state.value = state.value.copy(selectedCitationId = null, pendingTool = null)
+        saveDraft()
     }
 
     private fun publishRunState(owner: ChatRunOwner, next: ChatUiState) {
@@ -2296,6 +2126,17 @@ class ChatViewModel internal constructor(
 
     private fun failRun(owner: ChatRunOwner, failure: Exception) {
         publishRunState(owner, state.value.copy(error = localizedFailureMessage(failure)))
+    }
+
+    /** Completed usage line; the completion status appends run-specific disclosures to it. */
+    private fun completedUsageNotice(record: RunRecord) =
+        "已完成。输入 ${record.inputTokens} / 输出 ${record.outputTokens} tokens。"
+
+    /** Interrupted-run copy shared by the collector and the non-cancellable cleanup path. */
+    private fun interruptionNotice(state: RunStatus): String? = when (state) {
+        RunStatus.UNKNOWN_OUTCOME -> "已取消接收，部分响应保留；外部结果未知，可能已产生费用或操作，继续前需要再次确认。"
+        RunStatus.CANCELLED -> "已取消，部分响应保留。"
+        else -> null
     }
 
     private fun publishRunCitations(owner: ChatRunOwner, source: Map<String, Pair<Citation, String>>) {
@@ -2319,26 +2160,19 @@ class ChatViewModel internal constructor(
      */
     private fun terminalizePendingApproval(
         runId: String,
-        invocationId: String? = null,
-        callId: String? = null,
-        permissionDecision: String,
-        state: String,
-        errorCode: String,
+        outcome: ChatApprovalOutcome,
+        pending: PendingApprovalAudit? = null,
     ): ToolInvocation? {
-        val waiting = container.runs.invocations(runId).filter {
-            (invocationId == null || it.invocationId == invocationId) &&
-                (invocationId != null || callId == null || it.callId == callId) &&
-                it.state in setOf("WAITING_APPROVAL", "PENDING")
-        }
+        val waiting = waitingInvocations(runId, pending)
         if (waiting.isEmpty()) return null
         val now = Utc.nowIso()
         var first: ToolInvocation? = null
         waiting.forEach { invocation ->
             val closed = invocation.copy(
-                permissionDecision = permissionDecision,
-                state = state,
-                errorCode = errorCode,
-                resultJson = approvalTerminalResult(state, errorCode),
+                permissionDecision = outcome.permissionDecision,
+                state = outcome.invocationState,
+                errorCode = outcome.errorCode,
+                resultJson = outcome.resultJson,
                 updatedAt = now,
             )
             container.runs.updateInvocation(closed)
@@ -2347,35 +2181,45 @@ class ChatViewModel internal constructor(
         return first
     }
 
-    private suspend fun settleActiveApproval(resources: RunResources, callId: String, expired: Boolean) {
+    private fun waitingInvocations(runId: String, pending: PendingApprovalAudit?) =
+        container.runs.invocations(runId).filter { invocation ->
+            invocation.isAwaitingApproval() && when {
+                pending == null -> true
+                pending.invocationId != null -> invocation.invocationId == pending.invocationId
+                else -> invocation.callId == pending.callId
+            }
+        }
+
+    private fun ToolInvocation.isAwaitingApproval() = state == "WAITING_APPROVAL" || state == "PENDING"
+
+    private fun markPendingApprovalApproved(pending: PendingApprovalAudit) {
+        val now = Utc.nowIso()
+        waitingInvocations(pending.runId, pending).forEach { invocation ->
+            container.runs.updateInvocation(invocation.copy(permissionDecision = "APPROVED", updatedAt = now))
+        }
+    }
+
+    private suspend fun settleActiveApproval(resources: RunResources, pending: PendingApprovalAudit, outcome: ChatApprovalOutcome) {
+        val id = pending.invocationId ?: pending.callId
         withContext(NonCancellable) {
             runCatching {
                 resources.executor?.let { executor ->
-                    if (expired) executor.expire(callId) else executor.reject(callId)
+                    if (outcome == ChatApprovalOutcome.EXPIRED) executor.expire(id) else executor.reject(id)
                 }
             }
         }
     }
 
-    private fun approvalTerminalResult(state: String, errorCode: String): String = buildJsonObject {
-        put("status", when (errorCode) {
-            "APPROVAL_DENIED" -> "DENIED"
-            "APPROVAL_EXPIRED" -> "EXPIRED"
-            "APPROVAL_INVALIDATED" -> "CANCELLED"
-            "UNKNOWN_OUTCOME" -> "UNKNOWN_OUTCOME"
-            else -> state
-        })
-        put("errorCode", errorCode)
-    }.toString()
-
-    private fun markPendingApprovalDecision(runId: String, invocationId: String?, callId: String, permissionDecision: String) {
-        val now = Utc.nowIso()
-        container.runs.invocations(runId).filter {
-            (invocationId == null && it.callId == callId || invocationId != null && it.invocationId == invocationId) &&
-                it.state in setOf("WAITING_APPROVAL", "PENDING")
-        }.forEach { invocation ->
-            container.runs.updateInvocation(invocation.copy(permissionDecision = permissionDecision, updatedAt = now))
+    private suspend fun settleInterruptedApproval(resources: RunResources, pending: PendingApprovalAudit, outcome: ChatApprovalOutcome) {
+        settleActiveApproval(resources, pending, outcome)
+        if (terminalizePendingApproval(pending.runId, outcome, pending) != null) {
+            recordToolApprovalState(pending, outcome.auditState, outcome.reasonCode)
         }
+    }
+
+    private fun closeApprovalFromUi(pending: PendingApprovalAudit, outcome: ChatApprovalOutcome) {
+        terminalizePendingApproval(pending.runId, outcome, pending)
+        recordToolApprovalState(pending, outcome.auditState, outcome.reasonCode)
     }
 
     /**
@@ -2393,9 +2237,7 @@ class ChatViewModel internal constructor(
                 if (persisted.state != RunStatus.WAITING_TOOL_APPROVAL) return@synchronized false
                 val now = Utc.nowIso()
                 val allInvocations = container.runs.invocations(persisted.runId)
-                val waitingInvocations = allInvocations.filter {
-                    it.state == "WAITING_APPROVAL" || it.state == "PENDING"
-                }
+                val waitingInvocations = allInvocations.filter { it.isAwaitingApproval() }
                 val mayHaveDispatched = allInvocations.any {
                     it.permissionDecision == "APPROVED" ||
                         it.state == "SUCCEEDED" || it.state == "UNKNOWN_OUTCOME"
@@ -2404,19 +2246,15 @@ class ChatViewModel internal constructor(
                 if (activeApproval != null &&
                     (waitingInvocations.isEmpty() || waitingInvocations.any { it.callId == activeApproval.callId })
                 ) return@synchronized false
-                terminalizePendingApproval(
-                    runId = persisted.runId,
-                    permissionDecision = if (mayHaveDispatched) "APPROVED" else "DENIED",
-                    state = if (mayHaveDispatched) "UNKNOWN_OUTCOME" else "CANCELLED",
-                    errorCode = if (mayHaveDispatched) "UNKNOWN_OUTCOME" else "APPROVAL_INVALIDATED",
-                )
+                val outcome = if (mayHaveDispatched) ChatApprovalOutcome.UNKNOWN else ChatApprovalOutcome.INVALIDATED
+                terminalizePendingApproval(persisted.runId, outcome)
                 container.runs.save(
                     persisted.copy(
                         state = if (mayHaveDispatched) RunStatus.UNKNOWN_OUTCOME else RunStatus.CANCELLED,
                         stopReason = if (mayHaveDispatched)
                             "process restarted after tool approval; dispatch outcome unknown"
                         else "approval invalidated after process restart; no tool dispatch occurred",
-                        errorCode = if (mayHaveDispatched) "UNKNOWN_OUTCOME" else "APPROVAL_INVALIDATED",
+                        errorCode = outcome.errorCode,
                         finishedAt = now,
                         updatedAt = now,
                     ),
@@ -2433,8 +2271,8 @@ class ChatViewModel internal constructor(
                             capability = diagnosticToolCapability(invocation.name, emptyList()),
                             authority = DiagnosticAuthority.NONE,
                         ),
-                        if (mayHaveDispatched) DiagnosticApprovalState.UNKNOWN else DiagnosticApprovalState.INVALIDATED,
-                        if (mayHaveDispatched) "unknown" else "validation",
+                        outcome.auditState,
+                        if (mayHaveDispatched) outcome.reasonCode else "validation",
                     )
                 }
                 !mayHaveDispatched
@@ -2465,10 +2303,6 @@ class ChatViewModel internal constructor(
 
     private fun pendingApprovalFor(runId: String): PendingApprovalAudit? = synchronized(PENDING_APPROVAL_LOCK) {
         processPendingApprovals[runId]
-    }
-
-    private fun pendingApprovalForCall(callId: String): PendingApprovalAudit? = synchronized(PENDING_APPROVAL_LOCK) {
-        processPendingApprovals.values.firstOrNull { it.callId == callId }
     }
 
     private fun forgetPendingApproval(runId: String, callId: String? = null) {
@@ -2659,47 +2493,7 @@ class ChatViewModel internal constructor(
         const val INSPECTOR_KEY = "chat.inspectorOpen"
         private val PENDING_APPROVAL_LOCK = Any()
         private val processPendingApprovals = linkedMapOf<String, PendingApprovalAudit>()
-        private const val REQUEST_PREVIEW_HINT_PREFIX = "request-inspector.preview-hint."
         private const val RUN_WATCHDOG_GRACE_MS = 60_000L
         val TERMINAL = setOf(RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED, RunStatus.BUDGET_EXHAUSTED, RunStatus.UNKNOWN_OUTCOME)
     }
-}
-
-/**
- * R3 QA P3: a run that COMPLETED without any visible answer text used to read as a silent
- * non-reply (the only surface was the runtime-authored retrieval-coverage notice).  This
- * returns the additive UI notice, or null when the answer is present.
- *
- * It deliberately returns UI copy instead of assistant text: fabricated text would be
- * persisted as durable history and replayed to the model on the next turn.
- */
-internal fun emptyCompletedAnswerNotice(answer: String): String? =
-    if (answer.isBlank()) {
-        "模型本轮没有给出可见答复。可重试或换一种问法；若上方提示有知识库未参与本次检索，请先确认该知识库已启用检索。"
-    } else {
-        null
-    }
-
-/** Keep the actual runtime disclosure visible instead of flattening every cause to one label. */
-internal fun toolVisualEvidenceSummary(raw: String): String? {
-    val root = runCatching { Json.parseToJsonElement(raw) as? JsonObject }.getOrNull() ?: return null
-    if ((root["textDegradation"] as? JsonPrimitive)?.booleanOrNull != true) return null
-    val warning = (root["warning"] as? JsonPrimitive)?.takeIf { it.isString }?.content
-        ?.takeIf { it.isNotBlank() }?.take(800)
-    return "视觉证据已降级：" + (warning ?: "未向模型发送原始图片，视觉证据可能不完整。")
-}
-
-/**
- * Resolve inspector availability without inspecting or persisting request contents. A prepared
- * preview wins over a stale hint; a hint with no in-memory preview is explicitly context-lost.
- */
-internal fun resolveRequestInspectorAvailability(
-    inspectorEnabled: Boolean,
-    previewAvailable: Boolean,
-    persistedPreviewHint: Boolean,
-): ChatRequestInspectorAvailability = when {
-    !inspectorEnabled -> ChatRequestInspectorAvailability.DISABLED
-    previewAvailable -> ChatRequestInspectorAvailability.READY
-    persistedPreviewHint -> ChatRequestInspectorAvailability.CONTEXT_LOST
-    else -> ChatRequestInspectorAvailability.NOT_PREPARED
 }

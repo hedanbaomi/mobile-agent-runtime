@@ -83,6 +83,9 @@ object RootApprovalTools {
     fun isSupportedCapability(capability: CapabilityId): Boolean =
         capability.value in supportedCapabilities
 
+    fun isReadOnlyCapability(capability: CapabilityId): Boolean =
+        capability.value in readOnlyCapabilities
+
     fun requiresWritableWorkspace(capability: CapabilityId): Boolean =
         capability.value in writeCapabilities
 

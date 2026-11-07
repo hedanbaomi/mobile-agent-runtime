@@ -19,8 +19,11 @@ import org.junit.Test
 import runtime.mobileagent.agent.RunState
 import runtime.mobileagent.agent.RuntimeEvent
 import runtime.mobileagent.domain.*
+import runtime.mobileagent.feature.chat.ChatRequestInspectorAvailability
 import runtime.mobileagent.provider.ModelEvent
 import runtime.mobileagent.skills.ToolCall
+import runtime.mobileagent.skills.ToolExecutor
+import runtime.mobileagent.skills.ToolResult
 
 /** Real ChatViewModel and SQLite with a controlled runtime/deadline, no provider request. */
 class ChatRunOwnershipDeviceTest {
@@ -39,15 +42,16 @@ class ChatRunOwnershipDeviceTest {
         main { archiver.sessionAction(a, runtime.mobileagent.feature.chat.SessionAction.ARCHIVE) }
         assertTrue(app.container.conversations.get(a)!!.archived)
         releaseAdmission.complete(Unit)
-        await { !sender.state.value.streaming }
+        await { !sender.state.value.streaming && !sender.state.value.loading && sender.state.value.selectedSessionArchived }
         assertEquals(draft, sender.state.value.input)
+        assertEquals(draft, viewModel(app, a, ChatRunExecution()).state.value.input)
         assertTrue(app.container.runs.list(a).isEmpty())
         val history = app.container.conversations.messages(a)
         assertEquals(1, history.size)
         assertEquals(MessageRole.USER, history.single().role)
         assertEquals(draft, history.single().text)
         assertTrue(app.container.conversations.get(a)!!.archived)
-        assertTrue(sender.state.value.status.contains("归档"))
+        assertEquals(app.getString(R.string.chat_message_saved_conversation_archived), sender.state.value.status)
     }
 
     @Test fun watchdogSettlesRealApprovalCallbackWithoutPublishingIntoAnotherConversation() = fixture { app, a, b ->
@@ -55,15 +59,16 @@ class ChatRunOwnershipDeviceTest {
         val resume = CompletableDeferred<Unit>()
         val approvalReturned = CountDownLatch(1)
         val decision = AtomicReference<Boolean>()
+        lateinit var executor: ToolExecutor
         lateinit var approve: suspend (ToolCall) -> Boolean
+        val call = ToolCall("approval-A", "job_start", """{"tool":"calculator","arguments":{"expression":"1+1"}}""")
         val execution = ChatRunExecution(
             awaitWatchdog = { _, _ -> deadline.await() },
-            approvalReady = { approve = it },
+            approvalReady = { activeExecutor, callback -> executor = activeExecutor; approve = callback },
             collectEvents = { _, accept -> withContext(NonCancellable) {
-                accept(RuntimeEvent.ToolApprovalRequested("approval-A", "calculator", "{}"))
-                decision.set(withContext(Dispatchers.IO + NonCancellable) {
-                    approve(ToolCall("approval-A", "calculator", "{}"))
-                })
+                assertEquals(ToolResult.NeedsApproval, withContext(Dispatchers.IO) { executor.invoke(call) })
+                accept(RuntimeEvent.ToolApprovalRequested(call.callId, call.name, call.argumentsJson))
+                decision.set(withContext(Dispatchers.IO + NonCancellable) { approve(call) })
                 approvalReturned.countDown()
                 resume.await()
                 // Invoke the same real callback after detachment as well.
@@ -147,7 +152,8 @@ class ChatRunOwnershipDeviceTest {
         assertTrue(rows.any { it.role == MessageRole.ASSISTANT && it.text.contains("A durable partial answer") })
         assertFalse(app.container.conversations.messages(b).any { it.text.contains("A durable") })
         assertEquals(RunStatus.FAILED, app.container.runs.list(a).single().state)
-        assertEquals("FAILED", app.container.runs.invocations(app.container.runs.list(a).single().runId).single().state)
+        // A late redacted event has no executor binding and cannot create a durable invocation.
+        assertTrue(app.container.runs.invocations(app.container.runs.list(a).single().runId).isEmpty())
     }
 
     @Test fun returningToTimedOutConversationDoesNotReattachOldPreviewOrStatus() = fixture { app, a, b ->
@@ -195,6 +201,54 @@ class ChatRunOwnershipDeviceTest {
         await { app.container.runs.list(a).single().finishedAt != null }
         assertEquals(RunStatus.CANCELLED, app.container.runs.list(a).single().state)
         assertFalse(app.container.conversations.messages(a).any { it.metadataJson.contains("\"visualBatchAnalysis\":true") })
+    }
+
+    @Test fun privacyToggleDiscardsPromptAndLateRequestsUntilTheNextRun() = fixture { app, a, b ->
+        val preferences = app.container.uiPreferences
+        val original = preferences.all[REQUEST_INSPECTOR_PREFERENCE] as? Boolean
+        val resume = CompletableDeferred<Unit>()
+        try {
+            main { preferences.edit().putBoolean(REQUEST_INSPECTOR_PREFERENCE, true).apply() }
+            val vm = viewModel(app, a, ChatRunExecution(collectEvents = { _, accept ->
+                accept(RuntimeEvent.RequestPrepared("round-one", "fixture", emptyList(), emptyList(),
+                    emptyList(), listOf("Authorization"), "synthetic first body"))
+                resume.await()
+                accept(RuntimeEvent.RequestPrepared("round-two", "fixture", emptyList(), emptyList(),
+                    emptyList(), emptyList(), "synthetic late body"))
+                accept(RuntimeEvent.VisualBatchStarted("late-visual", 1, 100, requestPreview = "synthetic late visual"))
+                val run = app.container.runs.list(a).single()
+                accept(RuntimeEvent.RunFinished(run.runId, RunState.COMPLETED, "fixture complete", 2, 0))
+            }))
+            main { vm.input("Test inspector capture"); vm.send() }
+            await { vm.state.value.requestPreview?.body == "synthetic first body" }
+            assertTrue(vm.state.value.promptLayers.isNotEmpty())
+            main {
+                preferences.edit().putBoolean(REQUEST_INSPECTOR_PREFERENCE, false).apply()
+                assertEquals(ChatRequestInspectorAvailability.DISABLED, vm.state.value.requestInspectorAvailability)
+                assertNull(vm.state.value.requestPreview)
+                assertTrue(vm.state.value.promptLayers.isEmpty())
+                preferences.edit().putBoolean(REQUEST_INSPECTOR_PREFERENCE, true).apply()
+            }
+            resume.complete(Unit)
+            await { !vm.state.value.streaming && !vm.state.value.loading }
+            assertEquals(ChatRequestInspectorAvailability.CONTEXT_LOST, vm.state.value.requestInspectorAvailability)
+            assertNull(vm.state.value.requestPreview)
+            main { vm.selectSession(b) }
+            await { !vm.state.value.loading }
+            assertEquals(ChatRequestInspectorAvailability.NOT_PREPARED, vm.state.value.requestInspectorAvailability)
+            main { vm.selectSession(a); vm.inspector(true) }
+            await { !vm.state.value.loading }
+            assertNull(vm.state.value.requestPreview)
+            assertTrue(vm.state.value.promptLayers.isEmpty())
+            assertEquals(ChatRequestInspectorAvailability.CONTEXT_LOST, viewModel(app, a, ChatRunExecution()).state.value.requestInspectorAvailability)
+        } finally {
+            resume.complete(Unit)
+            main {
+                val edit = preferences.edit()
+                if (original == null) edit.remove(REQUEST_INSPECTOR_PREFERENCE) else edit.putBoolean(REQUEST_INSPECTOR_PREFERENCE, original)
+                edit.apply()
+            }
+        }
     }
 
     private fun viewModel(app: MobileAgentApp, id: String, execution: ChatRunExecution): ChatViewModel {

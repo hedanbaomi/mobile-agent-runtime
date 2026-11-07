@@ -16,6 +16,8 @@ import runtime.mobileagent.domain.RootApprovalTools
 import runtime.mobileagent.domain.RootTypedArguments
 import runtime.mobileagent.skills.tooling.ToolSpec
 import runtime.mobileagent.tooling.ModelToolArguments
+import runtime.mobileagent.tooling.ShellToolExecutor
+import runtime.mobileagent.tooling.WorkspaceDiscovery
 
 /**
  * Provider-neutral Root tool catalog and strict argument normalization.
@@ -34,6 +36,10 @@ object RootToolArguments {
      * deliberately distinct tools with distinct capabilities (review F10).
      */
     val supportedToolNames: Set<String> = Collections.unmodifiableSet(CATALOG.mapTo(linkedSetOf()) { it.name })
+
+    /** Names reserved for a frozen Root workspace, including shared discovery when the service is offline. */
+    val workspaceToolNames: Set<String> =
+        Collections.unmodifiableSet(supportedToolNames - ShellToolExecutor.SHELL_EXEC + WorkspaceDiscovery.NAME)
 
     /** The frozen model-facing schema for exactly this tool, or null when unsupported. */
     fun spec(toolName: String): ToolSpec? = SPECS[toolName]
@@ -183,33 +189,29 @@ private val ROOT_PATCH_FORMATS = setOf("unified_diff", "unified", "search_replac
 /** Tools whose typed contract can bind a target version; all others must refuse the field. */
 private val VERSION_CONDITIONAL_TOOLS = setOf("file_write_text", "file_apply_patch", "file_set_metadata")
 
+private fun rootSpec(name: String, description: String): ToolSpec {
+    val capability = requireNotNull(RootApprovalTools.capability(name))
+    return ToolSpec(
+        name, description, ModelToolArguments.workspaceSchema(name, root = true), capability,
+        sideEffect = !RootApprovalTools.isReadOnlyCapability(capability),
+        schemaVersion = ModelToolArguments.WORKSPACE_SCHEMA_VERSION,
+    )
+}
+
 private val CATALOG: List<ToolSpec> = listOf(
-    ToolSpec("file_list", "List entries in an authorized Root workspace (bounded).",
-        ModelToolArguments.workspaceSchema("file_list", root = true), CapabilityId(CapabilityId.FILE_LIST), false, ModelToolArguments.WORKSPACE_SCHEMA_VERSION),
-    ToolSpec("file_glob", "Find paths matching a glob pattern in an authorized Root workspace (bounded).",
-        ModelToolArguments.workspaceSchema("file_glob", root = true), CapabilityId(CapabilityId.FILE_LIST), false, ModelToolArguments.WORKSPACE_SCHEMA_VERSION),
-    ToolSpec("file_stat", "Read metadata for an authorized Root workspace entry.",
-        ModelToolArguments.workspaceSchema("file_stat", root = true), CapabilityId(CapabilityId.FILE_STAT), false, ModelToolArguments.WORKSPACE_SCHEMA_VERSION),
-    ToolSpec("file_read_text", "Read a bounded UTF-8 chunk from an authorized Root workspace.",
-        ModelToolArguments.workspaceSchema("file_read_text", root = true), CapabilityId(CapabilityId.FILE_READ_TEXT), false, ModelToolArguments.WORKSPACE_SCHEMA_VERSION),
-    ToolSpec("file_grep", "Search UTF-8 text lines in an authorized Root workspace (bounded).",
-        ModelToolArguments.workspaceSchema("file_grep", root = true), CapabilityId(CapabilityId.FILE_READ_TEXT), false, ModelToolArguments.WORKSPACE_SCHEMA_VERSION),
-    ToolSpec("file_write_text", "Create or replace UTF-8 text in an authorized Root workspace. expected_version is enforceable only on UID0-exclusive paths; app-private directories accept unconditional writes only.",
-        ModelToolArguments.workspaceSchema("file_write_text", root = true), CapabilityId(CapabilityId.FILE_WRITE_TEXT), true, ModelToolArguments.WORKSPACE_SCHEMA_VERSION),
-    ToolSpec("file_apply_patch", "Apply a conditional text patch on a UID0-exclusive Root workspace path; app-private directories are refused with WORKSPACE_VERSION_UNSUPPORTED. The replace patch format is an ordinary-backend capability and is refused explicitly here.",
-        ModelToolArguments.workspaceSchema("file_apply_patch", root = true), CapabilityId(CapabilityId.FILE_WRITE_TEXT), true, ModelToolArguments.WORKSPACE_SCHEMA_VERSION),
-    ToolSpec("file_create_directory", "Create a directory in an authorized Root workspace. Root does not accept expected_version for this operation.",
-        ModelToolArguments.workspaceSchema("file_create_directory", root = true), CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY), true, ModelToolArguments.WORKSPACE_SCHEMA_VERSION),
-    ToolSpec("file_move", "Move one entry inside an authorized Root workspace.",
-        ModelToolArguments.workspaceSchema("file_move", root = true), CapabilityId(CapabilityId.FILE_MOVE), true, ModelToolArguments.WORKSPACE_SCHEMA_VERSION),
-    ToolSpec("file_delete", "Delete one authorized Root workspace entry. Root does not accept expected_version for this operation.",
-        ModelToolArguments.workspaceSchema("file_delete", root = true), CapabilityId(CapabilityId.FILE_DELETE), true, ModelToolArguments.WORKSPACE_SCHEMA_VERSION),
-    ToolSpec("file_get_metadata", "Read the version token and metadata for an authorized Root workspace entry.",
-        ModelToolArguments.workspaceSchema("file_get_metadata", root = true), CapabilityId(CapabilityId.FILE_METADATA_READ), false, ModelToolArguments.WORKSPACE_SCHEMA_VERSION),
-    ToolSpec("file_set_metadata", "Update mode or ownership for an authorized Root workspace entry.",
-        ModelToolArguments.workspaceSchema("file_set_metadata", root = true), CapabilityId(CapabilityId.FILE_METADATA_WRITE), true, ModelToolArguments.WORKSPACE_SCHEMA_VERSION),
-    ToolSpec("shell_exec", "Execute one shell command through the selected Root authority.",
-        ModelToolArguments.workspaceSchema("shell_exec", root = true), CapabilityId(CapabilityId.SHELL_EXECUTE), true, ModelToolArguments.WORKSPACE_SCHEMA_VERSION),
+    rootSpec("file_list", "List entries in an authorized Root workspace (bounded)."),
+    rootSpec("file_glob", "Find paths matching a glob pattern in an authorized Root workspace (bounded)."),
+    rootSpec("file_stat", "Read metadata for an authorized Root workspace entry."),
+    rootSpec("file_read_text", "Read a bounded UTF-8 chunk from an authorized Root workspace."),
+    rootSpec("file_grep", "Search UTF-8 text lines in an authorized Root workspace (bounded)."),
+    rootSpec("file_write_text", "Create or replace UTF-8 text in an authorized Root workspace. expected_version is enforceable only on UID0-exclusive paths; app-private directories accept unconditional writes only."),
+    rootSpec("file_apply_patch", "Apply a conditional text patch on a UID0-exclusive Root workspace path; app-private directories are refused with WORKSPACE_VERSION_UNSUPPORTED. The replace patch format is an ordinary-backend capability and is refused explicitly here."),
+    rootSpec("file_create_directory", "Create a directory in an authorized Root workspace. Root does not accept expected_version for this operation."),
+    rootSpec("file_move", "Move one entry inside an authorized Root workspace."),
+    rootSpec("file_delete", "Delete one authorized Root workspace entry. Root does not accept expected_version for this operation."),
+    rootSpec("file_get_metadata", "Read the version token and metadata for an authorized Root workspace entry."),
+    rootSpec("file_set_metadata", "Update mode or ownership for an authorized Root workspace entry."),
+    rootSpec("shell_exec", "Execute one shell command through the selected Root authority."),
 )
 private val SPECS: Map<String, ToolSpec> = CATALOG.associateBy { it.name }
 private val TOOLING_SPECS: List<ToolSpec> = Collections.unmodifiableList(CATALOG.toList())

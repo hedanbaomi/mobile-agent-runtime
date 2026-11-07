@@ -4,26 +4,13 @@
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
-    alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.compose.compiler)
 }
 
+apply(from = rootProject.file("gradle/android-feature.gradle"))
+
 android {
     namespace = "runtime.mobileagent.feature.providers"
-    compileSdk = libs.versions.compileSdk.get().toInt()
-    defaultConfig {
-        minSdk = libs.versions.minSdk.get().toInt()
-    }
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-    buildFeatures {
-        compose = true
-    }
     testOptions {
         unitTests.all { it.useJUnitPlatform() }
     }
@@ -32,16 +19,8 @@ android {
 dependencies {
     implementation(project(":shared:domain"))
     implementation(project(":shared:provider-api"))
-    implementation(libs.androidx.lifecycle.viewmodel.compose)
-    implementation(libs.androidx.lifecycle.runtime.compose)
-
-    implementation(platform(libs.androidx.compose.bom))
-    implementation(libs.androidx.compose.ui)
-    implementation(libs.androidx.compose.material3)
-    implementation(libs.androidx.activity.compose)
 
     // Pure-JVM tests for the provider list labels: no android.* API is touched.
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.junit.jupiter.engine)
-
 }

@@ -22,8 +22,6 @@ android {
     }}
 
 dependencies {
-    implementation(project(":shared:domain"))
-    implementation(project(":shared:skills-api"))
     implementation(libs.kotlinx.serialization.json)
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.junit.jupiter.engine)

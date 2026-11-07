@@ -44,12 +44,10 @@ import runtime.mobileagent.domain.classifyLengthStop
 import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.RetryClass
-import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.domain.AppException
 import runtime.mobileagent.domain.InputModality
 import runtime.mobileagent.domain.ModelFeature
 import runtime.mobileagent.domain.ModelOperation
-import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.withEndpoint
 import runtime.mobileagent.domain.isChatEndpoint
 import runtime.mobileagent.provider.AssistantToolCall
@@ -100,16 +98,10 @@ class OpenAiCompatibleAdapter(
         CommandCodeContextCatalog(http).read(baseUrl, profile)
 
     override suspend fun probe(profile: ModelProfile): CapabilityReport =
-        CapabilityReport(
-            modelId = profile.modelId,
-            supportsStream = "stream" in profile.capabilities,
-            supportsTools = "tools" in profile.capabilities,
-            supportsImages = "image" in profile.capabilities,
+        openAiProfileReport(
+            profile = profile,
             source = "profile-only",
-            probedAt = Utc.nowIso(),
-            charged = false,
-            status = CapabilityProbeStatus.PROFILE_ONLY,
-            checks = profileChecks(profile),
+            supportsImages = "image" in profile.capabilities,
         )
 
     /**
@@ -280,25 +272,11 @@ class OpenAiCompatibleAdapter(
             return profileReport.copy(
                 source = "profile-only;consent-required;metadata=not-run;stream=not-run;tools=not-run;image=not-run",
                 operationId = operationId,
-                checks = profileChecks(profile),
+                checks = openAiProfileChecks(profile),
             )
         }
         if (secret.isEmpty()) {
-            return profileReport.copy(
-                supportsStream = false,
-                supportsTools = false,
-                supportsImages = false,
-                source = "metadata=not-run;stream=not-run;tools=not-run;image=not-run;secret=unavailable",
-                status = CapabilityProbeStatus.FAILED,
-                operationId = operationId,
-                checks = profileChecks(profile).map { check ->
-                    if (check.capability == CapabilityCheck.METADATA) {
-                        check.copy(status = CapabilityCheckStatus.FAILED)
-                    } else {
-                        check
-                    }
-                },
-            )
+            return missingOpenAiProbeCredentialReport(profileReport, profile, operationId)
         }
         val token = secret.concatToString()
         return try {
@@ -335,7 +313,7 @@ class OpenAiCompatibleAdapter(
             val tools = probeDeclaredFeature(profile, resolved, ProbeFeature.TOOLS)
             val image = probeDeclaredFeature(profile, resolved, ProbeFeature.IMAGE)
             val featureResults = listOf(stream, tools, image)
-            val featureStatus = capabilityProbeStatus(featureResults)
+            val featureStatus = openAiCapabilityProbeStatus(featureResults)
             val overallStatus = if (metadata.status == CapabilityCheckStatus.UNSUPPORTED &&
                 featureStatus == CapabilityProbeStatus.SUCCEEDED
             ) {
@@ -365,21 +343,7 @@ class OpenAiCompatibleAdapter(
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (_: Exception) {
-            profileReport.copy(
-                supportsStream = false,
-                supportsTools = false,
-                supportsImages = false,
-                source = "metadata=unknown-outcome;stream=not-run;tools=not-run;image=not-run",
-                status = CapabilityProbeStatus.FAILED,
-                charged = false,
-                operationId = operationId,
-                checks = listOf(
-                    CapabilityCheckResult(CapabilityCheck.METADATA, CapabilityCheckStatus.UNKNOWN),
-                    CapabilityCheckResult(CapabilityCheck.STREAM, CapabilityCheckStatus.NOT_RUN),
-                    CapabilityCheckResult(CapabilityCheck.TOOLS, CapabilityCheckStatus.NOT_RUN),
-                    CapabilityCheckResult(CapabilityCheck.IMAGE, CapabilityCheckStatus.NOT_RUN),
-                ),
-            )
+            failedOpenAiProbeReport(profileReport, operationId, "unknown-outcome")
         }
     }
 
@@ -1121,7 +1085,7 @@ class OpenAiCompatibleAdapter(
         profile: ModelProfile,
         headers: ResolvedHeaders,
         feature: ProbeFeature,
-    ): FeatureProbeResult {
+    ): OpenAiFeatureProbeResult {
         val endpoint = profile.withEndpoint().endpoint
         val chat = ModelOperation.CHAT in endpoint.operations || profile.role.name == "CHAT" || profile.role.name == "VISION"
         val declared = when (feature) {
@@ -1130,7 +1094,7 @@ class OpenAiCompatibleAdapter(
             ProbeFeature.IMAGE -> InputModality.IMAGE in endpoint.inputModalities || "image" in profile.capabilities || profile.role.name == "VISION"
         }
         if (!declared || !chat) {
-            return FeatureProbeResult(
+            return OpenAiFeatureProbeResult(
                 summary = "not-declared",
                 supported = false,
                 charged = false,
@@ -1144,7 +1108,7 @@ class OpenAiCompatibleAdapter(
         val modelParameters = runCatching {
             Json.parseToJsonElement(profile.parametersJson).jsonObject
         }.getOrElse {
-            return FeatureProbeResult(
+            return OpenAiFeatureProbeResult(
                 summary = "invalid-model-parameters",
                 supported = false,
                 charged = false,
@@ -1191,7 +1155,7 @@ class OpenAiCompatibleAdapter(
         // Defensive: a profile whose stored parameters are rejected by the shared merger
         // must surface as an explicit probe classification, not abort every feature probe.
         val payload = runCatching { buildPayload(probeRequest, includeImageBytes = true) }.getOrElse {
-            return FeatureProbeResult(
+            return OpenAiFeatureProbeResult(
                 summary = "invalid-model-parameters",
                 supported = false,
                 charged = false,
@@ -1262,7 +1226,7 @@ class OpenAiCompatibleAdapter(
         headers: ResolvedHeaders,
         feature: ProbeFeature,
         body: JsonObject,
-    ): FeatureProbeResult {
+    ): OpenAiFeatureProbeResult {
         return try {
             http.preparePost(url(baseUrl, "/chat/completions")) {
                 contentType(ContentType.Application.Json)
@@ -1273,7 +1237,7 @@ class OpenAiCompatibleAdapter(
             }.execute { response ->
                 val status = response.status.value
                 if (status !in 200..299) {
-                    return@execute FeatureProbeResult(
+                    return@execute OpenAiFeatureProbeResult(
                         summary = "http-$status",
                         supported = false,
                         charged = true,
@@ -1288,7 +1252,7 @@ class OpenAiCompatibleAdapter(
                 if (feature == ProbeFeature.STREAM) {
                     val responseType = response.headers[HttpHeaders.ContentType].orEmpty().lowercase()
                     if (!responseType.contains("text/event-stream")) {
-                        return@execute FeatureProbeResult(
+                        return@execute OpenAiFeatureProbeResult(
                             summary = "wrong-content-type",
                             supported = false,
                             charged = true,
@@ -1296,7 +1260,7 @@ class OpenAiCompatibleAdapter(
                         )
                     }
                     val supported = parseStreamProbe(response.bodyAsChannel())
-                    FeatureProbeResult(
+                    OpenAiFeatureProbeResult(
                         summary = if (supported) "verified" else "invalid-response",
                         supported = supported,
                         charged = true,
@@ -1305,7 +1269,7 @@ class OpenAiCompatibleAdapter(
                 } else {
                     val raw = readBounded(response.bodyAsChannel())
                     if (feature == ProbeFeature.IMAGE && imageProbeBudgetExhausted(raw, responses = false)) {
-                        return@execute FeatureProbeResult("inconclusive", false, true, status = CapabilityCheckStatus.UNKNOWN)
+                        return@execute OpenAiFeatureProbeResult("inconclusive", false, true, status = CapabilityCheckStatus.UNKNOWN)
                     }
                     val supported = parseChatProbe(
                         raw,
@@ -1316,14 +1280,14 @@ class OpenAiCompatibleAdapter(
                     // probe budget is tiny and live tool calling can still
                     // succeed. Do not report that as a failed protocol check.
                     if (feature == ProbeFeature.TOOLS && !supported) {
-                        FeatureProbeResult(
+                        OpenAiFeatureProbeResult(
                             summary = "inconclusive",
                             supported = false,
                             charged = true,
                             status = CapabilityCheckStatus.UNKNOWN,
                         )
                     } else {
-                        FeatureProbeResult(
+                        OpenAiFeatureProbeResult(
                             summary = if (supported) "verified" else "invalid-response",
                             supported = supported,
                             charged = true,
@@ -1338,7 +1302,7 @@ class OpenAiCompatibleAdapter(
             // The request may have reached the provider before transport
             // failure. Preserve UNKNOWN_OUTCOME/charged semantics instead of
             // presenting this as a free, retry-safe failure.
-            FeatureProbeResult(
+            OpenAiFeatureProbeResult(
                 summary = "unknown-outcome",
                 supported = false,
                 charged = true,
@@ -1350,34 +1314,6 @@ class OpenAiCompatibleAdapter(
         status in 400..499 && status !in setOf(401, 403, 408, 429) -> CapabilityCheckStatus.UNSUPPORTED
         status in 500..599 -> CapabilityCheckStatus.UNKNOWN
         else -> CapabilityCheckStatus.FAILED
-    }
-
-    private fun profileChecks(profile: ModelProfile): List<CapabilityCheckResult> {
-        val configured = profile.withEndpoint()
-        val chat = configured.isChatEndpoint()
-        fun declared(feature: ProbeFeature): Boolean = when (feature) {
-            ProbeFeature.STREAM -> ModelFeature.STREAMING in configured.endpoint.features || "stream" in configured.capabilities
-            ProbeFeature.TOOLS -> ModelFeature.TOOL_CALLING in configured.endpoint.features || "tools" in configured.capabilities
-            ProbeFeature.IMAGE -> InputModality.IMAGE in configured.endpoint.inputModalities ||
-                "image" in configured.capabilities || configured.role == ModelRole.VISION
-        }
-        fun status(feature: ProbeFeature): CapabilityCheckStatus =
-            if (chat && declared(feature)) CapabilityCheckStatus.NOT_RUN else CapabilityCheckStatus.NOT_DECLARED
-        return listOf(
-            CapabilityCheckResult(CapabilityCheck.METADATA, CapabilityCheckStatus.NOT_RUN),
-            CapabilityCheckResult(CapabilityCheck.STREAM, status(ProbeFeature.STREAM)),
-            CapabilityCheckResult(CapabilityCheck.TOOLS, status(ProbeFeature.TOOLS)),
-            CapabilityCheckResult(CapabilityCheck.IMAGE, status(ProbeFeature.IMAGE)),
-        )
-    }
-
-    private fun capabilityProbeStatus(results: List<FeatureProbeResult>): CapabilityProbeStatus = when {
-        results.all { it.status == CapabilityCheckStatus.VERIFIED || it.status == CapabilityCheckStatus.NOT_DECLARED } ->
-            CapabilityProbeStatus.SUCCEEDED
-        results.any { it.status == CapabilityCheckStatus.UNSUPPORTED } -> CapabilityProbeStatus.PARTIAL
-        results.any { it.status == CapabilityCheckStatus.VERIFIED || it.status == CapabilityCheckStatus.NOT_DECLARED } ->
-            CapabilityProbeStatus.PARTIAL
-        else -> CapabilityProbeStatus.FAILED
     }
 
     private fun metadataMatches(raw: String, expectedModelId: String): Boolean {
@@ -1535,13 +1471,6 @@ class OpenAiCompatibleAdapter(
         val status: CapabilityCheckStatus = CapabilityCheckStatus.FAILED,
     )
 
-    private data class FeatureProbeResult(
-        val summary: String,
-        val supported: Boolean,
-        val charged: Boolean,
-        val httpStatus: Int? = null,
-        val status: CapabilityCheckStatus = CapabilityCheckStatus.FAILED,
-    )
 
     private class StreamOutputState {
         var latestUsage: ModelEvent.Usage? = null

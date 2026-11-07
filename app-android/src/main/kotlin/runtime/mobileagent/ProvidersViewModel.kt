@@ -796,44 +796,29 @@ class ProvidersViewModel @JvmOverloads constructor(
 
     private fun ProviderConnectionResult.toDiagnosticResultCode(): DiagnosticProviderResultCode = when (this) {
         is ProviderConnectionResult.Success -> DiagnosticProviderResultCode.SUCCESS
-        is ProviderConnectionResult.Failure -> when (code) {
-            ProviderConnectionErrorCode.NETWORK_UNREACHABLE -> DiagnosticProviderResultCode.NETWORK_UNREACHABLE
-            ProviderConnectionErrorCode.TLS_FAILURE -> DiagnosticProviderResultCode.TLS_FAILURE
-            ProviderConnectionErrorCode.TIMEOUT -> DiagnosticProviderResultCode.TIMEOUT
-            ProviderConnectionErrorCode.AUTH_FAILED -> DiagnosticProviderResultCode.AUTH_FAILED
-            ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED,
-            ProviderConnectionErrorCode.MODEL_NOT_FOUND -> DiagnosticProviderResultCode.MODEL_NOT_FOUND
-            ProviderConnectionErrorCode.RATE_LIMITED -> DiagnosticProviderResultCode.RATE_LIMITED
-            ProviderConnectionErrorCode.FEATURE_UNSUPPORTED,
-            ProviderConnectionErrorCode.PROVIDER_REJECTED -> DiagnosticProviderResultCode.PROVIDER_REJECTED
-            ProviderConnectionErrorCode.INVALID_RESPONSE -> DiagnosticProviderResultCode.INVALID_RESPONSE
-            ProviderConnectionErrorCode.CONFIG_INVALID,
-            ProviderConnectionErrorCode.CREDENTIAL_UNAVAILABLE,
-            -> DiagnosticProviderResultCode.CONFIG_INVALID
-            ProviderConnectionErrorCode.UNKNOWN -> DiagnosticProviderResultCode.UNKNOWN
-        }
+        is ProviderConnectionResult.Failure -> code.toDiagnosticResultCode()
+    }
+
+    private fun ProviderConnectionErrorCode.toDiagnosticResultCode(): DiagnosticProviderResultCode = when (this) {
+        ProviderConnectionErrorCode.NETWORK_UNREACHABLE -> DiagnosticProviderResultCode.NETWORK_UNREACHABLE
+        ProviderConnectionErrorCode.TLS_FAILURE -> DiagnosticProviderResultCode.TLS_FAILURE
+        ProviderConnectionErrorCode.TIMEOUT -> DiagnosticProviderResultCode.TIMEOUT
+        ProviderConnectionErrorCode.AUTH_FAILED -> DiagnosticProviderResultCode.AUTH_FAILED
+        ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED,
+        ProviderConnectionErrorCode.MODEL_NOT_FOUND -> DiagnosticProviderResultCode.MODEL_NOT_FOUND
+        ProviderConnectionErrorCode.RATE_LIMITED -> DiagnosticProviderResultCode.RATE_LIMITED
+        ProviderConnectionErrorCode.FEATURE_UNSUPPORTED,
+        ProviderConnectionErrorCode.PROVIDER_REJECTED -> DiagnosticProviderResultCode.PROVIDER_REJECTED
+        ProviderConnectionErrorCode.INVALID_RESPONSE -> DiagnosticProviderResultCode.INVALID_RESPONSE
+        ProviderConnectionErrorCode.CONFIG_INVALID,
+        ProviderConnectionErrorCode.CREDENTIAL_UNAVAILABLE,
+        -> DiagnosticProviderResultCode.CONFIG_INVALID
+        ProviderConnectionErrorCode.UNKNOWN -> DiagnosticProviderResultCode.UNKNOWN
     }
 
     private fun CapabilityProbeStatus.toDiagnosticResultCode(
         error: ProviderConnectionErrorCode?,
-    ): DiagnosticProviderResultCode = error?.let { failure ->
-        when (failure) {
-            ProviderConnectionErrorCode.NETWORK_UNREACHABLE -> DiagnosticProviderResultCode.NETWORK_UNREACHABLE
-            ProviderConnectionErrorCode.TLS_FAILURE -> DiagnosticProviderResultCode.TLS_FAILURE
-            ProviderConnectionErrorCode.TIMEOUT -> DiagnosticProviderResultCode.TIMEOUT
-            ProviderConnectionErrorCode.AUTH_FAILED -> DiagnosticProviderResultCode.AUTH_FAILED
-            ProviderConnectionErrorCode.ENDPOINT_UNSUPPORTED,
-            ProviderConnectionErrorCode.MODEL_NOT_FOUND -> DiagnosticProviderResultCode.MODEL_NOT_FOUND
-            ProviderConnectionErrorCode.RATE_LIMITED -> DiagnosticProviderResultCode.RATE_LIMITED
-            ProviderConnectionErrorCode.FEATURE_UNSUPPORTED,
-            ProviderConnectionErrorCode.PROVIDER_REJECTED -> DiagnosticProviderResultCode.PROVIDER_REJECTED
-            ProviderConnectionErrorCode.INVALID_RESPONSE -> DiagnosticProviderResultCode.INVALID_RESPONSE
-            ProviderConnectionErrorCode.CONFIG_INVALID,
-            ProviderConnectionErrorCode.CREDENTIAL_UNAVAILABLE,
-            -> DiagnosticProviderResultCode.CONFIG_INVALID
-            ProviderConnectionErrorCode.UNKNOWN -> DiagnosticProviderResultCode.UNKNOWN
-        }
-    } ?: when (this) {
+    ): DiagnosticProviderResultCode = error?.toDiagnosticResultCode() ?: when (this) {
         CapabilityProbeStatus.SUCCEEDED -> DiagnosticProviderResultCode.SUCCEEDED
         CapabilityProbeStatus.PARTIAL -> DiagnosticProviderResultCode.PARTIAL
         CapabilityProbeStatus.FAILED,

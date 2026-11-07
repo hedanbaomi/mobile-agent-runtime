@@ -17,6 +17,7 @@ LOCAL_RECORDS = {
     "docs/evidence/2026-10-05/announcements-access-fetch-deploy.md",
     "docs/evidence/2026-10-05/announcements-visual-admin.md",
 }
+HANDOFF_SUMMARIES = ("current-task.md", "current-status.md", "open-items.md")
 
 
 def version(text):
@@ -39,15 +40,28 @@ def check(root, publication=False):
     floor = max(floors)
     if current[0] < floor[0] or (current[0] == floor[0] and current[1] != floor[1]):
         failures.append(f"Release rollback: {current} is below/different from public {floor}")
-    if not publication:
+    summary_dir = root / "docs/agents/handoff"
+    # A public checkout contains the historical handoff. Enforce the current local
+    # budget when the private summaries are installed or the handoff is being edited.
+    local_handoff = not publication and (summary_dir.is_dir() or subprocess.run(
+        ["git", "diff", "--quiet", "HEAD", "--", "HANDOFF.md"], cwd=root,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    ).returncode != 0)
+    docs = []
+    if local_handoff:
         handoff = (root / "HANDOFF.md").read_text(encoding="utf-8")
         if len(handoff.encode("utf-8")) > 24000 or len(handoff.splitlines()) > 120:
             failures.append("HANDOFF exceeds current-summary budget; archive completed history")
         if handoff.count("## 当前任务") != 1:
             failures.append("HANDOFF must contain exactly one current-task section")
+        # These summaries are maintained locally. Fresh checkouts may omit them.
+        summaries = [summary_dir / name for name in HANDOFF_SUMMARIES]
+        hot = [p.read_bytes() for p in summaries if p.is_file()]
+        if sum(map(len, hot)) > 12000 or sum(len(data.splitlines()) for data in hot) > 150:
+            failures.append("Current handoff summaries exceed 12 KB / 150 lines; link completed history")
+        docs = [root / "HANDOFF.md", *(p for p in summaries if p.is_file())]
     # Archived evidence keeps its historical interpretation and is not a live
     # requirement. Only current entry points are checked here; no disk-wide scan.
-    docs = [] if publication else [root / "HANDOFF.md"]
     # Local reports are intentionally untracked WIP, not portable requirements.
     tracked = set(subprocess.check_output(["git", "ls-files"], cwd=root, text=True, encoding="utf-8").splitlines())
     tree = subprocess.run(["git", "ls-tree", "-r", "--name-only", "HEAD"], cwd=root, capture_output=True, text=True, encoding="utf-8")
@@ -73,7 +87,7 @@ def check(root, publication=False):
                 failures.append(f"{relative_doc}: document link escapes repository {target}")
                 continue
             relative_target = resolved.relative_to(root.resolve()).as_posix()
-            if publication and relative_target in LOCAL_RECORDS:
+            if not local_handoff and relative_target in LOCAL_RECORDS:
                 # Explicit legacy local-only records. Never depend on their
                 # bytes being present or publish them to make CI succeed.
                 continue

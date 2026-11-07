@@ -50,6 +50,7 @@ internal fun safeExportFailureDetail(failure: Exception): String = when (failure
 
 class SettingsViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as MobileAgentApp
+    private val buildTimeUtc by lazy { app.packagedBuildTimeUtc() }
     private val screenObservation = runtime.mobileagent.observation.ScreenObservationRegistry.get(application)
     private val screenObservationState = mutableStateOf(screenObservation.access.value)
     init { viewModelScope.launch { screenObservation.access.collect { screenObservationState.value = it } } }
@@ -76,7 +77,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val authorityState = mutableStateOf(authorityPort.snapshot())
     val preferences = mutableStateOf(app.container.settings.get())
     val exportStatus = mutableStateOf("")
-    val inspectorEnabled = mutableStateOf(app.container.uiPreferences.getBoolean("request-inspector", true))
+    val inspectorEnabled = mutableStateOf(app.container.uiPreferences.requestInspectorEnabled)
     /** Compose observes consent changes instead of waiting for another settings recomposition. */
     val statsEnabled = mutableStateOf(app.container.announcements.statsEnabled())
     val diagnosticsStatus = mutableStateOf(SettingsDiagnosticsFeedback.NONE)
@@ -205,13 +206,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         gitRevision = BuildConfig.GIT_REVISION,
         gitDirty = BuildConfig.GIT_DIRTY,
         schemaVersion = BuildConfig.DB_SCHEMA_VERSION,
-        buildTimeUtc = BuildConfig.BUILD_TIME_UTC,
+        buildTimeUtc = buildTimeUtc,
         buildType = BuildConfig.BUILD_TYPE,
         diagnosticText = buildString {
             appendLine("revision=${BuildConfig.GIT_REVISION}")
             appendLine("dirty=${BuildConfig.GIT_DIRTY}")
             appendLine("schema=${BuildConfig.DB_SCHEMA_VERSION}")
-            appendLine("builtAt=${BuildConfig.BUILD_TIME_UTC}")
+            appendLine("builtAt=$buildTimeUtc")
         },
         themeMode = when (preferences.value.theme) {
             ThemePreference.SYSTEM -> "system"; ThemePreference.LIGHT -> "light"
@@ -684,7 +685,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun inspector(value: Boolean) {
-        app.container.uiPreferences.edit().putBoolean("request-inspector", value).apply()
+        app.container.uiPreferences.edit().putBoolean(REQUEST_INSPECTOR_PREFERENCE, value).apply()
         inspectorEnabled.value = value
     }
 

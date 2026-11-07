@@ -221,6 +221,34 @@ class OpenAiResponsesAdapterTest {
     )
 
     @Test
+    fun profileOnlyVisionAndMissingCredentialsPreserveEachFormatsReportWithoutDispatch() = runBlocking {
+        var calls = 0
+        val http = HttpClient(MockEngine { calls++; error("Unexpected probe request") })
+        try {
+            val vision = profile().copy(role = ModelRole.VISION, capabilities = emptySet())
+            val chat = OpenAiCompatibleAdapter(http, "https://example.invalid/v1")
+            val responses = OpenAiResponsesAdapter(http, "https://example.invalid/v1")
+            val chatReport = chat.probe(vision)
+            val responsesReport = responses.probe(vision)
+            assertEquals(false, chatReport.supportsImages)
+            assertEquals(true, responsesReport.supportsImages)
+            assertEquals("profile-only", chatReport.source)
+            assertEquals("profile-only;format=OPENAI_RESPONSES", responsesReport.source)
+            for (adapter in listOf(chat, responses)) {
+                val failed = adapter.probe(vision, charArrayOf(), ProbeConsent.GRANTED, "no-secret")
+                assertEquals("no-secret", failed.operationId)
+                assertEquals(false, failed.charged)
+                assertEquals(listOf(CapabilityCheck.METADATA, CapabilityCheck.STREAM, CapabilityCheck.TOOLS, CapabilityCheck.IMAGE),
+                    failed.checks.map { it.capability })
+                assertEquals(CapabilityCheckStatus.FAILED, failed.checks.first().status)
+            }
+            assertEquals(0, calls)
+        } finally {
+            http.close()
+        }
+    }
+
+    @Test
     fun responsesUrlNormalizesRootSlashesAndExistingResponsesSuffix() {
         assertEquals("https://example.invalid/v1/responses", OpenAiResponsesAdapter.url("https://example.invalid/v1", "/responses"))
         assertEquals("https://example.invalid/v1/responses", OpenAiResponsesAdapter.url("https://example.invalid/v1/", "/responses"))

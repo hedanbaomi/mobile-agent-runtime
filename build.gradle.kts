@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import org.gradle.api.services.BuildService
+import org.gradle.api.services.BuildServiceParameters
+import org.jetbrains.kotlin.gradle.tasks.CompileUsingKotlinDaemon
+
 plugins {
     id("runtime.mobileagent.license-guard")
     alias(libs.plugins.android.application) apply false
@@ -9,6 +13,44 @@ plugins {
     alias(libs.plugins.kotlin.jvm) apply false
     alias(libs.plugins.kotlin.serialization) apply false
     alias(libs.plugins.compose.compiler) apply false
+}
+
+// A narrow APK is for local iteration. Evidence and release invocations always
+// use their own standard ABI sets, even if a developer left a property enabled.
+val supportedAndroidAbis = listOf("arm64-v8a", "x86_64")
+val developerAbi = providers.gradleProperty("marDevAbi").orNull
+if (developerAbi != null) {
+    require(developerAbi in supportedAndroidAbis) { "marDevAbi must be arm64-v8a or x86_64" }
+    require(gradle.startParameter.taskNames == listOf(":app-android:assembleDebug") &&
+        providers.environmentVariable("CI").orNull.isNullOrBlank()) {
+        "marDevAbi is only allowed for a local :app-android:assembleDebug invocation"
+    }
+}
+extra["debugNativeAbis"] = developerAbi?.let(::listOf) ?: supportedAndroidAbis
+extra["pinnedArtifactCacheRoot"] = providers.gradleProperty("pinnedArtifactCache").orNull
+    ?.takeIf { it.isNotBlank() }?.let { file(it) } ?: gradle.gradleUserHomeDir.resolve("mobileagent-pinned")
+
+abstract class AppKotlinCompilerSlot : BuildService<BuildServiceParameters.None>
+
+// Keep the Kotlin compiler separate from the 4 GiB Gradle/R8 JVM on workstations and CI.
+if (!providers.gradleProperty("kotlin.daemon.jvmargs").isPresent &&
+    !providers.systemProperty("kotlin.daemon.jvm.options").isPresent &&
+    !providers.gradleProperty("kotlin.compiler.execution.strategy").isPresent
+) {
+    // Debug, release and review share the daemon. Compiling these large variants together exhausts its heap.
+    val appCompilerSlot = gradle.sharedServices.registerIfAbsent("appKotlinCompilerSlot", AppKotlinCompilerSlot::class.java) {
+        maxParallelUsages.set(1)
+    }
+    gradle.projectsEvaluated {
+        subprojects {
+            tasks.withType<CompileUsingKotlinDaemon>().configureEach {
+                if (kotlinDaemonJvmArguments.getOrElse(emptyList()).isEmpty()) {
+                    kotlinDaemonJvmArguments.convention(listOf("-Xmx2g"))
+                    if (project.path == ":app-android") usesService(appCompilerSlot)
+                }
+            }
+        }
+    }
 }
 
 // Every resolvable configuration participates in dependency locking.  The

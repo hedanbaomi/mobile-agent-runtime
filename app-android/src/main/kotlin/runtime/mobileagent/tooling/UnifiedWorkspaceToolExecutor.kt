@@ -54,7 +54,6 @@ import runtime.mobileagent.skills.tooling.WorkspaceCreateDirectoryRequest
 import runtime.mobileagent.skills.tooling.WorkspaceDeleteRequest
 import runtime.mobileagent.skills.tooling.WorkspaceEntryType
 import runtime.mobileagent.skills.tooling.WorkspaceListRequest
-import runtime.mobileagent.skills.tooling.WorkspaceMoveRequest
 import runtime.mobileagent.skills.tooling.WorkspaceMutation
 import runtime.mobileagent.skills.tooling.WorkspaceReadTextRequest
 import runtime.mobileagent.skills.tooling.WorkspacePatchFormat
@@ -64,7 +63,8 @@ import runtime.mobileagent.skills.tooling.WorkspaceWriteTextRequest
 import runtime.mobileagent.skills.tooling.ShellLimits
 
 /**
- * Backend-neutral workspace tools.  Backend identity, root references and
+ * [WorkspaceOperation] defines the ordinary tool names, schemas and required operations.
+ * Backend identity, root references and
  * provider handles stay in [WorkspaceRegistry]; the model sees only an opaque
  * workspace id and normalized relative paths.
  */
@@ -91,12 +91,12 @@ class UnifiedWorkspaceToolExecutor(
     val toolingSpecs: List<ToolSpec> = Collections.unmodifiableList(exposedSpecs(schemaContext))
 
     /** Compatibility adapter for the existing ToolExecutor boundary. */
-    override val specs: List<LegacyToolSpec> = Collections.unmodifiableList(toolingSpecs.map(::toLegacySpec))
+    override val specs: List<LegacyToolSpec> = Collections.unmodifiableList(toolingSpecs.map { it.toLegacySpec() })
 
     /** IDs remain frozen even when their backend goes offline; routing never searches another authority. */
     val workspaceIds: Set<String> by lazy {
         registry.descriptors().mapNotNull { registry.registered(it.id) }.filter { registered ->
-            exposedWorkspaceOperations.any { workspaceOperationAvailable(schemaContext, registered, it, requireLiveReady = false) }
+            WorkspaceOperation.workspaceEntries.any { workspaceOperationAvailable(schemaContext, registered, it, requireLiveReady = false) }
         }.mapTo(linkedSetOf()) { it.descriptor.id }
     }
 
@@ -104,23 +104,6 @@ class UnifiedWorkspaceToolExecutor(
     private var closed = false
     private val callsByRequest = linkedMapOf<String, BoundCall>()
     private val requestByModelCall = linkedMapOf<ModelCallKey, String>()
-
-    /**
-     * Operations that can ever reach the model for a workspace, in exposure
-     * order.  `file_move` is deliberately absent: it is never exposed, so a
-     * workspace enumeration must never imply it.
-     */
-    private val exposedWorkspaceOperations = listOf(
-        WorkspaceOperation.LIST,
-        WorkspaceOperation.GLOB,
-        WorkspaceOperation.STAT,
-        WorkspaceOperation.READ,
-        WorkspaceOperation.GREP,
-        WorkspaceOperation.WRITE,
-        WorkspaceOperation.CREATE_DIRECTORY,
-        WorkspaceOperation.DELETE,
-        WorkspaceOperation.APPLY_PATCH,
-    )
 
     override suspend fun invoke(call: ToolCall): ToolResult = invoke(call, contextProvider())
 
@@ -148,7 +131,7 @@ class UnifiedWorkspaceToolExecutor(
         val parsed = parse(call) ?: return ToolResult.Invalid(ToolErrorCode.INVALID_REQUEST.name)
         val candidate = bind(requestId, call, parsed, context)
         val existingReservation = synchronized(lock) {
-            val key = modelKey(context, if (runtimeOwned) requestId else call.callId)
+            val key = context.modelCallKey(if (runtimeOwned) requestId else call.callId)
             val existingRequestId = requestByModelCall[key]
             if (existingRequestId != null) {
                 true to callsByRequest[existingRequestId]
@@ -381,26 +364,8 @@ class UnifiedWorkspaceToolExecutor(
         val registered = registry.registered(operation.workspaceId) ?: return false
         if (!workspaceOperationStructurallyAvailable(context, registered, operation.kind, requireLiveReady = false)) return false
         if (!workspaceOperationStructurallyAvailable(context, registered, operation.kind, requireLiveReady = true)) return false
-        val workspaceId = operation.workspaceId.takeIf { it.isNotBlank() }
-        val path = operation.relativePath
         val receipts = synchronized(lock) { bound.onceReceipts.toList() }
-        return operationCapabilities(operation.kind).all { capability ->
-            if (resolver.revalidate(context, capability, workspaceId, path, operation.isMutation)) {
-                return@all true
-            }
-            // The grant side of a deferred disclosure is proven either by a live
-            // standing grant above, or by this exact call's ONCE consumption
-            // receipt.  Nothing else may authorize it.
-            receipts.any { consumed ->
-                consumed.capability == capability &&
-                    resolver.revalidateInFlight(
-                        context = context,
-                        capability = capability,
-                        consumedOnceGrant = consumed,
-                        scope = GrantScope(workspaceId, path, operation.isMutation),
-                    )
-            }
-        }
+        return exactPathAuthorization(context, operation, receipts)
     }
 
     private fun revalidateReplay(bound: BoundCall): Boolean {
@@ -458,11 +423,6 @@ class UnifiedWorkspaceToolExecutor(
         }
         if (structuralError != null) return finishAudit(bound, operation, ToolExecution.Failed(structuralError), context)
 
-        val workspaceIdForGrant = operation.workspaceId.takeIf { it.isNotBlank() }
-        val pathForGrant = when {
-            operation.kind == WorkspaceOperation.WORKSPACE_LIST -> null
-            else -> operation.relativePath
-        }
         val sourceAllowed = if (operation.kind == WorkspaceOperation.WORKSPACE_LIST) {
             // Enumeration has no caller-supplied workspace. Check each disclosed
             // workspace explicitly; a scoped row must never authorize null scope.
@@ -471,26 +431,9 @@ class UnifiedWorkspaceToolExecutor(
                 resolver.revalidate(context, operation.capability, it.descriptor.id)
             }
         } else {
-            // A composite read operation (recursive search) needs every one of its
-            // capabilities on the exact same path; the primary capability alone is
-            // never enough to widen a subtree walk.
-            operationCapabilities(operation.kind).all { capability ->
-                resolver.revalidate(context, capability, workspaceIdForGrant,
-                    pathForGrant, operation.isMutation)
-            }
+            exactPathAuthorization(context, operation)
         }
-        // A move has two independently user-visible paths.  A source grant
-        // must never silently authorize a destination outside its scope.
-        val destinationAllowed = operation.destinationPath?.let { destination ->
-            resolver.revalidate(
-                context,
-                operation.capability,
-                workspaceIdForGrant,
-                destination,
-                operation.isMutation,
-            )
-        } ?: true
-        if (!sourceAllowed || !destinationAllowed) {
+        if (!sourceAllowed) {
             return finishAudit(
                 bound,
                 operation,
@@ -652,9 +595,6 @@ class UnifiedWorkspaceToolExecutor(
             WorkspaceOperation.CREATE_DIRECTORY -> registered.backend.createDirectory(
                 WorkspaceCreateDirectoryRequest(parsed.workspaceId, parsed.relativePath, parsed.expectedVersion),
             ) as WorkspaceResult<Any>
-            WorkspaceOperation.MOVE -> registered.backend.move(
-                WorkspaceMoveRequest(parsed.workspaceId, parsed.relativePath, parsed.destinationPath!!, parsed.expectedVersion),
-            ) as WorkspaceResult<Any>
             WorkspaceOperation.DELETE -> registered.backend.delete(
                 WorkspaceDeleteRequest(parsed.workspaceId, parsed.relativePath, parsed.expectedVersion),
             ) as WorkspaceResult<Any>
@@ -672,7 +612,7 @@ class UnifiedWorkspaceToolExecutor(
      *
      * Authorization is proven once on the exact search subtree root immediately before dispatch by
      * the canonical gate above, and every entry the engine reaches is lexically inside that proven
-     * subtree. The engine still re-runs [searchStillAuthorized] before every backend call and once
+     * subtree. The engine still re-runs [WorkspaceOperation.revalidateAt] before every backend call and once
      * more here before any result (including path names) can be disclosed. A revoked, re-scoped or
      * de-authorized subtree therefore yields a typed denial instead of a partial listing.
      */
@@ -687,7 +627,7 @@ class UnifiedWorkspaceToolExecutor(
             val live = registry.registered(parsed.workspaceId)
             live != null && live.backend === registered.backend && live.descriptor == registered.descriptor &&
                 workspaceOperationStructurallyAvailable(context, live, parsed.kind, requireLiveReady = true) &&
-                searchStillAuthorized(context, parsed, consumedReceipts)
+                exactPathAuthorization(context, parsed, consumedReceipts)
         }
         val outcome = when (parsed.kind) {
             WorkspaceOperation.GLOB -> {
@@ -726,58 +666,10 @@ class UnifiedWorkspaceToolExecutor(
         return WorkspaceResult.Success(outcome)
     }
 
-    /**
-     * Live re-check of the exact recursive-search subtree.
-     *
-     * Every access path of a search is inside the subtree proven by the same
-     * path-scope rule the dispatch gate uses: an unscoped grant, or a grant whose
-     * canonical scope is this path or one of its ancestors, covers the whole
-     * subtree.  A grant scoped to a *descendant* (for example `src/sub` when the
-     * search root is `src`) deliberately fails this check, so a directory-range
-     * grant can never be widened into its parent.
-     *
-     * A ONCE grant this exact request already consumed cannot be resolved as an
-     * active grant any more, so it is re-checked through the resolver's exact
-     * consumption logic: the pre-consumption row is honoured only while the live
-     * row is precisely that row advanced by its consumption CAS.  Revocation,
-     * expiry, a scope/capability edit, a removed snapshot binding or a policy
-     * change therefore still stops the search, and the request's own
-     * workspace/path scope is revalidated on every check rather than assumed
-     * from the row that was consumed once.
-     */
-    private fun searchStillAuthorized(
-        context: ToolExecutionContext,
-        parsed: ParsedCall,
-        consumedReceipts: List<CapabilityGrant>,
-    ): Boolean {
-        val workspaceId = parsed.workspaceId.takeIf { it.isNotBlank() }
-        val path = parsed.relativePath
-        return operationCapabilities(parsed.kind).all { capability ->
-            if (resolver.revalidate(context, capability, workspaceId, path, false)) return@all true
-            consumedReceipts.any { consumed ->
-                consumed.capability == capability &&
-                    resolver.revalidateInFlight(
-                        context = context,
-                        capability = capability,
-                        consumedOnceGrant = consumed,
-                        scope = GrantScope(workspaceId, path, false),
-                    )
-            }
-        }
-    }
-
-    /**
-     * Every capability one operation needs on the same path. Ordinary operations
-     * need exactly their own capability; recursive search is composite so a
-     * `file_grep` cannot run with only one half of `file.list` + `file.read_text`.
-     */
-    private fun operationCapabilities(operation: WorkspaceOperation): List<CapabilityId> =
-        operation.requiredOperations.map { it.capability }.distinct()
-
     /** Build the model schema from the exact run snapshot, never from a global list. */
     private fun exposedSpecs(context: ToolExecutionContext): List<ToolSpec> =
-        TOOL_SPECS.mapNotNull { spec ->
-            val operation = operationForTool(spec.name) ?: return@mapNotNull null
+        WorkspaceOperation.entries.mapNotNull { operation ->
+            val spec = operation.spec
             // A persisted selected authority remains part of the run schema
             // while its Binder/USB/Wi-Fi transport is temporarily offline.
             // Dispatch repeats the live-ready check and fails closed without
@@ -845,7 +737,7 @@ class UnifiedWorkspaceToolExecutor(
         requireLiveReady: Boolean,
     ): AgentWorkspaceView {
         val descriptor = registered.descriptor
-        val available = exposedWorkspaceOperations.filter { operation ->
+        val available = WorkspaceOperation.workspaceEntries.filter { operation ->
             workspaceOperationAvailable(context, registered, operation, requireLiveReady)
         }
         return AgentWorkspaceView(
@@ -862,14 +754,14 @@ class UnifiedWorkspaceToolExecutor(
             atomicReplace = backendSupports(registered.backend, WorkspaceOperation.APPLY_PATCH),
             createOnlyOperations = available
                 .filter { it.isCreateOnly(descriptor.backendType) }
-                .map { it.modelToolName() }
+                .map { it.spec.name }
                 .sorted(),
-            authorizedOperations = available.map { it.modelToolName() }.sorted(),
+            authorizedOperations = available.map { it.spec.name }.sorted(),
             expectedVersionOperations = available
                 .filter { it.isMutation && it.capability in registered.backend.expectedVersionCapabilities }
-                .map { it.modelToolName() }.sorted(),
+                .map { it.spec.name }.sorted(),
             operationScopes = available.associate { operation ->
-                operation.modelToolName() to operationScope(context, registered, operation)
+                operation.spec.name to operationScope(context, registered, operation)
             }.toSortedMap(),
             patchFormats = if (WorkspaceOperation.APPLY_PATCH in available) listOf("unified_diff", "replace") else emptyList(),
         )
@@ -893,18 +785,8 @@ class UnifiedWorkspaceToolExecutor(
         operation: WorkspaceOperation,
     ): OperationScopeView {
         val workspaceId = registered.descriptor.id
-        val capabilities = operationCapabilities(operation)
-        // A composite operation is whole-workspace only when every required
-        // capability authorizes the unscoped root probe.
-        val wholeWorkspace = capabilities.all { capability ->
-            resolver.revalidate(
-                context = context,
-                capability = capability,
-                workspaceId = workspaceId,
-                path = UNSCOPED_GRANT_PROBE_PATH,
-                write = operation.isMutation,
-            )
-        }
+        val capabilities = operation.requiredCapabilities
+        val wholeWorkspace = operation.revalidateAt(resolver, context, workspaceId, UNSCOPED_GRANT_PROBE_PATH)
         // Bounded candidates come from the run's canonical grant rows for any
         // required capability.  Each candidate is reported only after every
         // required capability revalidates it, so a composite report is never
@@ -919,18 +801,7 @@ class UnifiedWorkspaceToolExecutor(
             .mapNotNull { it.pathScope }
             .distinct()
             .filter { scope -> isCanonicalRelativeScope(scope) }
-            .filter { scope ->
-                capabilities.all { capability ->
-                    resolver.revalidate(
-                        context = context,
-                        capability = capability,
-                        workspaceId = workspaceId,
-                        path = scope,
-                        write = operation.isMutation,
-                    )
-                }
-            }
-            .distinct()
+            .filter { scope -> operation.revalidateAt(resolver, context, workspaceId, scope) }
             .sorted()
             .toList()
         return OperationScopeView(wholeWorkspace = wholeWorkspace, pathScopes = pathScopes)
@@ -974,35 +845,15 @@ class UnifiedWorkspaceToolExecutor(
         if (!workspaceOperationStructurallyAvailable(context, registered, operation, requireLiveReady)) return false
         val workspaceId = registered.descriptor.id
         if (operation == WorkspaceOperation.WORKSPACE_LIST) {
-            if (resolver.revalidate(context, operation.capability, workspaceId)) return true
-            return consumedReceipts.any { receipt ->
-                receipt.capability == operation.capability &&
-                    resolver.revalidateInFlight(context, operation.capability, receipt, GrantScope(workspaceId, null))
-            }
+            return operation.revalidateAt(resolver, context, workspaceId, null, consumedReceipts)
         }
         // Schema/availability describe whether some permitted path exists.
-        // Exact dispatch still revalidates the actual source and destination.
+        // Exact dispatch still revalidates the requested path.
         val scope = operationScope(context, registered, operation)
         if (scope.wholeWorkspace || scope.pathScopes.isNotEmpty()) return true
         if (consumedReceipts.isEmpty()) return false
         val path = requestedPath ?: return false
-        // Per capability, not per request: a mixed-lifetime request (one half already
-        // consumed as ONCE, the other half still standing) is satisfied when each
-        // capability has *either* its own live standing scope *or* its own exact
-        // consumed receipt.  Demanding receipts for every capability would wrongly
-        // deny the standing half.
-        return operationCapabilities(operation).all { capability ->
-            resolver.revalidate(context, capability, workspaceId, path, operation.isMutation) ||
-                consumedReceipts.any { receipt ->
-                    receipt.capability == capability &&
-                        resolver.revalidateInFlight(
-                            context = context,
-                            capability = capability,
-                            consumedOnceGrant = receipt,
-                            scope = GrantScope(workspaceId, path, operation.isMutation),
-                        )
-                }
-        }
+        return operation.revalidateAt(resolver, context, workspaceId, path, consumedReceipts)
     }
 
     /**
@@ -1057,29 +908,17 @@ class UnifiedWorkspaceToolExecutor(
     }
 
     /** Exact path checks are repeated after approval and immediately before dispatch. */
-    private fun exactPathAuthorization(context: ToolExecutionContext, operation: ParsedCall): Boolean {
+    private fun exactPathAuthorization(
+        context: ToolExecutionContext,
+        operation: ParsedCall,
+        consumedReceipts: List<CapabilityGrant> = emptyList(),
+    ): Boolean {
         if (operation.kind == WorkspaceOperation.WORKSPACE_LIST) return true
-        val workspaceId = operation.workspaceId
-        val capabilities = operationCapabilities(operation.kind)
-        val paths = listOf(operation.relativePath) + listOfNotNull(operation.destinationPath)
-        return paths.all { path ->
-            capabilities.all { capability ->
-                resolver.revalidate(
-                    context = context,
-                    capability = capability,
-                    workspaceId = workspaceId,
-                    path = path,
-                    write = operation.isMutation,
-                )
-            }
-        }
+        return operation.kind.revalidateAt(resolver, context, operation.workspaceId, operation.relativePath, consumedReceipts)
     }
 
     /**
-     * Resolve the exact workspace/path scope immediately before dispatch.  A
-     * MOVE has two paths but is one logical operation: the same one-shot grant
-     * may authorize both paths, so its durable consumer is invoked at most once
-     * per invocation while every path still receives an exact resolver check.
+     * Resolve the requested path for every required capability immediately before dispatch.
      *
      * [consumedSink] records the ONCE grant rows this exact request consumed, so
      * a long-running composite read can keep proving its in-flight authority
@@ -1110,25 +949,19 @@ class UnifiedWorkspaceToolExecutor(
             listOf(operation.workspaceId)
         }
         if (workspaceIds.isEmpty()) return false
-        val paths = if (operation.kind == WorkspaceOperation.WORKSPACE_LIST) {
-            listOf<String?>(null)
-        } else {
-            listOf(operation.relativePath) + listOfNotNull(operation.destinationPath)
-        }
-        val capabilities = operationCapabilities(operation.kind)
+        val path = operation.relativePath.takeUnless { operation.kind == WorkspaceOperation.WORKSPACE_LIST }
+        val capabilities = operation.kind.requiredCapabilities
         for (workspaceId in workspaceIds) {
-            for (path in paths) {
-                for (capability in capabilities) {
-                    if (resolver.authorizeForDispatch(
-                            context = context,
-                            capability = capability,
-                            consumer = consumeOnce,
-                            workspaceId = workspaceId.takeUnless { it.isBlank() },
-                            path = path,
-                            write = operation.isMutation,
-                        ) == DispatchAuthorization.DENIED
-                    ) return false
-                }
+            for (capability in capabilities) {
+                if (resolver.authorizeForDispatch(
+                        context = context,
+                        capability = capability,
+                        consumer = consumeOnce,
+                        workspaceId = workspaceId.takeUnless { it.isBlank() },
+                        path = path,
+                        write = operation.isMutation,
+                    ) == DispatchAuthorization.DENIED
+                ) return false
             }
         }
         return true
@@ -1221,7 +1054,6 @@ class UnifiedWorkspaceToolExecutor(
                 relativePathSha256 = sha256(parsed.relativePath),
                 approvalId = approvalId,
                 operation = parsed.kind.auditOperation,
-                destinationPathSha256 = parsed.destinationPath?.let(::sha256),
                 backendType = auditBackendType(bound, parsed),
             ))
         }.getOrDefault(false)
@@ -1280,7 +1112,6 @@ class UnifiedWorkspaceToolExecutor(
                 approvalId = bound.auditApprovalId ?: bound.approvalGrant?.approvalId ?: bound.pendingApprovalId,
                 operation = parsed.kind.auditOperation,
                 outcome = outcome,
-                destinationPathSha256 = parsed.destinationPath?.let(::sha256),
                 backendType = auditBackendType(bound, parsed),
             ))
         }.getOrDefault(false)
@@ -1366,7 +1197,7 @@ class UnifiedWorkspaceToolExecutor(
     private fun liveGrantRevisionFor(context: ToolExecutionContext, parsed: ParsedCall): Long {
         val workspaceId = parsed.workspaceId.takeIf { it.isNotBlank() }
         val path = parsed.relativePath.takeUnless { it.isEmpty() }
-        val revisions = operationCapabilities(parsed.kind).map { capability ->
+        val revisions = parsed.kind.requiredCapabilities.map { capability ->
             resolver.liveGrantRevision(context, capability, workspaceId, path, parsed.isMutation)
         }
         if (revisions.any { it == null }) return 0L
@@ -1409,7 +1240,7 @@ class UnifiedWorkspaceToolExecutor(
             scope = ApprovalScope(
                 capability = parsed.capability,
                 workspaceId = parsed.workspaceId.takeIf { it.isNotBlank() },
-                pathScope = parsed.relativePath + (parsed.destinationPath?.let { "->$it" } ?: ""),
+                pathScope = parsed.relativePath,
                 grantRevision = liveGrantRevisionFor(context, parsed),
                 policyVersion = context.policyVersion,
                 taskId = context.taskIdentity.takeIf { it.isNotBlank() },
@@ -1419,26 +1250,12 @@ class UnifiedWorkspaceToolExecutor(
     }
 
     private fun parse(call: ToolCall): ParsedCall? = runCatching {
-        if (call.callId.isBlank() || call.name !in TOOL_NAMES) return null
+        if (call.callId.isBlank()) return null
+        val kind = WorkspaceOperation.forInput(call.name) ?: return null
         val root = ModelToolArguments.objectOrNull(call.argumentsJson)?.let { raw ->
             ModelToolArguments.numericVersion(raw) ?: return null
         } ?: return null
-        val kind = when (call.name) {
-            WORKSPACE_LIST -> WorkspaceOperation.WORKSPACE_LIST
-            FILE_LIST -> WorkspaceOperation.LIST
-            FILE_STAT -> WorkspaceOperation.STAT
-            FILE_READ_TEXT -> WorkspaceOperation.READ
-            FILE_WRITE_TEXT -> WorkspaceOperation.WRITE
-            FILE_CREATE_DIRECTORY -> WorkspaceOperation.CREATE_DIRECTORY
-            FILE_DELETE -> WorkspaceOperation.DELETE
-            FILE_MOVE -> WorkspaceOperation.MOVE
-            FILE_GLOB -> WorkspaceOperation.GLOB
-            FILE_GREP -> WorkspaceOperation.GREP
-            FILE_APPLY_PATCH, APPLY_PATCH -> WorkspaceOperation.APPLY_PATCH
-            else -> return null
-        }
-        val allowed = allowedKeys(kind)
-        if (root.keys.any { it !in allowed }) return null
+        if (root.keys.any { it !in kind.allowedKeys }) return null
         val workspaceId = if (kind == WorkspaceOperation.WORKSPACE_LIST) {
             ""
         } else {
@@ -1459,9 +1276,6 @@ class UnifiedWorkspaceToolExecutor(
         } else {
             null
         }
-        val destination = if (kind == WorkspaceOperation.MOVE) {
-            registry.validatePath(root.aliasString("destinationRelativePath", "destination_relative_path"), false)
-        } else null
         if (!root.aliasLongElement("maxBytes", "max_bytes")) return null
         if (!root.aliasLongElement("maxEntries", "max_entries")) return null
         if (root.containsKey("cursor") && !root.stringElement("cursor")) return null
@@ -1502,7 +1316,6 @@ class UnifiedWorkspaceToolExecutor(
             kind = kind,
             workspaceId = workspaceId,
             relativePath = path,
-            destinationPath = destination,
             text = text,
             patch = patch,
             patchFormat = patchFormat,
@@ -1512,7 +1325,6 @@ class UnifiedWorkspaceToolExecutor(
             offsetBytes = offsetBytes,
             replaceExisting = replace,
             expectedVersion = expected,
-            capability = kind.capability,
             search = search,
             canonicalArguments = canonicalJson(root).ifEmpty { "{}" },
         )
@@ -1644,24 +1456,6 @@ class UnifiedWorkspaceToolExecutor(
         is ApprovalDecision.Rejected -> ToolResult.Failure(ToolError(code))
     }
 
-    private fun ApprovalDecision.toToolExecution(): ToolExecution = when (this) {
-        is ApprovalDecision.Approved -> ToolExecution.Failed(ToolError(ToolErrorCode.INTERNAL_ERROR))
-        is ApprovalDecision.Required -> ToolExecution.Failed(ToolError(ToolErrorCode.APPROVAL_REQUIRED))
-        is ApprovalDecision.Rejected -> ToolExecution.Failed(ToolError(code))
-    }
-
-    private fun ToolResult.toToolExecution(): ToolExecution = when (this) {
-        is ToolResult.Value -> ToolExecution.Value(json)
-        is ToolResult.Denied -> ToolExecution.Failed(ToolError(reason.toToolErrorCode(ToolErrorCode.CAPABILITY_DENIED)))
-        is ToolResult.Invalid -> ToolExecution.Failed(ToolError(reason.toToolErrorCode(ToolErrorCode.INVALID_REQUEST)))
-        is ToolResult.Failure -> ToolExecution.Failed(error)
-        is ToolResult.UnknownOutcome -> ToolExecution.Unknown(ToolError(reason.toToolErrorCode(ToolErrorCode.UNKNOWN_OUTCOME)))
-        ToolResult.NeedsApproval -> ToolExecution.Failed(ToolError(ToolErrorCode.APPROVAL_REQUIRED))
-    }
-
-    private fun String.toToolErrorCode(fallback: ToolErrorCode): ToolErrorCode =
-        runCatching { ToolErrorCode.valueOf(this) }.getOrDefault(fallback)
-
     private fun ToolExecution.toLegacyResult(): ToolResult = when (this) {
         is ToolExecution.Value -> ToolResult.Value(json)
         is ToolExecution.Failed -> when {
@@ -1671,33 +1465,9 @@ class UnifiedWorkspaceToolExecutor(
         is ToolExecution.Unknown -> ToolResult.UnknownOutcome(error.code.name)
     }
 
-    private fun modelKey(context: ToolExecutionContext, callId: String): ModelCallKey = ModelCallKey(
-        agentId = context.agentId,
-        snapshotId = context.snapshotId,
-        sessionIdentity = context.sessionIdentity,
-        taskIdentity = context.taskIdentity,
-        callId = callId,
-    )
-
     private fun resolveRequestId(callId: String): String = synchronized(lock) {
-        val matches = requestByModelCall.asSequence()
-            .filter { (key, _) -> key.callId == callId }
-            .map { it.value }
-            .distinct()
-            .toList()
-        if (matches.size == 1) matches.single() else callId
+        requestByModelCall.resolveRequestId(callId)
     }
-
-    private fun toLegacySpec(spec: ToolSpec): LegacyToolSpec = LegacyToolSpec(
-        name = spec.name,
-        description = spec.description,
-        parametersJson = spec.inputSchema,
-        capability = spec.capability?.value.orEmpty(),
-        sideEffect = spec.sideEffect,
-        schemaVersion = spec.schemaVersion,
-    )
-
-    private fun CapabilityId.toLegacyString(): String = value
 
     private fun normalizeOutputPath(path: String): String =
         if (path == ".") "" else WorkspacePathPolicy.normalize(path, false)
@@ -1738,7 +1508,6 @@ class UnifiedWorkspaceToolExecutor(
         val kind: WorkspaceOperation,
         val workspaceId: String,
         val relativePath: String,
-        val destinationPath: String?,
         val text: String?,
         val patch: String?,
         val patchFormat: WorkspacePatchFormat,
@@ -1748,160 +1517,11 @@ class UnifiedWorkspaceToolExecutor(
         val offsetBytes: Long,
         val replaceExisting: Boolean,
         val expectedVersion: Long?,
-        val capability: CapabilityId,
         val search: WorkspaceSearchRequest?,
         val canonicalArguments: String,
     ) {
+        val capability: CapabilityId get() = kind.capability
         val isMutation: Boolean get() = kind.isMutation
-    }
-
-    private data class ModelCallKey(
-        val agentId: String,
-        val snapshotId: String,
-        val sessionIdentity: String,
-        val taskIdentity: String,
-        val callId: String,
-    )
-
-    private fun operationForTool(name: String): WorkspaceOperation? = when (name) {
-        WORKSPACE_LIST -> WorkspaceOperation.WORKSPACE_LIST
-        FILE_LIST -> WorkspaceOperation.LIST
-        FILE_STAT -> WorkspaceOperation.STAT
-        FILE_READ_TEXT -> WorkspaceOperation.READ
-        FILE_WRITE_TEXT -> WorkspaceOperation.WRITE
-        FILE_CREATE_DIRECTORY -> WorkspaceOperation.CREATE_DIRECTORY
-        FILE_DELETE -> WorkspaceOperation.DELETE
-        FILE_GLOB -> WorkspaceOperation.GLOB
-        FILE_GREP -> WorkspaceOperation.GREP
-        // FILE_MOVE intentionally has no exposure mapping: file_move is never
-        // produced in the model schema.  Its parse/dispatch code stays only to
-        // fail closed for stale schemas.
-        FILE_APPLY_PATCH -> WorkspaceOperation.APPLY_PATCH
-        else -> null
-    }
-
-    /** Inverse of [operationForTool]; `file_move` keeps its retired input-only name. */
-    private fun WorkspaceOperation.modelToolName(): String = when (this) {
-        WorkspaceOperation.WORKSPACE_LIST -> WORKSPACE_LIST
-        WorkspaceOperation.LIST -> FILE_LIST
-        WorkspaceOperation.STAT -> FILE_STAT
-        WorkspaceOperation.READ -> FILE_READ_TEXT
-        WorkspaceOperation.WRITE -> FILE_WRITE_TEXT
-        WorkspaceOperation.CREATE_DIRECTORY -> FILE_CREATE_DIRECTORY
-        WorkspaceOperation.DELETE -> FILE_DELETE
-        WorkspaceOperation.MOVE -> FILE_MOVE
-        WorkspaceOperation.GLOB -> FILE_GLOB
-        WorkspaceOperation.GREP -> FILE_GREP
-        WorkspaceOperation.APPLY_PATCH -> FILE_APPLY_PATCH
-    }
-
-    /**
-     * Closed operation set for this executor.
-     *
-     * [requiredOperations] lets one model-visible operation need more than one
-     * capability on the exact same path.  Recursive search is the only composite
-     * operation: `file_grep` must not run with only one half of `file.list` +
-     * `file.read_text`, and it is never satisfied by grant scopes that only
-     * intersect somewhere below the requested root.  The dependencies are
-     * resolved in a property getter rather than an enum-initializer argument so
-     * no entry ever depends on another entry's initialization order.
-     */
-    private enum class WorkspaceOperation(
-        val capability: CapabilityId,
-        val isMutation: Boolean,
-        val backendMethod: String,
-        val requestType: Class<*>,
-        val auditOperation: WorkspaceAuditOperation,
-    ) {
-        WORKSPACE_LIST(
-            CapabilityId(CapabilityId.WORKSPACE_ENUMERATE), false,
-            "list", WorkspaceListRequest::class.java, WorkspaceAuditOperation.ENUMERATE,
-        ),
-        LIST(
-            CapabilityId(CapabilityId.FILE_LIST), false,
-            "list", WorkspaceListRequest::class.java, WorkspaceAuditOperation.LIST,
-        ),
-        STAT(
-            CapabilityId(CapabilityId.FILE_STAT), false,
-            "stat", WorkspaceStatRequest::class.java, WorkspaceAuditOperation.STAT,
-        ),
-        READ(
-            CapabilityId(CapabilityId.FILE_READ_TEXT), false,
-            "readText", WorkspaceReadTextRequest::class.java, WorkspaceAuditOperation.READ,
-        ),
-        WRITE(
-            CapabilityId(CapabilityId.FILE_WRITE_TEXT), true,
-            "writeText", WorkspaceWriteTextRequest::class.java, WorkspaceAuditOperation.WRITE,
-        ),
-        CREATE_DIRECTORY(
-            CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY), true,
-            "createDirectory", WorkspaceCreateDirectoryRequest::class.java, WorkspaceAuditOperation.MKDIR,
-        ),
-        DELETE(
-            CapabilityId(CapabilityId.FILE_DELETE), true,
-            "delete", WorkspaceDeleteRequest::class.java, WorkspaceAuditOperation.DELETE,
-        ),
-        MOVE(
-            CapabilityId(CapabilityId.FILE_MOVE), true,
-            "move", WorkspaceMoveRequest::class.java, WorkspaceAuditOperation.MOVE,
-        ),
-        APPLY_PATCH(
-            CapabilityId("file.apply_patch"), true,
-            "applyPatch", WorkspaceApplyPatchRequest::class.java, WorkspaceAuditOperation.WRITE,
-        ),
-        /** Recursive bounded glob: enumerate the subtree with `file.list`. */
-        GLOB(
-            CapabilityId(CapabilityId.FILE_LIST), false,
-            "list", WorkspaceListRequest::class.java, WorkspaceAuditOperation.LIST,
-        ),
-        /**
-         * Recursive bounded literal search: enumerate with `file.list` and read
-         * with `file.read_text`. Both must hold on the whole searched subtree.
-         */
-        GREP(
-            CapabilityId(CapabilityId.FILE_READ_TEXT), false,
-            "readText", WorkspaceReadTextRequest::class.java, WorkspaceAuditOperation.READ,
-        ),
-        ;
-
-        /** This operation plus every capability it composites. */
-        val requiredOperations: List<WorkspaceOperation>
-            get() = when (this) {
-                GLOB -> listOf(LIST)
-                GREP -> listOf(LIST, READ)
-                else -> listOf(this)
-            }
-
-        /** True for the bounded recursive search operations. */
-        val isSearch: Boolean
-            get() = this == GLOB || this == GREP
-
-        /**
-         * Operations whose result may be disclosed through the deferred channel.
-         *
-         * Deferred disclosure is the first/continued page of a read-only result
-         * this execution already produced; it must never become a way to publish
-         * a mutation outcome (or a workspace enumeration) that the ordinary
-         * replay contract would refuse.
-         */
-        val isReadOnlyDisclosable: Boolean
-            get() = when (this) {
-                WORKSPACE_LIST, LIST, STAT, READ, GLOB, GREP -> true
-                else -> false
-            }
-    }
-
-    private fun allowedKeys(kind: WorkspaceOperation): Set<String> = when (kind) {
-        WorkspaceOperation.WORKSPACE_LIST -> emptySet()
-        WorkspaceOperation.LIST -> setOf("workspaceId", "workspace_id", "relativePath", "relative_path", "maxEntries", "max_entries", "cursor")
-        WorkspaceOperation.STAT -> setOf("workspaceId", "workspace_id", "relativePath", "relative_path")
-        WorkspaceOperation.READ -> setOf("workspaceId", "workspace_id", "relativePath", "relative_path", "maxBytes", "max_bytes", "offsetBytes", "offset_bytes")
-        WorkspaceOperation.WRITE -> setOf("workspaceId", "workspace_id", "relativePath", "relative_path", "text", "replace", "expectedVersion", "expected_version")
-        WorkspaceOperation.CREATE_DIRECTORY, WorkspaceOperation.DELETE -> setOf("workspaceId", "workspace_id", "relativePath", "relative_path", "expectedVersion", "expected_version")
-        WorkspaceOperation.MOVE -> setOf("workspaceId", "workspace_id", "relativePath", "relative_path", "destinationRelativePath", "destination_relative_path", "expectedVersion", "expected_version")
-        WorkspaceOperation.APPLY_PATCH -> setOf("workspaceId", "workspace_id", "relativePath", "relative_path", "patch", "expectedVersion", "expected_version", "format")
-        WorkspaceOperation.GLOB -> WorkspaceSearchProtocol.globKeys
-        WorkspaceOperation.GREP -> WorkspaceSearchProtocol.grepKeys
     }
 
     companion object {
@@ -1915,33 +1535,18 @@ class UnifiedWorkspaceToolExecutor(
             "maxMillis" to "max_millis",
         )
         const val TOOL_SCHEMA_VERSION = ModelToolArguments.WORKSPACE_SCHEMA_VERSION
-        const val WORKSPACE_LIST = "workspace_list"
-        const val FILE_LIST = "file_list"
-        const val FILE_STAT = "file_stat"
-        const val FILE_READ_TEXT = "file_read_text"
-        const val FILE_WRITE_TEXT = "file_write_text"
-        const val FILE_CREATE_DIRECTORY = "file_create_directory"
-        const val FILE_DELETE = "file_delete"
-        /**
-         * Bounded recursive glob over an authorized subtree.  Enumerate-only: it
-         * needs `file.list` on the whole searched subtree.
-         */
-        const val FILE_GLOB = "file_glob"
-        /**
-         * Bounded recursive literal text search.  Composite: it needs both
-         * `file.list` and `file.read_text` on the whole searched subtree, and is
-         * never a regular-expression engine.
-         */
-        const val FILE_GREP = "file_grep"
-        /**
-         * Input-only legacy name.  It is absent from [TOOL_SPECS]; a stale
-         * model schema that still calls it fails closed with
-         * [ToolErrorCode.OPERATION_UNAVAILABLE] before any backend is touched.
-         */
-        const val FILE_MOVE = "file_move"
-        const val FILE_APPLY_PATCH = "file_apply_patch"
-        /** Compatibility alias accepted on input; only [FILE_APPLY_PATCH] is exposed. */
-        const val APPLY_PATCH = "apply_patch"
+        const val WORKSPACE_LIST = WorkspaceToolNames.WORKSPACE_LIST
+        const val FILE_LIST = WorkspaceToolNames.FILE_LIST
+        const val FILE_STAT = WorkspaceToolNames.FILE_STAT
+        const val FILE_READ_TEXT = WorkspaceToolNames.FILE_READ_TEXT
+        const val FILE_WRITE_TEXT = WorkspaceToolNames.FILE_WRITE_TEXT
+        const val FILE_CREATE_DIRECTORY = WorkspaceToolNames.FILE_CREATE_DIRECTORY
+        const val FILE_DELETE = WorkspaceToolNames.FILE_DELETE
+        const val FILE_GLOB = WorkspaceToolNames.FILE_GLOB
+        const val FILE_GREP = WorkspaceToolNames.FILE_GREP
+        const val FILE_MOVE = WorkspaceToolNames.FILE_MOVE
+        const val FILE_APPLY_PATCH = WorkspaceToolNames.FILE_APPLY_PATCH
+        const val APPLY_PATCH = WorkspaceToolNames.APPLY_PATCH
         const val MAX_READ_BYTES = 256 * 1024
         const val MAX_WRITE_BYTES = 256 * 1024
         const val MAX_PATCH_BYTES = MAX_WRITE_BYTES
@@ -1957,11 +1562,6 @@ class UnifiedWorkspaceToolExecutor(
          * never satisfy it.
          */
         private const val UNSCOPED_GRANT_PROBE_PATH = ""
-        private val TOOL_NAMES = setOf(
-            WORKSPACE_LIST, FILE_LIST, FILE_STAT, FILE_READ_TEXT, FILE_WRITE_TEXT,
-            FILE_CREATE_DIRECTORY, FILE_DELETE, FILE_MOVE, FILE_GLOB, FILE_GREP,
-            FILE_APPLY_PATCH, APPLY_PATCH,
-        )
 
         /** Typed fail-closed answer for a stale schema that still names [FILE_MOVE]. */
         private val FILE_MOVE_UNAVAILABLE = ToolError(
@@ -1969,27 +1569,6 @@ class UnifiedWorkspaceToolExecutor(
             message = "file_move is not available in this run; use the supported explicit " +
                 "steps instead: copy the entry first (file_copy where exposed, otherwise " +
                 "file_read_text + file_write_text), then file_delete the source.",
-        )
-
-        /**
-         * The model-visible schema.  The bounded-search entries come from
-         * [WorkspaceSearchProtocol], which owns their schema text, argument
-         * validation and result rendering.
-         */
-        private val TOOL_SPECS = listOf(
-            WorkspaceDiscovery.spec,
-            ToolSpec(FILE_LIST, "List entries in an authorized workspace.", ModelToolArguments.workspaceSchema(FILE_LIST), CapabilityId(CapabilityId.FILE_LIST), false, TOOL_SCHEMA_VERSION),
-            WorkspaceSearchProtocol.globSpec,
-            ToolSpec(FILE_STAT, "Read metadata for an authorized workspace entry.", ModelToolArguments.workspaceSchema(FILE_STAT), CapabilityId(CapabilityId.FILE_STAT), false, TOOL_SCHEMA_VERSION),
-            ToolSpec(FILE_READ_TEXT, "Read a bounded UTF-8 chunk from an authorized workspace.", ModelToolArguments.workspaceSchema(FILE_READ_TEXT), CapabilityId(CapabilityId.FILE_READ_TEXT), false, TOOL_SCHEMA_VERSION),
-            WorkspaceSearchProtocol.grepSpec,
-            ToolSpec(FILE_WRITE_TEXT, "Create or replace UTF-8 text in an authorized workspace.", ModelToolArguments.workspaceSchema(FILE_WRITE_TEXT), CapabilityId(CapabilityId.FILE_WRITE_TEXT), true, TOOL_SCHEMA_VERSION),
-            ToolSpec(FILE_CREATE_DIRECTORY, "Create a directory in an authorized workspace.", ModelToolArguments.workspaceSchema(FILE_CREATE_DIRECTORY), CapabilityId(CapabilityId.FILE_CREATE_DIRECTORY), true, TOOL_SCHEMA_VERSION),
-            ToolSpec(FILE_DELETE, "Delete one authorized workspace file or empty directory.", ModelToolArguments.workspaceSchema(FILE_DELETE), CapabilityId(CapabilityId.FILE_DELETE), true, TOOL_SCHEMA_VERSION),
-            // file_move has no model-visible spec: the Android workspace
-            // backends cannot honor a move.  Supported explicit steps are a
-            // copy followed by file_delete; stale calls fail closed above.
-            ToolSpec(FILE_APPLY_PATCH, "Apply a conditional text patch in an authorized workspace.", ModelToolArguments.workspaceSchema(FILE_APPLY_PATCH), CapabilityId("file.apply_patch"), true, TOOL_SCHEMA_VERSION),
         )
 
         private fun canonicalJson(root: JsonObject): String = root.toSortedMap().entries.joinToString(";") { (key, value) -> "$key=$value" }

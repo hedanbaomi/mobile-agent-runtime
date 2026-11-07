@@ -60,7 +60,8 @@ internal fun TrpgTrackEditor(
     var localError by remember(initial.id) { mutableStateOf<String?>(null) }
     val conflict = externalNewer || storyEditorSubmitRevision(expectedRevision, acceptedRevision) == null
     val kindLabel = storyTrackKindLabel(initial.kind, chinese)
-    StoryEditorFrame(
+    TrpgEditorFrame(
+        subTagPrefix = "trpg.story.editor",
         tag = "trpg.story.track.editor",
         title = if (initial.title.isBlank()) (if (chinese) "新建$kindLabel" else "New ${kindLabel.lowercase()}") else
             (if (chinese) "编辑$kindLabel" else "Edit ${kindLabel.lowercase()}"),
@@ -137,6 +138,6 @@ internal fun TrpgTrackEditor(
                 }
             }
         }
-        VisibilityChips(visibility, enabled && !submitting, chinese) { visibility = it }
+        TrpgVisibilityChips(visibility, enabled && !submitting, chinese) { visibility = it }
     }
 }

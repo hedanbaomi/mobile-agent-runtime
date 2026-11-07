@@ -7,12 +7,19 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
+import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -23,6 +30,8 @@ import runtime.mobileagent.AgentsViewModel
 import runtime.mobileagent.ChatViewModel
 import runtime.mobileagent.MobileAgentApp
 import runtime.mobileagent.WorkspacePickerTarget
+import runtime.mobileagent.data.AuthorityPolicyRepository
+import runtime.mobileagent.data.CapabilityGrantRepository
 import runtime.mobileagent.data.WorkspaceRepository
 import runtime.mobileagent.domain.AgentProfile
 import runtime.mobileagent.domain.AgentWorkspaceDefault
@@ -59,32 +68,6 @@ import runtime.mobileagent.tooling.WorkspaceRegistry
  */
 @RunWith(AndroidJUnit4::class)
 class RuntimeThreadWorkspaceDeviceTest {
-    @Test
-    fun canonicalDefaultGrantPlanTracksReadOnlyBackendAndNeverIncludesShell() {
-        val readOnly = setOf(
-            CapabilityId(CapabilityId.WORKSPACE_ENUMERATE),
-            CapabilityId(CapabilityId.FILE_LIST),
-            CapabilityId(CapabilityId.FILE_STAT),
-            CapabilityId(CapabilityId.FILE_READ_TEXT),
-        )
-        assertEquals(readOnly, canonicalDefaultWorkspaceGrantCapabilities(readOnly))
-        val writable = readOnly + setOf(
-            CapabilityId(CapabilityId.FILE_WRITE_TEXT),
-            CapabilityId(CapabilityId.FILE_DELETE),
-            CapabilityId("file.apply_patch"),
-        )
-        assertEquals(readOnly, canonicalDefaultWorkspaceGrantCapabilities(writable))
-        assertEquals(writable, canonicalFullDeviceWorkspaceGrantCapabilities(writable))
-        assertEquals(
-            readOnly,
-            canonicalDefaultWorkspaceGrantCapabilities(
-                readOnly + setOf(
-                    CapabilityId(CapabilityId.SHELL_EXECUTE),
-                    CapabilityId("file.future_mutation"),
-                ),
-            ),
-        )
-    }
 
     @Test
     fun setAgentDefaultOnReadOnlyBackendPersistsOnlyReadCapabilities() = runBlocking {
@@ -477,6 +460,15 @@ class RuntimeThreadWorkspaceDeviceTest {
             RuntimeIntegration.INTERNAL_WORKSPACE_ID,
             threadPort.agentWorkspaceDefault(fixture.agentId)?.workspaceId,
         )
+
+        val libraryId = "library-draft-${fixture.suffix}"
+        runtime.registerAppPrivateWorkspace(libraryId, File(fixture.app.filesDir, libraryId).toPath())
+        val libraryOnly = runtime.commitDraft(
+            WorkspaceDraft(libraryId, "Library directory", setAsAgentDefault = false), fixture.agentId,
+        ) as WorkspaceAccessResult.Success
+        assertTrue(libraryOnly.grants.isNotEmpty())
+        assertTrue(container.agentGrantPort.listGrants(fixture.agentId).any { it.workspaceId == libraryId })
+        assertEquals(RuntimeIntegration.INTERNAL_WORKSPACE_ID, threadPort.agentWorkspaceDefault(fixture.agentId)?.workspaceId)
     }
 
     @Test
@@ -661,6 +653,52 @@ class RuntimeThreadWorkspaceDeviceTest {
             .map { it.grantId }.toSet()
         assertTrue(scoped.grantId in currentIds)
         assertTrue(once.grantId in currentIds)
+    }
+
+    @Test
+    fun renewalHonorsTheLatestWholeDirectoryDecisionAndItsExpiry() {
+        val fixture = fixture()
+        val container = fixture.app.container
+        val port = container.runtimeIntegration.workspaceAccessPort
+        val workspaceId = RuntimeIntegration.INTERNAL_WORKSPACE_ID
+        val store = CapabilityGrantRepository(container.db)
+        val policy = AuthorityPolicyRepository(container.db)
+        val rollback = object : RuntimeException() {}
+
+        // Restore the shared policy and all fixture rows together, including after a failed assertion.
+        assertSame(rollback, assertThrows(RuntimeException::class.java) {
+            container.db.transaction {
+                val old = policy.getPolicy()
+                val latest = policy.updatePolicy(old.policyVersion, old.selectedAuthority, old.dangerousMode)
+                val current = policy.updatePolicy(latest.policyVersion, latest.selectedAuthority, latest.dangerousMode)
+                val write = store.save(CapabilityGrant(
+                    grantId = "old-write-${fixture.suffix}", agentId = fixture.agentId, workspaceId = workspaceId,
+                    capability = CapabilityId(CapabilityId.FILE_WRITE_TEXT), policyVersion = old.policyVersion, createdAt = fixture.now,
+                ))
+                val later = store.save(write.copy(grantId = "new-write-${fixture.suffix}", policyVersion = latest.policyVersion))
+                store.revoke(later.grantId, later.revision)
+                val before = store.forAgent(fixture.agentId, includeRevoked = true)
+                assertEquals(WorkspaceAccessResult.Failure(WorkspaceAccessErrorCode.CAPABILITY_DENIED),
+                    port.renewExistingWorkspaceGrants(fixture.agentId, workspaceId))
+                assertEquals(before, store.forAgent(fixture.agentId, includeRevoked = true))
+
+                val read = store.save(later.copy(
+                    grantId = "read-${fixture.suffix}", capability = CapabilityId(CapabilityId.FILE_READ_TEXT),
+                    expiresAt = Instant.now().plusSeconds(3600).toString(),
+                ))
+                val scoped = store.save(later.copy(grantId = "path-${fixture.suffix}", pathScope = "books", policyVersion = current.policyVersion))
+                val result = port.renewExistingWorkspaceGrants(fixture.agentId, workspaceId) as WorkspaceAccessResult.Success
+                val renewed = requireNotNull(store.get(result.grants.single().grantId))
+                assertEquals(read.capability, renewed.capability)
+                assertEquals(read.expiresAt, renewed.expiresAt)
+                assertEquals(current.policyVersion, renewed.policyVersion)
+                assertTrue(store.get(read.grantId)!!.revoked)
+                assertEquals(write, store.get(write.grantId))
+                assertEquals(scoped, store.get(scoped.grantId))
+                assertEquals(result.grants, (port.renewExistingWorkspaceGrants(fixture.agentId, workspaceId) as WorkspaceAccessResult.Success).grants)
+                throw rollback
+            }
+        })
     }
 
     @Test
@@ -938,6 +976,44 @@ class RuntimeThreadWorkspaceDeviceTest {
     }
 
     @Test
+    fun simultaneousFirstSelectionsGrantOnlyTheBoundWorkspace() = runBlocking {
+        val fixture = fixture()
+        val container = fixture.app.container
+        val runtime = container.runtimeIntegration
+        val snapshot = runtime.createSnapshotWithWorkspace(
+            agentId = fixture.agentId, workspaceId = null,
+            snapshotId = "snapshot-race-${fixture.suffix}", at = fixture.now,
+        )
+        val thread = container.conversations.create(
+            snapshotId = snapshot.id, title = "concurrent selection",
+            conversationId = "thread-race-${fixture.suffix}", at = fixture.now,
+        )
+        val target = WorkspacePickerTarget(agentId = fixture.agentId, threadId = thread.id)
+        val workspaces = listOf("first", "second").map { label ->
+            val id = "race-$label-${fixture.suffix}"
+            runtime.registerAppPrivateWorkspace(id, File(fixture.app.filesDir, id).toPath())
+        }
+        val start = CyclicBarrier(workspaces.size)
+        val results = workspaces.map { workspace ->
+            async(Dispatchers.IO) {
+                start.await(5, TimeUnit.SECONDS)
+                runtime.useRecentWorkspace(workspace.id, target)
+            }
+        }.awaitAll()
+        val winner = results.filterIsInstance<WorkspaceAccessResult.Success>().single().workspace.workspaceId
+        val pending = results.filterIsInstance<WorkspaceAccessResult.NewThreadRequired>().single()
+        assertEquals(winner, pending.currentWorkspaceId)
+        assertEquals(workspaces.single { it.id != winner }.id, pending.requestedWorkspaceId)
+        assertTrue("The losing selection still needs consent", pending.requiresGrantCommit)
+        assertTrue(pending.grants.isEmpty())
+        assertEquals(winner, container.threadWorkspacePort.conversationWorkspaceBinding(thread.id)?.workspaceId)
+        val grants = container.agentGrantPort.listGrants(fixture.agentId, includeRevoked = true)
+        assertTrue(grants.any { it.workspaceId == winner })
+        assertTrue(grants.none { it.workspaceId == pending.requestedWorkspaceId })
+        assertNull(container.threadWorkspacePort.agentWorkspaceDefault(fixture.agentId))
+    }
+
+    @Test
     fun cancelDoesNotPersistDurableGrant() = runBlocking {
         val fixture = fixture()
         val container = fixture.app.container
@@ -995,6 +1071,17 @@ class RuntimeThreadWorkspaceDeviceTest {
         // No snapshot or conversation created for W2
         assertEquals(initialSnapshots, container.agents.listSnapshots(fixture.agentId).size)
         assertEquals(initialConversations, container.conversations.list().size)
+
+        // Switching an already-bound thread can be previewed even when the candidate is offline.
+        val offline = saveWorkspace(WorkspaceRepository(container.db), "offline-${fixture.suffix}")
+        val preview = runtime.useRecentWorkspace(offline.id, WorkspacePickerTarget(fixture.agentId, conversation.id))
+            as WorkspaceAccessResult.NewThreadRequired
+        assertTrue(preview.requiresGrantCommit)
+        assertEquals(offline.id, preview.requestedWorkspaceId)
+        assertEquals(RuntimeIntegration.INTERNAL_WORKSPACE_ID, preview.currentWorkspaceId)
+        val unavailable = runtime.useRecentWorkspace(offline.id, WorkspacePickerTarget(agentId = fixture.agentId))
+        assertEquals(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE, (unavailable as WorkspaceAccessResult.Failure).code)
+        assertTrue(container.agentGrantPort.listGrants(fixture.agentId).none { it.workspaceId == offline.id })
     }
 
     @Test

@@ -317,17 +317,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun forgetWiredAdb() {
         clearWiredPairing(notifyPort = true, status = "CANCELLED")
-        viewModelScope.launch {
-            try {
-                val result = withContext(Dispatchers.IO) { authorityPort.revokeWiredAdb() }
-                authorityState.value = result.snapshot
-                error.value = if (result.accepted) null else authorityReason(result.reason)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (failure: Exception) {
-                error.value = safeAuthorityError(failure)
-            }
-        }
+        authorityActions.revokeWiredAdb()
     }
 
     /**

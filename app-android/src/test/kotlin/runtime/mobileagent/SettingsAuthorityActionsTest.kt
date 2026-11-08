@@ -15,6 +15,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -22,10 +23,94 @@ import runtime.mobileagent.domain.Authority
 import runtime.mobileagent.domain.DangerousMode
 
 /**
- * Real-thread regressions for the extracted Settings authority actions. Two named single-thread
- * executors stand in for IO and Main; no coroutines-test dependency is used.
+ * Real-thread regressions for the extracted Settings authority actions. A two-thread IO pool
+ * and a single Main thread ensure the executor cannot accidentally serialize ungated actions.
  */
 class SettingsAuthorityActionsTest {
+    @Test
+    fun latePassiveRefreshDoesNotClearNewerForegroundError() {
+        val port = FakePort().apply { blockRefresh = true }
+        runActions(port) { actions, recorder, onMain ->
+            onMain { actions.refreshAuthorities() }
+            assertTrue(port.refreshEntered.await(5, TimeUnit.SECONDS))
+            // Reproduce the old ViewModel's independent revoke callback while refresh is blocked.
+            onMain { recorder.lastError.set("revoke failed") }
+            port.refreshRelease.countDown()
+            awaitUntil("late refresh snapshot") { recorder.snapshots.get() == 1 }
+            onMain { assertEquals("revoke failed", recorder.lastError.get()) }
+        }
+    }
+
+    @Test
+    fun revokeWaitsForEarlierRefreshAndPublishesItsFailureLast() {
+        val port = FakePort().apply { blockRefresh = true; failRevoke = true }
+        runActions(port) { actions, recorder, onMain ->
+            onMain { actions.refreshAuthorities() }
+            assertTrue(port.refreshEntered.await(5, TimeUnit.SECONDS))
+            onMain { actions.revokeWiredAdb() }
+            assertFalse(port.revokeEntered.await(100, TimeUnit.MILLISECONDS), "revoke must not overlap refresh")
+            assertEquals(0, port.revokeCalls.get(), "revoke must share the refresh gate")
+            port.refreshRelease.countDown()
+            awaitUntil("refresh then failed revoke") { recorder.snapshots.get() == 2 }
+            onMain {
+                assertEquals(listOf("refresh", "refresh-complete", "revoke"), port.authorityCalls.toList())
+                assertEquals("reason:RESIDENT_ADB_REVOKE_FAILED", recorder.lastError.get())
+                assertEquals(IO_THREAD, port.revokeThread.get())
+                assertEquals(MAIN_THREAD, recorder.errorThread.get())
+            }
+        }
+    }
+
+    @Test
+    fun queuedRefreshRetainsRevokeFailureAndExplicitRetryCanClearIt() {
+        val port = FakePort().apply { blockRevoke = true; failRevoke = true }
+        runActions(port) { actions, recorder, onMain ->
+            onMain { actions.revokeWiredAdb() }
+            assertTrue(port.revokeEntered.await(5, TimeUnit.SECONDS))
+            onMain {
+                actions.revokeWiredAdb() // A repeated click must not submit another revoke.
+                actions.refreshAuthorities()
+                actions.refreshAuthorities()
+            }
+            assertEquals(0, port.refreshCalls.get(), "refresh must wait for revoke")
+            port.revokeRelease.countDown()
+            awaitUntil("failed revoke and coalesced refresh") { recorder.snapshots.get() == 2 }
+            onMain {
+                assertEquals(1, port.revokeCalls.get())
+                assertEquals(1, port.refreshCalls.get())
+                assertEquals("reason:RESIDENT_ADB_REVOKE_FAILED", recorder.lastError.get())
+                actions.refreshAuthorities()
+            }
+            awaitUntil("subsequent passive refresh") { recorder.snapshots.get() == 3 }
+            onMain {
+                assertEquals("reason:RESIDENT_ADB_REVOKE_FAILED", recorder.lastError.get())
+                port.failRevoke = false
+                actions.revokeWiredAdb()
+            }
+            awaitUntil("explicit successful retry") { recorder.snapshots.get() == 4 }
+            onMain { assertNull(recorder.lastError.get()) }
+        }
+    }
+
+    @Test
+    fun thrownRevokeFailureSurvivesQueuedRefreshAndReleasesTheGate() {
+        val port = FakePort().apply { blockRevoke = true; throwRevoke = true }
+        runActions(port) { actions, recorder, onMain ->
+            onMain { actions.revokeWiredAdb() }
+            assertTrue(port.revokeEntered.await(5, TimeUnit.SECONDS))
+            onMain { actions.refreshAuthorities() }
+            port.revokeRelease.countDown()
+            awaitUntil("exception followed by queued refresh") { recorder.snapshots.get() == 1 }
+            onMain {
+                assertEquals("mapped:revoke failed", recorder.lastError.get())
+                port.throwRevoke = false
+                actions.revokeWiredAdb()
+            }
+            awaitUntil("retry after exception") { recorder.snapshots.get() == 2 }
+            onMain { assertNull(recorder.lastError.get()) }
+        }
+    }
+
     @Test
     fun blockingHandshakeRunsOnIoWhileSnapshotAndFactsCallbacksRunOnMain() {
         val port = FakePort().apply { blockSelect = true }
@@ -189,7 +274,7 @@ class SettingsAuthorityActionsTest {
         port: FakePort,
         block: (SettingsAuthorityActions, Recorder, (() -> Unit) -> Unit) -> Unit,
     ) {
-        val ioExecutor = newExecutor(IO_THREAD)
+        val ioExecutor = newExecutor(IO_THREAD, threads = 2)
         val mainExecutor = newExecutor(MAIN_THREAD)
         val io = ioExecutor.asCoroutineDispatcher()
         val main = mainExecutor.asCoroutineDispatcher()
@@ -230,7 +315,7 @@ class SettingsAuthorityActionsTest {
         }
     }
 
-    private fun newExecutor(name: String): ExecutorService = Executors.newSingleThreadExecutor { runnable ->
+    private fun newExecutor(name: String, threads: Int = 1): ExecutorService = Executors.newFixedThreadPool(threads) { runnable ->
         Thread(runnable, name).apply { isDaemon = true }
     }
 
@@ -259,6 +344,17 @@ class SettingsAuthorityActionsTest {
         @Volatile var blockSelect = false
         @Volatile var failSelect = false
         @Volatile var rootReady = false
+        @Volatile var blockRefresh = false
+        @Volatile var blockRevoke = false
+        @Volatile var failRevoke = false
+        @Volatile var throwRevoke = false
+        val refreshEntered = CountDownLatch(1)
+        val refreshRelease = CountDownLatch(1)
+        val revokeEntered = CountDownLatch(1)
+        val revokeRelease = CountDownLatch(1)
+        val revokeCalls = AtomicInteger()
+        val revokeThread = AtomicReference<String>()
+        val authorityCalls = java.util.concurrent.CopyOnWriteArrayList<String>()
         val selectEntered = CountDownLatch(1)
         val selectRelease = CountDownLatch(1)
         val selectCalls = AtomicInteger()
@@ -282,7 +378,21 @@ class SettingsAuthorityActionsTest {
         override fun refresh(): SettingsAuthoritySnapshot {
             refreshThread.set(Thread.currentThread().name.substringBefore(" @coroutine#"))
             refreshCalls.incrementAndGet()
+            authorityCalls += "refresh"
+            refreshEntered.countDown()
+            if (blockRefresh) check(refreshRelease.await(5, TimeUnit.SECONDS)) { "refresh release timed out" }
+            authorityCalls += "refresh-complete"
             return snapshot()
+        }
+
+        override suspend fun revokeWiredAdb(): SettingsAuthorityMutation {
+            revokeThread.set(Thread.currentThread().name.substringBefore(" @coroutine#"))
+            revokeCalls.incrementAndGet()
+            authorityCalls += "revoke"
+            revokeEntered.countDown()
+            if (blockRevoke) check(revokeRelease.await(5, TimeUnit.SECONDS)) { "revoke release timed out" }
+            if (throwRevoke) error("revoke failed")
+            return SettingsAuthorityMutation(!failRevoke, snapshot(), if (failRevoke) "RESIDENT_ADB_REVOKE_FAILED" else null)
         }
 
         override fun selectAuthority(authority: Authority): SettingsAuthoritySnapshot {
@@ -339,6 +449,8 @@ class SettingsAuthorityActionsTest {
 
         fun releaseAll() {
             selectRelease.countDown()
+            refreshRelease.countDown()
+            revokeRelease.countDown()
         }
     }
 

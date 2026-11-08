@@ -30,6 +30,7 @@ class ExecutionAuthoritiesTest {
     @Test
     fun failedResidentRevokePreservesConfiguredStateAndReportsFailure() {
         val app = ApplicationProvider.getApplicationContext<MobileAgentApp>()
+        app.ensureHostInitialized()
         val fake = FakeSettingsAuthorityPort().apply { prepareFailedRevoke() }
         registerSettingsAuthorityPortProvider(app) { fake }
         val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
@@ -53,6 +54,45 @@ class ExecutionAuthoritiesTest {
                 assertTrue(state.error!!.contains("激活凭据已保留"))
             }
         } finally { registerSettingsAuthorityPortProvider(app, app.container) }
+    }
+
+    @Test
+    fun passiveRefreshPreservesFailedResidentRevokeError() {
+        val app = ApplicationProvider.getApplicationContext<MobileAgentApp>()
+        app.ensureHostInitialized()
+        val fake = FakeSettingsAuthorityPort().apply { prepareFailedRevoke() }
+        registerSettingsAuthorityPortProvider(app) { fake }
+        val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+        val store = androidx.lifecycle.ViewModelStore()
+        lateinit var viewModel: SettingsViewModel
+        fun awaitState(message: String, condition: () -> Boolean) {
+            val deadline = android.os.SystemClock.elapsedRealtime() + 5_000L
+            var finished = false
+            while (!finished && android.os.SystemClock.elapsedRealtime() < deadline) {
+                instrumentation.runOnMainSync { finished = condition() }
+                if (!finished) Thread.sleep(20)
+            }
+            assertTrue(message, finished)
+        }
+        try {
+            instrumentation.runOnMainSync {
+                viewModel = SettingsViewModel(app)
+                store.put("settings", viewModel)
+                viewModel.forgetWiredAdb()
+            }
+            awaitState("Revoke failure must be published before refresh") { viewModel.uiState(0).error != null }
+            instrumentation.runOnMainSync { viewModel.refreshAuthorities() }
+            // Observe publication, not merely the fake port returning on its IO thread.
+            awaitState("Passive refresh snapshot must reach the UI") { viewModel.authorityState.value.revision == 1L }
+            instrumentation.runOnMainSync {
+                val state = viewModel.uiState(0)
+                assertTrue(state.wiredAdbAuthority.configured)
+                assertTrue("Passive refresh must retain the revoke failure", state.error?.contains("激活凭据已保留") == true)
+            }
+        } finally {
+            instrumentation.runOnMainSync { store.clear() }
+            registerSettingsAuthorityPortProvider(app, app.container)
+        }
     }
 
     @Test
@@ -253,7 +293,7 @@ private class FakeSettingsAuthorityPort : SettingsAuthorityPort {
     val wiredCalls = mutableListOf<String>()
     var failWiredSelection = false
     private var failRevoke = false
-    private var current = SettingsAuthoritySnapshot(
+    @Volatile private var current = SettingsAuthoritySnapshot(
         wiredAdb = SettingsAuthorityProviderState(
             authority = Authority.WIRED_ADB,
             userIntent = AuthorityUserIntent.WIRED_ADB,
@@ -266,7 +306,7 @@ private class FakeSettingsAuthorityPort : SettingsAuthorityPort {
     )
 
     override fun snapshot(): SettingsAuthoritySnapshot = current
-    override fun refresh(): SettingsAuthoritySnapshot = current
+    override fun refresh(): SettingsAuthoritySnapshot = current.copy(revision = current.revision + 1).also { current = it }
     override fun selectAuthority(authority: Authority): SettingsAuthoritySnapshot {
         if (authority == Authority.WIRED_ADB) {
             wiredCalls += "select:${authority.name}"

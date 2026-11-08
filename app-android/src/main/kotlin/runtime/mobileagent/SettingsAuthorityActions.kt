@@ -20,6 +20,7 @@ import runtime.mobileagent.skills.tooling.PlatformGrant
  *
  * A passive refresh requested while an action is in flight is replayed once after the action,
  * so a permission callback cannot be silently lost. The gate is always cleared in `finally`.
+ * Successful passive refreshes update facts, but never dismiss an existing foreground error.
  */
 internal class SettingsAuthorityActions(
     private val scope: CoroutineScope,
@@ -35,6 +36,7 @@ internal class SettingsAuthorityActions(
     private data class Result(
         val snapshot: SettingsAuthoritySnapshot? = null,
         val error: String? = null,
+        val clearErrorOnSuccess: Boolean = true,
     )
 
     private data class PendingAction(
@@ -56,7 +58,13 @@ internal class SettingsAuthorityActions(
             refreshPending = true
             return
         }
-        performAction("refresh") { Result(snapshot = port.refresh()) }
+        performAction("refresh") { Result(snapshot = port.refresh(), clearErrorOnSuccess = false) }
+    }
+
+    /** Revoke and refresh must publish in order, including the failure snapshot. */
+    fun revokeWiredAdb() = performAction("revoke-wired-adb") {
+        val result = port.revokeWiredAdb()
+        Result(result.snapshot, if (result.accepted) null else reasonMapper(result.reason))
     }
 
     fun selectAuthority(authority: Authority) = performAction("select", "select:$authority", refreshFacts = true) {
@@ -132,7 +140,7 @@ internal class SettingsAuthorityActions(
             try {
                 val result = withContext(ioDispatcher) { action() }
                 result.snapshot?.let(onSnapshot)
-                onError(result.error)
+                if (result.error != null || result.clearErrorOnSuccess) onError(result.error)
                 if (result.error == null && refreshFacts) onFactsChanged()
             } catch (cancel: CancellationException) {
                 throw cancel

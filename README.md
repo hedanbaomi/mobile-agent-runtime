@@ -3,200 +3,211 @@
 
 # mobileAgentRuntime
 
-mobileAgentRuntime 是运行在 Android 上的 Agent 工作台。你可以接入自己的模型服务，为不同任务组合提示词、知识库、Skills 和文件权限，在手机上完成资料问答、文档处理和工具调用。
+mobileAgentRuntime 是运行在 Android 上的本地 Agent 工作台。你可以接入自己的大模型 API，按任务组合系统提示词与知识库，挂载世界书、角色卡和 Python 技能，或调用工作区与设备工具处理文档、读写代码并主持跑团（TRPG）战役。
 
-应用在设备端保存配置、会话、知识文件和检索索引，并管理上下文、执行预算与授权。模型推理由你配置的服务提供；聊天、视觉处理和 API Embedding 会向对应服务发送所需内容。默认本地 Embedding 在设备上运行。项目的公告服务独立于模型接入。
-
-本文面向已有 API 接入基础的用户，重点说明应用内的配置关系和使用流程。
-
-## 功能
-
-| 用途 | 应用提供的能力 |
-| --- | --- |
-| 多模型与多 Agent | 接入 OpenAI-compatible Chat Completions 或 OpenAI Responses，为 Agent 选择模型、提示词修订和运行预算 |
-| 资料问答 | 导入文件、文件夹或 ZIP，建立本地知识库，结合全文与向量检索返回可追溯引用 |
-| 图片与复杂文档 | 使用支持图片输入的模型处理图片、扫描页及需要视觉解释的内容，保留处理状态与视觉缺口 |
-| Skills | 导入以 `SKILL.md` 为入口的技能包；符合兼容条件的 Python 程序可在隔离运行时执行 |
-| 文件任务 | 在应用私有工作区、系统授权文件夹或已授权的特权目录中读写文件 |
-| 外部工具 | 按配置使用联网搜索、远程 HTTP MCP，以及 Shizuku / Windows 有线 ADB Companion |
-| 排障 | 查看脱敏请求预览、能力探测结果和导入进度，按需导出诊断 ZIP |
+应用在设备本地保存配置与会话历史，同时托管知识库、世界书和检索索引。默认向量化（ONNX Embedding）在手机端离线运行；聊天推理与视觉解析，以及可选的 API Embedding 和联网搜索，均直连你配置的服务商。
 
 ![mobileAgentRuntime 会话与工具架构](docs/diagrams/project-overview.png)
 
-图表由 [Archify](https://github.com/tt-a1i/archify) 生成，概括会话执行路径。知识导入的视觉处理和 API Embedding 另见下文。[图表来源与复现方式](docs/diagrams/README.md)。
+架构图由 [Archify](https://github.com/tt-a1i/archify) 生成，展示单次会话与工具调用的执行路径，复现方式见[图表说明](docs/diagrams/README.md)。
 
-## 使用
+## 功能概览
 
-### 安装与基本要求
+| 场景 | 可用能力 |
+| --- | --- |
+| 多协议模型接入 | 支持 OpenAI Chat Completions、OpenAI Responses、Google AI Studio 与 Vertex AI Express 原生接口，兼容各类 HTTPS/HTTP 反代网关 |
+| 多模态对话 | 支持发送文字与图片（单条消息最多 8 张），提供自动上下文压缩、运行预算控制、会话归档与完整 ZIP 备份 |
+| 角色卡与世界书 | 导入 Tavern v1 与 Character Card v2/v3（JSON/PNG），批量导入并管理世界书，支持关键词、正则、递归激活与离线触发测试 |
+| 跑团模式（TRPG） | 专用桌面跑团界面，内置 D&D 与 CoC 7 版数值框架、复合骰子与检定卡、团务日志、队伍背包、地点地图、检查点分支与本机氛围媒体 |
+| 本地知识库 | 导入文档、文件夹或 ZIP，对图片与扫描页执行多模态视觉解析，通过本地 SQLite FTS5 与 USearch 向量混合检索返回带出处的引用 |
+| 技能（Skills） | 导入以 `SKILL.md` 为入口的技能包，支持纯指令技能，并在 Android 隔离 CPython 3.14 运行时中执行兼容的 Python 脚本与标准库 CLI |
+| 工作区与设备工具 | 在应用私有目录、SAF 授权文件夹、ADB 特权目录或 Root 目录中读写文件、搜索代码与应用补丁，支持 Shizuku、有线常驻 ADB、Root 与无障碍辅助 |
+| 联网、MCP 与诊断 | 集成 Brave、Tavily、Exa 搜索及 DeepSeek 搜索与网页抓取，支持远程 HTTP MCP 工具绑定，提供请求检查器与脱敏诊断包导出 |
 
-- Android 8.0（API 26）及以上；正式包为 `arm64-v8a`，Debug/Review 另支持 `x86_64`。
-- 从 [GitHub Releases](https://github.com/hedanbaomi/mobile-agent-runtime/releases) 获取正式 APK，或按本文的[源码构建](#构建)生成安装包。
-- v1.0.2 起每天首次打开会检查正式更新，也可在“关于”手动检查。发现新版后点击“下载并安装”，首次按系统提示允许安装，再确认升级。旧版本请先从 Releases 手动安装 v1.0.2；详见 [更新说明](docs/APP_UPDATES.md)。
-- 准备可访问的模型端点、模型 ID 和凭据。需要图片输入或工具调用时，确认所选服务与模型支持相应协议能力。
+## 快速上手
 
-主要页面从全局侧边菜单进入：**对话、智能体、服务商、知识、技能、公告、设置、MCP、请求检查器**。手机上点左上角菜单按钮，宽屏窗口使用常驻侧栏。
+### 安装与更新
 
-Debug/Review 与正式包签名不同，首次切换前先导出并核对需要保留的数据，不能直接覆盖安装。正式版本与发布附件说明见 [发布文档](docs/RELEASING.md)。
+- **系统要求**：Android 8.0（API 26）及以上。正式发行包面向 `arm64-v8a` 设备，Debug 与 Review 构建额外包含 `x86_64` 以支持模拟器。
+- **获取安装包**：从 [GitHub Releases](https://github.com/hedanbaomi/mobile-agent-runtime/releases) 下载最新正式版 APK（当前最新稳定版为 `v1.5.0`），或参照下文[构建](#构建)章节从源码打包。
+- **应用内更新**：应用在前台运行时每小时自动检查 GitHub 正式版更新，也可在**设置 → 关于**中手动检查。点击“下载并安装”后，应用会在校验文件哈希与签名后拉起系统安装界面；更新机制详见[更新说明](docs/APP_UPDATES.md)。
 
-### 建立第一段会话
+全局导航菜单汇集了全部功能入口，包括**对话**、**智能体**、**服务商**、**知识**、**世界书**、**技能**、**公告**、**设置**、**MCP** 和**请求检查器**。手机端点击左上角菜单按钮或从侧边滑出抽屉，平板与宽屏窗口使用常驻侧栏。
 
-1. 在**服务商**中新建服务商，填写 Base URL、API 格式和凭据，再添加模型配置。先配置一个 `CHAT` 模型即可。
-2. 选择模型并运行**测试连接**。需要工具调用或图片输入时，再执行**能力探测**；探测会发出实际请求，可能产生费用。
-3. 在**智能体**中新建 Agent，选择 Chat 模型和提示词，保存配置。知识库、Skills 和工作区可以随后添加。
-4. 在**对话**中选择该 Agent，新建会话并发送消息。
-5. 需要处理自己的资料或文件时，按下文绑定知识库、Skill 或工作区，再创建使用新配置的会话。
+Debug/Review 构建与正式发行包使用不同签名。首次在两者之间切换前，请先在**设置 → 数据与备份**中导出所需数据，卸载旧包后再安装新包。发布规范与附件校验方式见[发布文档](docs/RELEASING.md)。
 
-新会话保存 Agent 配置快照。修改 Agent 的模型、提示词和资源组合，从新会话开始使用；撤销资源权限或禁用 Skill 仍会限制旧会话的后续调用。每个会话还持有自己的工作区绑定，修改 Agent 默认工作区只影响新会话。
+### 开启第一段对话
 
-### 配置模型
+1. 进入**服务商**，新建服务商并填写 API 格式、Base URL 与 API Key，接着添加一个 `CHAT` 角色的模型配置。
+2. 选中刚添加的模型，点击**测试连接**验证连通性。若后续需要使用图片输入或工具调用，可再点击**能力探测**（探测会发起一次真实请求）。
+3. 进入**智能体**，新建 Agent（日常问答与工具任务选择普通模式，桌面角色扮演选择跑团模式），选定 Chat 模型并编写系统提示词后保存。
+4. 回到**对话**页面，选择该 Agent 新建会话，即可发送文字或附图开始交流。
+5. 需要结合本地资料、世界书或文件目录时，回到智能体编辑页绑定对应资源，新建会话即可使用新配置。
 
-| API 格式 | 请求入口 | 选择条件 |
+新建会话时会保存一份当前 Agent 的配置快照。后续修改 Agent 的模型、提示词或默认工作区，只会作用于新创建的会话，不会打乱已有会话的上下文；而撤销权限、停用技能或关闭联网搜索会立即对所有会话生效。在会话列表中长按某条对话可将它归档，后续可在**设置 → 数据与备份 → 已归档的对话**中查看或恢复。
+
+## 配置服务商与模型
+
+### 协议格式与端点
+
+| API 格式 | 请求方式 | 适用服务 |
 | --- | --- | --- |
-| OpenAI-compatible | `POST /chat/completions` | 服务提供 Chat Completions 兼容接口 |
-| OpenAI Responses | `POST /responses` | 服务实际支持 Responses 接口及其输入格式和事件流 |
+| OpenAI-compatible | `POST /chat/completions` | OpenAI 及兼容 Chat Completions 协议的服务商与反代网关 |
+| OpenAI Responses | `POST /responses` | 支持 Responses 协议、对应输入格式与事件流的服务端 |
+| Google AI Studio | 原生 `generateContent` / `streamGenerateContent` | Google AI Studio 官方接口，默认地址 `https://generativelanguage.googleapis.com/v1beta` |
+| Google Vertex AI Express | 原生 `generateContent` / `streamGenerateContent` | Google Cloud Vertex Express API Key 模式，需将默认地址中的 `PROJECT_ID` 替换为实际项目 ID |
 
-Base URL 使用服务商提供的 API 前缀，例如 `https://api.example.com/v1`，不填写完整的聊天请求路径。切换 API 格式应以端点支持情况为准。
+填写 OpenAI 兼容或 Responses 地址时，输入服务商给出的 API 基础前缀（如 `https://api.example.com/v1` 或 `https://api.deepseek.com`），应用会自动拼接 `/chat/completions`、`/responses` 或 `/embeddings`，不会强行插入 `/v1`。接入 One API 或 New API、LiteLLM、CLIProxyAPI 等自建反代时，支持自定义端口与路径前缀，也可连接局域网 HTTP 地址。Google AI Studio 与 Vertex Express 走原生 Gemini 协议，直接填写 `gemini-...` 或 `google/gemini-...` 等模型名称即可，支持原生图文输入、工具调用与思考签名续轮。
 
-图片输入属于 Chat 模型的能力。若聊天或知识导入需要视觉处理，选择具备图片输入能力的 Chat 模型；为普通文本模型勾选图片能力不能使服务端获得该能力。API Embedding 使用单独的 `EMBEDDING` 模型配置。
+### 图片输入、上下文与请求检查器
 
-连接测试用于检查当前目标的基础请求，能力探测分别检查所需能力。基础连接成功后，图片或工具探测仍可能失败，也可能因超时而处于未知状态。更换端点、模型或相关配置后，应重新检查能力。
+- **聊天附图与多模态**：会话绑定的 Chat 模型开启图片能力后，点击聊天输入框旁的图片按钮即可从系统相册选择最多 8 张图片（支持 PNG/JPEG/GIF/WebP，单张不超过 2 MiB），可配文字或单独发送图片。知识库导入中的图片解析同样复用具备图片能力的 Chat 模型，API Embedding 则通过独立的 `EMBEDDING` 角色模型配置。
+- **上下文窗口与自动压缩**：上下文窗口支持自动读取服务端元数据，也可按模型规格手动指定。长对话接近输入预算、可用窗口或轮次上限时，应用会自动将早期历史压缩为可追溯摘要并继续运行，同时保留最近的上传原图与工具调用关系。
+- **输出预算与参数 JSON**：输出上限可跟随服务商默认或手动指定。额外模型参数可通过参数 JSON 传入（OpenAI 协议传入标准采样字段，Google 原生协议映射至 `generationConfig`）。
+- **请求检查器**：在侧栏打开**请求检查器**，可以查看当前会话实际发往模型的分层提示词、有效参数与已注册工具列表。检查器会自动隐去 API Key 等凭据，方便核对提示词拼接与排查超限问题。
 
-#### 上下文、输出和参数
+## 角色卡、世界书与跑团模式
 
-- **上下文窗口**可自动读取服务返回的元数据或受支持目录。无法取得可靠窗口时，按模型与服务商的实际限制手动填写；不要把“未知”当作无限窗口。
-- **输出预算**可以跟随服务商，或手动设置。手动预算应与上下文窗口和任务长度匹配。
-- **参数 JSON**用于传入模型需要的附加参数。按端点文档设置，避免同一输出限制同时使用多个字段别名。
-- **Agent 预算**限制历史输入、模型请求次数和工具循环等运行行为；可按任务调整上下文压缩策略。
+### 角色卡导入
 
-**请求检查器**用于核对有效参数、消息与工具列表。预览中的凭据会被脱敏，但消息内容仍可能包含你的资料，应在分享前检查。输入超限时，可缩短历史、减少绑定内容或调整压缩策略；单纯提高输出预算会进一步占用可用上下文。
+在**智能体**页面点击**导入角色卡**，可选择 Tavern v1 或 Character Card v2/v3 格式的 `.json` 与 `.png` 文件。预览界面会展示角色设定、格式信息与兼容性提示，你可以设置玩家称呼、切换多个开场白，并勾选是否一并导入卡内嵌的世界书。确认后会生成一份可自由编辑的 Agent 草稿，选定模型并保存即可开启对话；新建会话会自动插入所选的助手开场白。
 
-### 使用知识库
+### 世界书
 
-1. 在**知识**中新建知识库，选择文件、文件夹或 ZIP。支持 TXT、Markdown、PDF、DOCX、EPUB 和常见图片；实际解析结果取决于文件内容与格式支持情况。
-2. 含图片、扫描页或需要视觉解释的页面，选择合适的图片输入模型，并确认本批次的处理范围与费用授权。
-3. 查看批次和文档状态。文件复制、暂存或入队完成之后，仍需要解析、视觉处理、分块和索引。
-4. 内容就绪后，在 **Agent 配置**中绑定知识库，再新建会话。自动检索模式会把相关片段加入请求，回答中的引用可回到来源。
+世界书用于按对话内容动态注入背景设定，不占用持久聊天消息，也无需建立向量索引。
 
-默认使用本地 ONNX Embedding，并结合 SQLite FTS5 与向量索引检索。切换 Chat 服务商不需要重新向量化知识库。若选择 API Embedding，需要额外配置模型与向量维度，并确认向外部服务发送相应文本；不同 Embedding 空间的向量不能混用，空间变更按页面提示处理索引。
+1. 在**世界书**页面可直接新建，或点击**导入**批量导入多份 `.json` 文件、文件夹与 ZIP 压缩包。支持原生格式、SillyTavern World Info、Character Book 与 `lorebook_v3`，导入前可预览每个文件的识别结果并选择同名处理策略（保留两者、覆盖或跳过）。
+2. 为条目设置常驻状态或触发关键词，支持次要逻辑、正则表达式（RE2/J）、递归激活、触发概率、包含组权重、持续/冷却/延迟轮数以及插入位置（角色提示词前后、指定消息深度或 `{{outlet::名称}}` 出口）。
+3. 使用页面内的**离线测试**输入模拟对话文本，无需消耗模型额度即可查看条目的命中、排序与排除原因。
+4. 在 Agent 编辑页绑定默认世界书，也可用对话页顶部的世界书按钮为当前会话单独开关或覆盖预算设置。发送消息后，点击对话内的**本轮使用情况**即可查看本轮实际命中的条目与预算占用。
 
-#### 处理状态与恢复
+### 跑团模式（TRPG）
 
-| 状态或现象 | 含义与操作 |
+新建 Agent 时将模式设为 **TRPG**，基于该 Agent 创建的对话即进入跑团工作台。
+
+- **状态栏（HUD）与角色卡**：对话顶部提供可折叠的跑团工具栏，展示当前角色与场景摘要。点击状态板可管理规则体系（自定义、D&D 3R、D&D 5E、CoC 7 版）、玩家角色卡、队伍成员、背包物品、状态条件与先攻轮次，也可一键补充 D&D 或 CoC 常用数值项（如 HP、MP、SAN、幸运、法术位）。
+- **骰盘与检定**：内置手动骰盘与模型工具（`dice_roll` 与 `random_number`）。标准骰子表达式支持 `NdM`、优势/劣势（如 `2d20kh1+7`、`4d6kh3`）与 DC 判定；CoC 7 版检定支持技能值与奖惩骰，自动计算极难成功、困难成功、大成功与大失败，并在消息流中渲染交互式检定卡与状态变更卡。
+- **团务日志、地图与分支检查点**：团务面板记录检定历史、资源净变化、故事章节、任务线索与进度时钟，支持对最近一次状态改动执行撤销（Undo），并提供地点关系地图。你可以在稳定的消息边界创建**检查点**，随时从历史节点拉出新的平行分支会话，或导出过滤掉主持人隐藏信息的玩家视图资料。
+- **语音与本机氛围**：支持调用系统语音输入填充草稿、使用本机已安装的离线 TTS 朗读回复，以及从本地选择背景音乐、环境音效、场景插图与地图底图（素材仅保存在本机当前会话偏好中，不会上传给模型）。
+
+## 知识库
+
+1. 在**知识**页面新建知识库，选择文件、文件夹或 ZIP 压缩包。支持 TXT、Markdown、PDF、DOCX、EPUB 及常见图片格式。
+2. 导入包含图片、扫描页或复杂排版的文档时，选择具备图片输入能力的 Chat 模型并确认批次处理范围；若只需提取纯文本，也可显式选择接受视觉缺口继续导入。
+3. 导入任务在后台分阶段完成复制暂存、文档解析、视觉处理、文本分块与向量化。在**处理限制**中可设置 1–6 个并发请求数与失败阈值，中断后重新恢复会自动复用已缓存的成功结果。
+4. 知识库状态变为**就绪**后，在 Agent 配置中绑定该知识库并新建会话。提问时应用会通过本地 SQLite FTS5 全文检索与 USearch 向量检索（RRF 融合）召回相关片段，回答中的编号引用可直接定位回原文与原图。
+
+应用默认使用内置的本地 ONNX Embedding 模型，切换聊天服务商无需重建知识库索引。如需改用远程 API Embedding，可在服务商中配置 `EMBEDDING` 角色模型并在知识库中切换向量空间。
+
+## 技能、工作区与设备工具
+
+### 导入与运行 Skill
+
+在**技能**页面导入以 `SKILL.md` 为核心的技能包。你可以先审阅来源、许可证和源码文件，核对兼容性分析报告后再安装、启用并绑定到目标 Agent。
+
+- **纯指令技能**：安装启用并绑定 Agent 后，其说明内容会按需纳入 Agent 提示词。
+- **Python 与标准库 CLI 技能**：应用会自动分析包内脚本的兼容性（无需额外编写 `mobile-skill.json`，该清单仅作为可选高级扩展）。兼容的纯 Python 脚本与标准库命令行工具会在 Android 独立的 `isolatedProcess`（CPython 3.14）中运行，通过能力代理受控访问已授权的知识库、网络、模型接口或技能存储。
+
+### 文件工作区与代码工具
+
+在 Agent 配置中可授予多个目录授权并指定新会话的默认工作区，文件的读写、删除与补丁操作分别受独立权限控制。
+
+| 工作区类型 | 适用场景 |
 | --- | --- |
-| 暂存 / 排队 / 处理中 | 后台任务仍在执行，查看批次进度与阶段 |
-| 等待视觉配置或确认 | 补齐图片模型、凭据或批次确认，再恢复处理 |
-| 就绪 | 对应内容已发布到可检索索引 |
-| 存在视觉缺口 | 仅有明确接受的文本降级内容；回答不应视作涵盖全部图片 |
-| 失败 / 等待重试 | 查看原因，修正配置或文件后按提示恢复 |
-| 结果未知 | 请求可能已由服务端处理；按该批次的恢复规则操作，重试可能再次计费 |
+| 应用私有工作区 | 让 Agent 在应用沙盒内创建、整理和读写文件，开箱即用 |
+| 系统授权文件夹（SAF） | 通过 Android 系统文件选择器授权指定外部文件夹，适合处理手机文档目录 |
+| ADB 特权目录 | 经 Shizuku 或有线常驻 ADB 挂载系统级可达目录，再按需授权给 Agent |
+| Root 目录 | 在已 Root 设备上经 Direct Root（`su`）或 Shizuku Root 挂载特权目录，支持完整 POSIX 文件与元数据操作 |
 
-批次导入保存检查点，支持后台恢复和有界重试。**处理限制**中可设置 1–6 个并发请求及失败阈值等限额；从较低并发开始，按服务端限流和手机资源调整。恢复会复用满足缓存条件的成功结果，但不保证服务端恰好一次处理或计费。Android 后台限制、存储不足和应用被强行停止仍可能中断任务。
+除基础的文件增删改查外，工作区还支持大文件分块读取（`file_stat`）与带版本校验的原子补丁（`apply_patch`），提供文件名通配搜索（`file_glob`）、字面文本搜索（`file_grep`）和有界并发批量读取（`read_batch`），并可在单次运行内管理后台任务（`job_start`、`job_output` 与 `job_cancel`）。工具调用默认需要逐次确认；你也可以在设置中开启“跳过工具运行确认”或“Root 只读免确认”以简化高频读取操作。
 
-未配置可用视觉模型的含图资料会等待处理。需要只保留文本时，应明确接受视觉缺口；“已导入”或“有检索结果”不代表全部图文都处理完整。
+### Shizuku、有线常驻 ADB、Root 与无障碍辅助
 
-### 导入 Skill
+日常聊天、知识问答与普通文件夹读写不需要配置以下高权限通道。需要跨目录处理系统文件、执行 Shell 命令或自动化操作手机界面时，可在**设置**中按需启用。
 
-在**技能**中导入技能包，检查来源、许可、源码与兼容性，再安装、启用并绑定目标 Agent。导入成功、启用、绑定和授予程序能力是不同步骤。
+- **Shizuku**：在手机上启动 Shizuku 并向本应用授权，随后在应用设置中选择 Shizuku 通道。
+- **有线常驻 ADB（支持拔线运行）**：从 Releases 下载配套的 `mobileAgentRuntime-vVERSION-windows-adb.zip`，在安装了 Java 17+ 与 Google Platform-Tools（`adb`）的 Windows 电脑上解压并运行 `start-wired-adb.bat`。通过 USB 连接手机并按界面提示输入一次性配对令牌完成激活后，设备端常驻服务即可接管后续请求，**退出电脑端工具并拔掉数据线后仍可继续使用**（直至手机重启或手动停止服务）。详细步骤见[有线 ADB Companion 文档](docs/plans/wired-adb-desktop-bridge.md)。
+- **Root 通道（Direct `su` 与 Shizuku Root）**：面向已获取 Root 权限的设备，支持直接 `su` 握手或通过 Root 身份的 Shizuku 接入，提供独立的 Root 工作区、文件权限/属主元数据读写（`file_get_metadata` / `file_set_metadata`）与独立授权的 Root `shell_exec`。
+- **Shell 命令执行（`shell_exec`）**：ADB 级通道需在设置中开启危险模式（支持高危命令确认或自主执行两档）并为 Agent 授予命令权限；Root 通道使用独立的 Root Shell 同意开关。普通 Debug 安装包默认禁用危险控制能力，从源码编译验证该流程时请使用 `:app-android:assembleReview`。
+- **无障碍屏幕观察与辅助操作**：在设置中启用无障碍服务与应用内同意开关后，Agent 可通过 `device_observe` 与 `device_wait_for` 直接读取当前屏幕的结构化控件树（自动过滤密码框，比传统截图或 `uiautomator dump` 更快）。Shizuku 或有线 ADB 通道就绪后，还可进一步开启“允许辅助操作”，让 Agent 通过 `device_act` 执行控件点击、长按、文本输入、滚动以及返回/主页/最近任务导航。
 
-- 只有指令的 Skill 可作为任务说明使用。
-- 普通 Skill 不需要 `mobile-skill.json`；应用会分析兼容性。这个文件仅是本项目可选的执行扩展，兼容纯 Python 程序和部分标准库 CLI 可在 Android 隔离运行时执行。
-- 依赖桌面系统、Node、Docker、未支持模块或第三方原生扩展的程序，会显示兼容性限制；具体支持范围以检查结果为准。
+### 联网搜索、网页抓取、MCP 与公告
 
-Python 通过能力代理访问已授权的知识、网络、模型调用或 Skill 存储。执行清单、当前授权、Agent 绑定和预算共同决定能否运行。包更新或新增能力可能需要重新授权。
-
-## 工具与文件权限
-
-### 选择工作区
-
-| 工作区 | 使用方式 |
-| --- | --- |
-| 应用私有工作区 | 适合由 Agent 在应用内创建和管理文件 |
-| 系统授权文件夹（SAF） | 通过 Android 文件选择器授予目录访问，受系统文件提供器与应用权限限制 |
-| 特权目录 | 经 Shizuku 或有线 ADB 连接取得所选身份可访问的目录，再单独授权给 Agent |
-
-在 Agent 配置中授予所需目录和文件能力，设置默认工作区，再建立会话。读取、写入、删除与补丁操作有各自权限；获得目录访问不等于获得所有操作权限。撤权、目录失效或连接不可用后，相关工具会受限。
-
-工具调用默认需要确认。高级设置中的“跳过工具运行确认”只调整确认流程，仍受权限、快照、连接状态和预算检查约束。
-
-### Shizuku 与有线 ADB
-
-这些连接方式用于需要高权限文件访问或命令执行的任务，普通聊天与知识问答无需配置。
-
-- **Shizuku**：先在设备上启动 Shizuku，再向应用授予权限，在应用设置中选择并检查接入通道。
-- **有线 ADB**：在 Windows 运行本仓库的 Desktop Companion，通过 USB 连接 Android 设备，完成设备授权与应用配对。实施与配置见[有线 ADB Companion 文档](docs/plans/wired-adb-desktop-bridge.md)。
-
-`shell_exec` 还要求当前构建允许控制能力、接入通道就绪、危险模式与命令权限有效。确认前核对命令、工作目录和来源。普通 Debug 构建禁用危险控制能力；需要验证这一流程时，使用不可调试的 Review 构建。所选 ADB 身份的权限也不等于 Root。
-
-### 联网搜索、MCP 与公告
-
-在**设置 → 联网搜索**中选择 Brave、Tavily 或 Exa，保存该服务的 API Key 并启用。各服务的密钥分别加密保存，切换服务不会覆盖其他密钥；移除密钥只影响当前服务。已有 Brave 配置可继续使用。
-
-在**智能体 → 编辑 → 允许联网搜索**中决定该 Agent 是否能搜索，默认关闭。开启并保存后，新会话可以直接调用 `web_search`，无需逐次批准，查询可能产生服务商费用；关闭并保存后，旧会话也立即失去搜索权限。该开关独立于其他工具的确认设置。搜索只返回有界的标题、链接和摘要，不自动打开网页。配置、权限和请求边界见[联网搜索](docs/WEB_SEARCH.md)。
-
-MCP 页面用于配置远程 HTTP 服务、发现工具和确认绑定；Android 端不会自动启动桌面上的 stdio、Node 或 Shell MCP 服务器。外部工具的描述与返回内容按不可信资料处理，不能自行扩大本地权限。
-
-公告使用独立的签名服务与本地缓存，获取公告不携带模型凭据。匿名统计默认开启，可在设置中关闭；已保存的关闭选择在升级后保持，关闭统计仍可阅读公告。
+- **联网搜索与网页抓取**：在**设置 → 联网搜索**中选择 **Brave**、**Tavily**、**Exa** 或 **DeepSeek**，填入对应 API Key 并启用（各家密钥独立加密保存，切换服务不会清空其他密钥）。随后在 **智能体 → 编辑** 中打开**允许联网搜索**并保存，会话即可直接调用 `web_search` 检索公开网页摘要；选择 DeepSeek 时还会同时启用 `web_fetch`，支持将指定公开网页正文抓取为 Markdown。详见[联网搜索说明](docs/WEB_SEARCH.md)。
+- **远程 MCP**：在 **MCP** 页面配置远程 HTTP MCP 服务端地址与认证信息，执行工具发现后即可将外部工具绑定给指定 Agent。
+- **公告与统计**：**公告**页面展示项目通知与版本动态，支持离线缓存且独立于模型配置；匿名统计可在设置中随时关闭。
 
 ## 排障与诊断
 
-| 问题 | 先检查什么 |
+| 常见现象 | 排查方向 |
 | --- | --- |
-| 连接测试失败 | Base URL、API 格式、模型 ID、凭据和端点可达性 |
-| 能聊天，但图片或工具失败 | 分别探测能力，核对端点协议和实际模型支持；未知结果不能直接认定为不支持 |
-| 自动上下文窗口未知 | 是否有可靠元数据；必要时按服务商限制手动配置 |
-| 输入预算不足 | 历史、知识片段、图片及工具 schema 的总量，以及输出预留 |
-| 导入后仍不可检索 | 文档是否就绪、视觉确认是否完成、索引是否可用、Agent 是否绑定该库 |
-| Python 程序不可运行 | 兼容性等级、依赖、启用状态、Agent 绑定与能力授权 |
-| 工作区或命令工具未出现 | 会话工作区、有效权限、模型工具能力，以及特权通道和构建限制 |
+| 连接测试失败（401 / 404 / 超时） | 检查 Base URL 前缀、API 格式、模型 ID 与凭据；使用 Vertex Express 时确认已将 `PROJECT_ID` 替换为实际项目 ID；连接局域网反代时填写电脑局域网 IP 而非 `127.0.0.1` |
+| 能正常文字聊天，但发图或工具调用失败 | 在服务商页面对该模型运行**能力探测**，确认上游渠道与模型本身支持多模态输入或原生 Function Calling |
+| 提示输入预算不足或上下文溢出 | 通过**请求检查器**查看历史消息、知识库片段、世界书条目与附图占用，适当缩减单次绑定资源或调小预留输出预算 |
+| 知识库导入后搜不到内容 | 查看导入批次是否已进入**就绪**状态、含图批次是否停留在等待视觉确认，以及当前会话所用的 Agent 快照是否已绑定该知识库 |
+| 世界书条目未触发 | 在世界书页面使用**离线测试**输入对话文本，检查关键词、次要条件、概率或扫描深度，并在对话页打开**本轮使用情况**查看排除原因 |
+| Python 技能无法运行 | 在技能详情查看兼容性分析结果，确认脚本未依赖桌面专属模块或原生扩展，并检查技能是否已启用、绑定 Agent 及授予所需能力 |
+| 工作区或 Shell 工具未出现在模型工具列表中 | 检查当前会话绑定的工作区、Agent 文件/命令权限、模型工具能力，以及 Shizuku / 有线 ADB / Root 通道连接状态；源码构建测试危险模式需使用 Review 包 |
 
-需要提交故障现场时，在**设置**中开启**应用内诊断记录**，复现后选择**导出诊断 ZIP**。一并说明操作步骤、发生时间、构建版本和预期结果；确认导出成功后再清除日志。
-
-诊断默认关闭，日志级别默认 INFO，保留阶段、结果与错误。在设置页可切换为 DEBUG，记录详细进度和经凭据脱敏的视觉处理文本；级别选择会保存。分享 ZIP 前检查是否含有敏感资料，切回 INFO 不会清除已有 DEBUG 记录。系统 ANR、原生崩溃等信息可能还需要同一安装包的 ADB Logcat。诊断机制见[诊断文档](docs/DIAGNOSTICS.md)。
+遇到难以复现的问题或使用 Root / 设备工具需要反馈 Bug 时，可在**设置**中开启**应用内诊断记录**（默认 `INFO` 级别，切换为 `DEBUG` 可记录更详细的阶段进度），复现问题后点击**导出诊断 ZIP**，连同复现步骤、构建版本与发生时间提交至 [GitHub Issues](https://github.com/hedanbaomi/mobile-agent-runtime/issues)。诊断日志会对密钥与敏感凭据做脱敏处理，机制说明见[诊断文档](docs/DIAGNOSTICS.md)。
 
 ## 构建
 
-使用 JDK 17、Android SDK 35 和仓库内 Gradle Wrapper。通过 Android Studio 或 `local.properties` 设置 SDK 路径；原生库、Python 运行时和模型包使用仓库锁定的来源与校验值，首次构建需要下载相应依赖。
+开发环境需要 **JDK 17**、**Android SDK 35** 与仓库自带的 Gradle Wrapper。通过 Android Studio 或根目录 `local.properties` 配置 SDK 路径；首次构建会按仓库锁定的地址与校验值自动下载原生库、CPython 运行时与本地 Embedding 模型包。
 
-在仓库根目录执行；以下为 Windows PowerShell 示例：
+在仓库根目录执行以下命令即可构建并安装 Debug 包（Windows PowerShell 示例，macOS / Linux 将 `.\gradlew.bat` 替换为 `./gradlew`）。
 
 ```powershell
 .\gradlew.bat :app-android:assembleDebug --dependency-verification=strict
 adb install -r .\app-android\build\outputs\apk\debug\app-android-debug.apk
 ```
 
-Debug 包适合调试应用与普通功能。生成 Debug 密钥签名、不可调试的 Review 包：
+只针对单台真机或模拟器快速打包 Debug APK 时，可使用单 ABI 辅助脚本（跳过另一架构的原生编译）。
+
+```sh
+bash tools/dev-apk arm64-v8a
+# 或面向模拟器：
+bash tools/dev-apk x86_64
+```
+
+需要验证危险模式与高权限控制面时，请构建 Review 包。该包使用本地 Debug 密钥签名，但关闭了调试标志（`debuggable=false`）。
 
 ```powershell
 .\gradlew.bat :app-android:assembleReview --dependency-verification=strict
 adb install -r .\app-android\build\outputs\apk\review\app-android-review.apk
 ```
 
-Review 使用本地 Debug 签名身份，不是正式 Release。覆盖安装要求签名相同；设备上已有其他签名版本时，先处理数据保存与迁移。正式 Release 需要显式配置签名材料，不会回退到 Debug 密钥。
+### 开发与提交前检查
 
-### 提交前检查
+日常修改后可使用 `tools/dev-check` 快速运行定向测试、许可证检查与模块边界校验。
 
-提交前运行仓库门禁；REUSE 命令需要已安装 `reuse`：
+```sh
+bash tools/dev-check :data:sqlite:test '*KnowledgeDisplayQueryTest'
+```
+
+提交 Pull Request 前，请执行完整的仓库门禁与 REUSE 许可证合规检查（需安装 Python 3.11+ 与 `reuse`）。
 
 ```powershell
-.\gradlew.bat licenseGuard licenseGuardReverse check verifyCiPins verifyDependencyLock verifyDependencyVerification --dependency-verification=strict
-reuse lint
+.\gradlew.bat licenseGuard licenseGuardReverse check verifyCiPins verifyDependencyLock verifyDependencyVerification verifyWorkflowYaml --dependency-verification=strict
+python -m reuse lint
 ```
 
 ## 代码结构
 
-| 目录 | 内容 |
+| 目录 | 职责说明 |
 | --- | --- |
-| `app-android/` | Android 应用、平台适配、通道与工具集成 |
-| `feature/` | Compose 页面和交互状态 |
-| `shared/` | 领域模型、Agent Runtime、Provider、知识、Skill 与公告协议 |
-| `data/sqlite/` | 持久化、迁移、仓储和索引协调 |
-| `runtime/` | 平台运行时，包括本地 Embedding、Python 与后台任务 |
-| `desktop/bridge/` | Windows 有线 ADB Companion |
-| `services/announcements/` | 公告 Worker、存储与管理端 |
-| `docs/` | 技术契约、设计、验收和变更证据 |
+| `app-android/` | Android 应用入口、依赖装配、全局导航、特权通道与宿主工具集成 |
+| `feature/` | Compose 功能页面与状态管理（`chat`、`agents`、`providers`、`knowledge`、`worldbooks`、`skills`、`announcements`、`settings`） |
+| `shared/` | 纯 JVM 共享模块，包含领域模型、Agent Runtime（含跑团与世界书引擎）、Provider 适配、知识契约、Skill 协议与桥接协议 |
+| `data/sqlite/` | Bundled SQLite + FTS5 持久化、schema 迁移、仓储实现与索引协调 |
+| `runtime/` | 平台运行时实现，涵盖本地 ONNX Embedding、USearch JNI 向量索引与 Android CPython 隔离执行 |
+| `platform/android/` | Android 存储（SAF / CAS）、Keystore 安全凭据、前台导入任务与 IPC 封装 |
+| `desktop/bridge/` | Windows 有线 ADB 桌面激活与配对工具（Desktop Companion） |
+| `services/announcements/` | 独立公告服务 Worker、D1 存储与管理端 |
+| `docs/` | 架构决策记录（ADR）、模块技术契约、UI 设计稿与验证记录 |
 
-开发资料：[贡献指南](CONTRIBUTING.md) · [技术实现方案](docs/IMPLEMENTATION_PLAN.md) · [知识库契约](docs/KNOWLEDGE.md) · [Skill 与权限模型](docs/SKILLS_AND_SECURITY.md) · [验收项](docs/ACCEPTANCE.md)。
+延伸阅读：[贡献指南](CONTRIBUTING.md) · [技术实现方案](docs/IMPLEMENTATION_PLAN.md) · [知识库契约](docs/KNOWLEDGE.md) · [Skill 与权限模型](docs/SKILLS_AND_SECURITY.md) · [验收项](docs/ACCEPTANCE.md)。
 
 ## 许可证
 
-第一方代码和项目文档采用 **AGPL-3.0-only**。完整文本见 [LICENSE](LICENSE)，归属与分发要求见[许可证政策](LICENSE_POLICY.md)。第三方依赖、模型包、用户知识库和外部 Skills 保留各自许可。
+本项目所有第一方源代码与构建脚本，以及服务端和项目文档，均采用 **AGPL-3.0-only** 许可证。完整条款见 [LICENSE](LICENSE)，归属与合规要求见[许可证政策](LICENSE_POLICY.md)。第三方依赖与模型权重包，以及用户导入的知识库、世界书和外部 Skills，均保留各自原有许可。

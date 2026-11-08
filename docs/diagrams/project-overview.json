@@ -8,7 +8,7 @@
     "output": ".private/readme-archify-20261005/project-overview.html",
     "repository": {
       "url": "https://github.com/hedanbaomi/mobile-agent-runtime.git",
-      "revision": "6d38ce77961378d28e63601853faa775047a667f",
+      "revision": "506431e684c55e451b2289094dafab828a4efc3f",
       "provider": "github"
     }
   },
@@ -17,7 +17,7 @@
       "id": "android-ui",
       "type": "frontend",
       "label": "Android 界面",
-      "sublabel": "配置 Agent · 发起会话",
+      "sublabel": "配置 Agent · 跑团 · 发起会话",
       "pos": [
         48,
         80
@@ -29,13 +29,13 @@
       "sources": [
         {
           "path": "app-android/src/main/kotlin/runtime/mobileagent/ui/AppNavigation.kt",
-          "line": 102,
-          "end_line": 113
+          "line": 105,
+          "end_line": 116
         },
         {
           "path": "app-android/src/main/kotlin/runtime/mobileagent/ui/MainScreens.kt",
-          "line": 607,
-          "end_line": 615
+          "line": 611,
+          "end_line": 619
         }
       ]
     },
@@ -55,13 +55,13 @@
       "sources": [
         {
           "path": "app-android/src/main/kotlin/runtime/mobileagent/ChatViewModel.kt",
-          "line": 1157,
-          "end_line": 1225
+          "line": 1221,
+          "end_line": 1231
         },
         {
           "path": "app-android/src/main/kotlin/runtime/mobileagent/ChatViewModel.kt",
-          "line": 985,
-          "end_line": 1003
+          "line": 1439,
+          "end_line": 1507
         }
       ]
     },
@@ -69,7 +69,7 @@
       "id": "model-provider",
       "type": "external",
       "label": "用户模型服务",
-      "sublabel": "Chat / Responses / Vision",
+      "sublabel": "OpenAI / Gemini / Vision",
       "pos": [
         728,
         80
@@ -81,13 +81,13 @@
       "sources": [
         {
           "path": "app-android/src/main/kotlin/runtime/mobileagent/ChatViewModel.kt",
-          "line": 990,
-          "end_line": 994
+          "line": 1147,
+          "end_line": 1153
         },
         {
           "path": "app-android/src/main/kotlin/runtime/mobileagent/MobileAgentApp.kt",
-          "line": 195,
-          "end_line": 226
+          "line": 191,
+          "end_line": 227
         }
       ],
       "tag": "按配置外发"
@@ -95,8 +95,8 @@
     {
       "id": "local-knowledge",
       "type": "database",
-      "label": "本地知识库",
-      "sublabel": "文档 · SQLite · 检索索引",
+      "label": "知识库与世界书",
+      "sublabel": "检索索引 · 规则触发 · SQLite",
       "pos": [
         388,
         330
@@ -109,15 +109,20 @@
         {
           "path": "app-android/src/main/kotlin/runtime/mobileagent/MobileAgentApp.kt",
           "line": 195,
-          "end_line": 242
+          "end_line": 228
         },
         {
           "path": "app-android/src/main/kotlin/runtime/mobileagent/ChatViewModel.kt",
-          "line": 631,
-          "end_line": 643
+          "line": 760,
+          "end_line": 772
+        },
+        {
+          "path": "app-android/src/main/kotlin/runtime/mobileagent/ChatViewModel.kt",
+          "line": 1056,
+          "end_line": 1057
         }
       ],
-      "tag": "绑定后检索"
+      "tag": "绑定后注入"
     },
     {
       "id": "tool-policy",
@@ -135,13 +140,13 @@
       "sources": [
         {
           "path": "app-android/src/main/kotlin/runtime/mobileagent/integration/RuntimeIntegration.kt",
-          "line": 1162,
-          "end_line": 1216
+          "line": 1088,
+          "end_line": 1155
         },
         {
           "path": "app-android/src/main/kotlin/runtime/mobileagent/ChatViewModel.kt",
-          "line": 1157,
-          "end_line": 1225
+          "line": 1333,
+          "end_line": 1438
         }
       ]
     },
@@ -162,7 +167,7 @@
         {
           "path": "app-android/src/main/kotlin/runtime/mobileagent/PythonSkillTools.kt",
           "line": 294,
-          "end_line": 320
+          "end_line": 324
         }
       ],
       "tag": "启用并授权"
@@ -170,8 +175,8 @@
     {
       "id": "workspace",
       "type": "database",
-      "label": "工作区文件",
-      "sublabel": "私有目录 / SAF / 特权目录",
+      "label": "工作区与设备工具",
+      "sublabel": "SAF / ADB / Root / 无障碍",
       "pos": [
         898,
         580
@@ -183,8 +188,8 @@
       "sources": [
         {
           "path": "app-android/src/main/kotlin/runtime/mobileagent/integration/RuntimeIntegration.kt",
-          "line": 1162,
-          "end_line": 1216
+          "line": 1099,
+          "end_line": 1155
         }
       ],
       "tag": "已授权范围"
@@ -205,13 +210,13 @@
       "sources": [
         {
           "path": "app-android/src/main/kotlin/runtime/mobileagent/AnnouncementFetcher.kt",
-          "line": 20,
-          "end_line": 39
+          "line": 23,
+          "end_line": 45
         },
         {
           "path": "app-android/src/main/kotlin/runtime/mobileagent/AnnouncementsViewModel.kt",
           "line": 125,
-          "end_line": 150
+          "end_line": 153
         }
       ],
       "tag": "不携带模型密钥"
@@ -236,7 +241,7 @@
       "id": "runtime-to-knowledge",
       "from": "agent-runtime",
       "to": "local-knowledge",
-      "label": "检索与引用"
+      "label": "检索与注入"
     },
     {
       "id": "runtime-to-tools",

@@ -49,8 +49,16 @@ class ChatInputBudgetDeviceTest {
         assertEquals(RunStatus.FAILED, run.state)
         val errors = container.conversations.messages(sessionId).flatMap { it.parts }.filterIsInstance<ErrorPart>()
         assertEquals(MessageErrorCode.CONTEXT_OVERFLOW, errors.single().code)
-        assertTrue(errors.single().message.contains("模型窗口"))
-        assertTrue(errors.single().message.contains("工具 schema") || errors.single().message.contains("工具调用"))
+        // The English and Chinese resources differ in wording, so assert the contract instead of
+        // one language's text: the stable ASCII code plus every budget field the copy must carry.
+        val budgetMessage = errors.single().message
+        assertTrue(budgetMessage.contains(CHAT_CONTEXT_OVERFLOW_CODE))
+        // The default local reserve is 1024 even when the provider cap is 512.
+        listOf("4096", "1024", "3072").forEach {
+            assertTrue("budget copy lost configured number $it: $budgetMessage", budgetMessage.contains(it))
+        }
+        assertTrue("budget copy must not keep a format placeholder: $budgetMessage",
+            !budgetMessage.contains("%1\$s"))
         assertEquals("CONTEXT_OVERFLOW", run.errorCode)
         assertTrue(container.runs.invocations(run.runId).isEmpty())
     }

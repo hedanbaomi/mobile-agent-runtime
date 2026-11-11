@@ -314,7 +314,7 @@ class KnowledgeRepository(
         check(batch.boolean("staging_complete")) { "Batch membership is still being staged" }
         check(reviewedSummary.unknown == 0 || acknowledgeDuplicateCharge) { "UNKNOWN_OUTCOME requires separate duplicate-charge acknowledgement" }
         check(visionTargetAvailable(targetFingerprint)) { "Vision destination changed" }
-        check(batchId !in activeBatchWorkers) { "Pause and wait for current work before reconfiguration" }
+        check(!batchExecution.isActive(batchId)) { "Pause and wait for current work before reconfiguration" }
         check(pipeline.stopReason(null) != "PIPELINE_MAX_CONCURRENCY") { "Wait for in-flight work" }
         check(batch.string("state") != ImportBatchState.CANCELLED.name) { "Cancelled batch cannot be restarted" }
         BatchReconfigurationSnapshot(
@@ -420,7 +420,7 @@ class KnowledgeRepository(
             "Batch state or authorization changed while the review was being planned; review it again"
         }
         check(visionTargetAvailable(snapshot.targetFingerprint)) { "Vision destination changed" }
-        check(snapshot.batchId !in activeBatchWorkers) { "Pause and wait for current work before reconfiguration" }
+        check(!batchExecution.isActive(snapshot.batchId)) { "Pause and wait for current work before reconfiguration" }
         check(pipeline.stopReason(null) != "PIPELINE_MAX_CONCURRENCY") { "Wait for in-flight work" }
         val knowledgeBase = db.query("SELECT deleted_at,active_generation_id FROM knowledge_bases WHERE id=?",
             listOf(snapshot.knowledgeBaseId)).singleOrNull() ?: error("Knowledge base not found")
@@ -1806,24 +1806,13 @@ class KnowledgeRepository(
     /** Derived ANN-handle lifecycle counters for performance evidence and tests. */
     fun vectorIndexStats(): VectorIndexCache.Stats = vectorIndexCache.stats()
 
-    fun retrieve(runId: String, query: String, topK: Int = 8, knowledgeBaseIds: List<String>? = null): RetrievalResult {
-        if (query.isBlank()) {
-            val requested = (knowledgeBaseIds ?: listKnowledgeBases().map { it.first }).distinct()
-            return RetrievalResult(
-                emptyList(),
-                emptyList(),
-                listOf("empty query"),
-                RetrievalCoverage(
-                    requested = requested,
-                    searched = emptyList(),
-                    unavailable = emptyList(),
-                ),
-                usedGenerations = requested.map { runtime.mobileagent.domain.KnowledgePin(it, null, "") },
-                usedRemoteEmbedding = emptyList(),
-            )
-        }
+    fun retrieve(runId: String, query: String, topK: Int = 8, knowledgeBaseIds: List<String>? = null): RetrievalResult =
+        KnowledgeRetrievalCoordinator(::collectRetrievalSources).retrieve(
+            runId, query, topK, knowledgeBaseIds ?: listKnowledgeBases().map { it.first },
+        )
+
+    private fun collectRetrievalSources(query: String, bases: List<String>): KnowledgeRetrievalFacts {
         val warnings = mutableListOf<String>()
-        val bases = (knowledgeBaseIds ?: listKnowledgeBases().map { it.first }).distinct()
         val searched = mutableListOf<String>()
         val unavailable = mutableListOf<UnavailableSource>()
         // KBs whose query vector came from a fresh remote embedding call
@@ -1952,23 +1941,7 @@ class KnowledgeRepository(
                 throw failure
             }
         }
-        val hits = ReciprocalRankFusion.preferClaimSupporting(ReciprocalRankFusion.merge(sources)).take(topK)
-        if (hits.isEmpty()) warnings += "No in-scope evidence"
-        val coverage = RetrievalCoverage(requested = bases, searched = searched.toList(), unavailable = unavailable.toList())
-        // Shared formatter (formatRetrievalCoverageNotice) produces this
-        // warning and RetrievalCoverage.notice() alike, so the wording cannot
-        // drift. It is null — no warning at all — when every knowledge base
-        // participated, and otherwise states "N/M 未参与" with N = missing,
-        // M = total requested. Runtime-authored reason codes only; no query text.
-        formatRetrievalCoverageNotice(coverage)?.let { warnings += it }
-        return RetrievalResult(
-            hits,
-            CitationMap.bind(runId, hits),
-            warnings,
-            coverage,
-            usedGenerations = bases.map { usedPins[it] ?: runtime.mobileagent.domain.KnowledgePin(it, null, "") },
-            usedRemoteEmbedding = bases.filter { it in remoteEmbeddingKbIds },
-        )
+        return KnowledgeRetrievalFacts(sources, warnings, searched.toList(), unavailable.toList(), usedPins, remoteEmbeddingKbIds)
     }
 
     /** Deterministic per-source rank order: score first, then stable id order. */
@@ -2942,14 +2915,13 @@ class KnowledgeRepository(
             val batchId = jobBatchId(job.id)
             val workers = minOf(MAX_DOCUMENT_VISION_PARALLELISM, pageGroups.size,
                 if (batchId == null) 1 else pipeline.policy(batchId).maxConcurrency)
-            runBlocking {
-                coroutineScope {
-                    (1..workers).map {
-                        async(Dispatchers.IO) {
+            runKnowledgeWorkers(workers) { ensureActive ->
                             while (firstTerminalIndex.get() == Int.MAX_VALUE) {
+                                ensureActive()
                                 val groupIndex = next.getAndIncrement()
                                 if (groupIndex >= pageGroups.size) break
                                 for (index in pageGroups[groupIndex]) {
+                                    ensureActive()
                                     if (index >= firstTerminalIndex.get()) break
                                     try {
                                         val outcome = processVisualUnit(job, bytes, parsed, processable,
@@ -2962,9 +2934,6 @@ class KnowledgeRepository(
                                     }
                                 }
                             }
-                        }
-                    }.awaitAll()
-                }
             }
             failure.get()?.let { throw it }
             completed.firstOrNull { it != null && it !is VisionBatch.Ok }?.let { return it }
@@ -3068,7 +3037,9 @@ class KnowledgeRepository(
     ) {
         fun cancel() {
             cancelled.set(true)
-            future.cancel(true)
+            // CompletableFuture.cancel reports completion without stopping the supplier.
+            // Keep job ownership until its local embed/read has really returned.
+            future.handle { _, _ -> Unit }.join()
         }
 
         fun join(): NativePreparation = future.join()
@@ -5699,7 +5670,7 @@ class KnowledgeRepository(
             ),
         ).map { it.string("id") }
         ids.forEach { batchId ->
-            if (batchId !in activeBatchWorkers) reconcileBatchDeliveryLocked(batchId)
+            if (!batchExecution.isActive(batchId)) reconcileBatchDeliveryLocked(batchId)
         }
         ids.filter { batchId ->
             db.query("SELECT state FROM import_batches WHERE id = ?", listOf(batchId))
@@ -5937,12 +5908,9 @@ class KnowledgeRepository(
     }
 
     /** Returns true only when WorkManager should apply its persisted exponential backoff. */
-    fun processBatch(batchId: String, visionConfigured: Boolean): Boolean {
-        if (!activeBatchWorkers.add(batchId)) return false
-        try {
+    fun processBatch(batchId: String, visionConfigured: Boolean): Boolean = batchExecution.run(batchId, prepare = {
             synchronized(indexLock) { reconcileBatchDeliveryLocked(batchId) }
-            val retryPending = AtomicBoolean(false)
-            val parallelism = synchronized(indexLock) {
+            synchronized(indexLock) {
                 // The API embedding operation is exclusive per KB; local
                 // embedding and independent Vision jobs use the saved policy's lanes.
                 val usesApiEmbedding = db.query(
@@ -5963,18 +5931,7 @@ class KnowledgeRepository(
                     (mayRequireVision && batchVisionAuthorizationLocked(batchId) == null)) 1
                 else minOf(MAX_BATCH_PARALLELISM, pipeline.policy(batchId).maxConcurrency, remaining)
             }
-            runBlocking {
-                coroutineScope {
-                    (1..parallelism).map {
-                        async(Dispatchers.IO) { processBatchRun(batchId, visionConfigured, retryPending) }
-                    }.awaitAll()
-                }
-            }
-            return retryPending.get()
-        } finally {
-            activeBatchWorkers.remove(batchId)
-        }
-    }
+    }, work = { retryPending -> processBatchRun(batchId, visionConfigured, retryPending) })
 
     private fun processBatchRun(batchId: String, visionConfigured: Boolean, retryPending: AtomicBoolean) {
         require(batchId.isNotBlank()) { "batchId must not be blank" }
@@ -6409,7 +6366,7 @@ class KnowledgeRepository(
                 "UPDATE import_batches SET state = ?, paused_at = NULL, error = NULL, updated_at = ? WHERE id = ?",
                 listOf(ImportBatchState.PROCESSING.name, Utc.nowIso(), batchId),
             )
-            if (batchId !in activeBatchWorkers) {
+            if (!batchExecution.isActive(batchId)) {
                 db.query("SELECT id FROM import_jobs WHERE batch_id=?",listOf(batchId)).forEach {
                     recoverPipelineJob(it.string("id"))
                 }
@@ -7033,7 +6990,7 @@ class KnowledgeRepository(
 
     companion object {
         private val livePipelineJobs = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
-        private val activeBatchWorkers = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+        private val batchExecution = KnowledgeBatchExecution()
         private const val MAX_BATCH_PARALLELISM = 6
         private const val MAX_DOCUMENT_VISION_PARALLELISM = 2
         private const val MAX_EARLY_VECTOR_BYTES = 8L * 1024L * 1024L

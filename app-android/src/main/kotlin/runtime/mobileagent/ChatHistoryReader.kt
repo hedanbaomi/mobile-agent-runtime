@@ -5,11 +5,11 @@ package runtime.mobileagent
 
 import runtime.mobileagent.data.ChatDraftOwner
 import runtime.mobileagent.data.ConversationCursor
-import runtime.mobileagent.knowledge.Citation
 import runtime.mobileagent.domain.ContextCompactionRecord
 import runtime.mobileagent.domain.Message
 import runtime.mobileagent.domain.MessageRole
 import runtime.mobileagent.feature.chat.*
+import runtime.mobileagent.knowledge.Citation
 
 internal data class ChatReadResult(
     val state: ChatUiState,
@@ -19,6 +19,11 @@ internal data class ChatReadResult(
     val messageCursor: String?,
 )
 
+internal class ChatHistoryCopy(
+    val unconfirmedUserMessageSummary: String,
+    val configurationSnapshotLabel: (String) -> String,
+)
+
 /** Called on the storage dispatcher. It neither selects a page nor changes mutable UI state. */
 internal suspend fun readChatHistory(
     container: AppContainer,
@@ -26,6 +31,7 @@ internal suspend fun readChatHistory(
     savedSessionId: String?,
     savedAgentId: String?,
     seedCitations: Map<String, Pair<Citation, String>>,
+    copy: ChatHistoryCopy,
     messageUi: (Message) -> ChatMessageUi,
     restoreCitations: (String, MutableMap<String, Pair<Citation, String>>) -> Unit,
     citationUi: (Map<String, Pair<Citation, String>>) -> List<ChatCitationUi>,
@@ -52,7 +58,7 @@ internal suspend fun readChatHistory(
     val fresh = page?.messages.orEmpty().mapIndexed { index, message ->
         val ui = messageUi(message)
         if (index == page!!.messages.lastIndex && message.role == MessageRole.USER)
-            ui.copy(eventSummary = "消息已在本机保存；尚无本轮完成确认，送达与处理结果未确认，不会自动重发。") else ui
+            ui.copy(eventSummary = copy.unconfirmedUserMessageSummary) else ui
     }
     val freshIds = fresh.map { it.id }.toSet()
     val messages = if (previous.selectedSessionId == selected) previous.messages.filterNot { it.id in freshIds } + fresh else fresh
@@ -64,7 +70,7 @@ internal suspend fun readChatHistory(
     fun session(conversation: runtime.mobileagent.domain.Conversation): ChatSessionUi {
         val owner = snapshotAgents[conversation.snapshotId]
         return ChatSessionUi(conversation.id, conversation.title, timeLabel = conversation.updatedAt.take(16),
-            agentName = owner?.let { names[it]?.name } ?: "配置快照 " + conversation.snapshotId.take(8),
+            agentName = owner?.let { names[it]?.name } ?: copy.configurationSnapshotLabel(conversation.snapshotId.take(8)),
             agentId = owner, workspaceLabel = labels.getValue(conversation.id))
     }
     val draftOwner = chatDraftOwner(selected, agentId)

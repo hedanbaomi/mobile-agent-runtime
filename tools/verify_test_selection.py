@@ -9,8 +9,74 @@ import pathlib
 import re
 import sys
 import xml.etree.ElementTree as ET
+import fnmatch
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def select_suite(manifest: dict, name: str) -> list[str]:
+    if name == "nightly":
+        return [target for target in manifest["suites"]["full"] if target not in manifest["performance"]]
+    if name == "performance":
+        return manifest["performance"]
+    if name == "minimum":
+        return manifest["minimum_api"]
+    if name == "recovery":
+        return manifest["recovery"]
+    return manifest["suites"][name]
+
+
+def invocation_groups(manifest: dict, name: str) -> list[list[str]]:
+    selected = select_suite(manifest, name)
+    fresh = set(manifest.get("fresh_host_first", []))
+    groups = [[target] for target in selected if target in fresh]
+    rest = [target for target in selected if target not in fresh]
+    return groups + ([rest] if rest else [])
+
+
+def workflow_matrix_violations(root: pathlib.Path) -> list[str]:
+    import yaml
+    errors = []
+    ci = yaml.safe_load((root / '.github/workflows/ci.yml').read_text(encoding='utf-8'))
+    full = yaml.safe_load((root / '.github/workflows/full-instrumentation.yml').read_text(encoding='utf-8'))
+    def scripts(job):
+        return '\n'.join(str(step.get('with', {}).get('script', '')) for step in job.get('steps', []))
+    smoke = ci.get('jobs', {}).get('android-smoke', {})
+    if 26 not in smoke.get('strategy', {}).get('matrix', {}).get('api-level', []):
+        errors.append('API26 must remain in the smoke matrix')
+    if "bash tools/run-device-suite smoke-api Debug '${{ matrix.api-level }}'" not in scripts(smoke):
+        errors.append('smoke must pass the API level to the minimum-suite router')
+    events = full.get('on', full.get(True, {}))
+    if not events.get('schedule'):
+        errors.append('nightly device schedule is required')
+    paths = events.get('pull_request', {}).get('paths', [])
+    required = ['app-android/src/main/kotlin/runtime/mobileagent/MobileAgentApp.kt',
+                'app-android/src/main/kotlin/runtime/mobileagent/HostInitialization.kt',
+                'app-android/src/main/kotlin/runtime/mobileagent/DatabaseRecoveryStore.kt',
+                'app-android/src/main/kotlin/runtime/mobileagent/RunCoordinator.kt',
+                'app-android/src/main/kotlin/runtime/mobileagent/RunTools.kt',
+                'app-android/src/main/kotlin/runtime/mobileagent/BoundToolExecutor.kt',
+                'app-android/src/main/kotlin/runtime/mobileagent/ChatExecutionController.kt',
+                'app-android/src/main/kotlin/runtime/mobileagent/ChatRuntimeEvents.kt',
+                'app-android/src/main/kotlin/runtime/mobileagent/ChatToolApprovalRequest.kt',
+                'app-android/src/main/kotlin/runtime/mobileagent/ChatApprovalOutcome.kt',
+                'app-android/src/main/kotlin/runtime/mobileagent/ChatRootPreflight.kt',
+                'app-android/src/main/kotlin/runtime/mobileagent/ConfirmedDeviceActionCancellation.kt',
+                'app-android/src/main/kotlin/runtime/mobileagent/ChatRunLifecycle.kt',
+                'app-android/src/main/kotlin/runtime/mobileagent/integration/RuntimeIntegration.kt',
+                'app-android/src/main/kotlin/runtime/mobileagent/security/PrivilegedWorkspaceBindingCipher.kt',
+                'app-android/src/main/kotlin/runtime/mobileagent/tooling/ApprovalEngine.kt',
+                'data/sqlite/src/main/kotlin/runtime/mobileagent/data/RootRunAdmission.kt',
+                'data/sqlite/src/main/kotlin/runtime/mobileagent/data/RootAuthorityRepository.kt',
+                'data/sqlite/src/main/kotlin/runtime/mobileagent/data/RunRepository.kt',
+                'tools/instrumentation-suites.json', 'tools/verify_test_selection.py']
+    for path in required:
+        if not any(fnmatch.fnmatchcase(path, pattern) for pattern in paths):
+            errors.append(f'Review recovery trigger missing: {path}')
+    expected = "bash tools/run-device-suite '${{ github.event_name == 'pull_request' && 'recovery' || inputs.suite || 'nightly' }}' '${{ github.event_name == 'pull_request' && 'Review' || inputs.variant || 'Debug' }}'"
+    if expected not in scripts(full.get('jobs', {}).get('full-device', {})):
+        errors.append('PR recovery must use Review and scheduled runs must use nightly')
+    return errors
 
 
 def test_classes(root: pathlib.Path) -> set[str]:
@@ -51,6 +117,16 @@ def violations(root: pathlib.Path, manifest: dict) -> list[str]:
             errors.append(f"manual-only class is selected by CI: {target}")
     if set(suites["full"]) != actual - set(manual):
         errors.append("full suite must explicitly include every non-manual test class")
+    for name in ("performance", "minimum_api", "recovery"):
+        if name not in manifest:
+            continue
+        targets = manifest[name]
+        if not targets or len(targets) != len(set(targets)) or not set(targets) <= set(suites["full"]):
+            errors.append(f"{name}: must contain distinct automated full-suite targets")
+    if "performance" in manifest:
+        nightly = select_suite(manifest, "nightly")
+        if not nightly or set(nightly) & set(manifest["performance"]):
+            errors.append("nightly and performance must be nonempty disjoint partitions")
     # These fixtures intentionally require the deferred app host and build their
     # own synthetic storage. Keep them ahead of tests that initialize the host;
     # never remove their safety guard to make combined execution pass.
@@ -63,8 +139,12 @@ def violations(root: pathlib.Path, manifest: dict) -> list[str]:
             errors.append(f"{name}: fresh-host tests must run before host-initializing fixtures")
     workflow = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     for name in ("smoke", "convergence", "pipeline"):
-        if ",".join(suites[name]) not in workflow:
+        if ",".join(suites[name]) not in workflow and f"run-device-suite {name}" not in workflow:
             errors.append(f"ci.yml selector differs from {name} manifest")
+    if any(name in manifest for name in ('performance', 'minimum_api', 'recovery')):
+        if not all(name in manifest for name in ('performance', 'minimum_api', 'recovery')):
+            errors.append('performance, minimum_api and recovery must all be declared')
+        errors.extend(workflow_matrix_violations(root))
     return errors
 
 
@@ -90,8 +170,9 @@ def result_summary(directory: pathlib.Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--suite", choices=("smoke", "convergence", "pipeline", "full"))
+    parser.add_argument("--suite", choices=("smoke", "convergence", "pipeline", "full", "nightly", "performance", "minimum", "recovery"))
     parser.add_argument("--summary", type=pathlib.Path)
+    parser.add_argument("--groups", action="store_true", help="Isolate fresh-host classes in separate instrumentation processes")
     args = parser.parse_args()
     manifest = json.loads((ROOT / "tools/instrumentation-suites.json").read_text(encoding="utf-8"))
     errors = violations(ROOT, manifest)
@@ -99,7 +180,10 @@ def main() -> int:
         print("\n".join(errors), file=sys.stderr)
         return 1
     if args.suite:
-        print(",".join(manifest["suites"][args.suite]))
+        if args.groups:
+            print("\n".join(",".join(group) for group in invocation_groups(manifest, args.suite)))
+        else:
+            print(",".join(select_suite(manifest, args.suite)))
     elif args.summary:
         print(result_summary(args.summary))
         print("### Explicit manual-only exclusions")

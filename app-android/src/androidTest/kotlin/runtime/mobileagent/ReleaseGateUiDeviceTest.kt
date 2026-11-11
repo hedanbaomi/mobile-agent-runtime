@@ -7,6 +7,7 @@ import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -80,6 +81,19 @@ class ReleaseGateUiDeviceTest {
             waitForText(labels.first, labels.second)
             assertMenuShownAndBackAbsent()
         }
+    }
+
+    @Test
+    fun drawerLabelsDoNotCountAsTheDestinationTitle() {
+        waitForText("对话", "Chat")
+        openDrawer()
+        compose.onNodeWithTag("global.drawer")
+            .performScrollToNode(hasTestTag("global.drawer.navigation.providers"))
+        compose.onNodeWithTag("global.drawer.navigation.providers").assertIsDisplayed()
+        assertFalse(
+            "The drawer label must not complete navigation while Chat is still selected",
+            hasDestinationTitle("服务商", "Providers"),
+        )
     }
 
     @Test
@@ -254,6 +268,7 @@ class ReleaseGateUiDeviceTest {
             compose.onAllNodesWithTag("global.drawer.modal", useUnmergedTree = true)
                 .fetchSemanticsNodes().isNotEmpty()
         }
+        compose.onNodeWithTag("global.drawer.modal").assertIsDisplayed()
     }
 
     private fun assertMenuShownAndBackAbsent() {
@@ -266,7 +281,8 @@ class ReleaseGateUiDeviceTest {
     }
 
     private fun waitForText(chinese: String, english: String) {
-        compose.waitUntil(15_000) { hasText(chinese, english) }
+        compose.waitUntil(15_000) { hasDestinationTitle(chinese, english) }
+        compose.waitForIdle()
     }
 
     private fun localized(chinese: String, english: String): SemanticsNodeInteraction =
@@ -276,11 +292,11 @@ class ReleaseGateUiDeviceTest {
             compose.onAllNodesWithText(english)[0]
         }
 
-    private fun hasText(chinese: String, english: String): Boolean {
-        val chineseNodes = compose.onAllNodesWithText(chinese, useUnmergedTree = true).fetchSemanticsNodes()
-        if (chineseNodes.isNotEmpty()) return true
-        return compose.onAllNodesWithText(english, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
-    }
+    private fun hasDestinationTitle(chinese: String, english: String): Boolean =
+        compose.onAllNodes(
+            hasTestTag("global.shell.title") and (hasText(chinese) or hasText(english)),
+            useUnmergedTree = true,
+        ).fetchSemanticsNodes().isNotEmpty()
 
     private fun assertTextAbsent(chinese: String, english: String) {
         assertTrue(compose.onAllNodesWithText(chinese, useUnmergedTree = true).fetchSemanticsNodes().isEmpty())

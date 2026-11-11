@@ -31,6 +31,10 @@ class ChatStreamingCancelDeviceTest {
     fun cancellationKeepsLatestPartialTextAndTerminalMarker() {
         val app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as MobileAgentApp
         app.ensureHostInitialized()
+        // Resolve the migrated host copy through the same helper production uses, so the assertions
+        // follow the app-language source instead of the device locale or one hardcoded language.
+        val cancelledPartialCopy = app.hostChatText(R.string.chat_cancelled_partial_unknown_outcome_message)
+        val interruptionCopy = app.hostChatText(R.string.chat_cancelled_unknown_outcome)
         val container = app.container
         val id = UUID.randomUUID().toString()
         val released = CountDownLatch(1)
@@ -87,7 +91,7 @@ class ChatStreamingCancelDeviceTest {
                 InstrumentationRegistry.getInstrumentation().runOnMainSync { vm.cancel() }
                 awaitUntil(15_000) {
                     !vm.state.value.streaming && vm.state.value.messages.any {
-                        it.role == "assistant" && it.eventSummary.contains("已取消接收")
+                        it.role == "assistant" && it.eventSummary.contains(cancelledPartialCopy)
                     }
                 }
                 val assistant = container.conversations.messages(conversation.id)
@@ -96,8 +100,8 @@ class ChatStreamingCancelDeviceTest {
                 assertEquals("UNKNOWN_OUTCOME", assistant.status)
                 assertEquals(MessageErrorCode.UNKNOWN_OUTCOME,
                     assistant.parts.filterIsInstance<ErrorPart>().last().code)
-                assertTrue(vm.state.value.messages.last { it.role == "assistant" }.eventSummary.contains("已取消接收"))
-                assertTrue(vm.state.value.status.contains("已取消接收"))
+                assertTrue(vm.state.value.messages.last { it.role == "assistant" }.eventSummary.contains(cancelledPartialCopy))
+                assertTrue(vm.state.value.status.contains(interruptionCopy))
                 assertEquals(RunStatus.UNKNOWN_OUTCOME, container.runs.list(conversation.id).last().state)
                 assertFalse(vm.state.value.streaming)
             } finally {

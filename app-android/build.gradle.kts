@@ -385,6 +385,7 @@ dependencies {
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.ktor.client.mock)
     testImplementation(libs.junit.jupiter.engine)
+    testRuntimeOnly(libs.junit.platform.launcher)
     testImplementation("org.xerial:sqlite-jdbc:3.47.2.0")
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

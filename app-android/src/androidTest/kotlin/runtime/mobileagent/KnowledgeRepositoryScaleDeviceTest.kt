@@ -32,7 +32,7 @@ import runtime.mobileagent.vector.UsearchVectorIndex
 /**
  * Real KnowledgeRepository + bundled SQLite + USearch JNI + snapshot directory at
  * 1k/10k/50k members.  Arg `repositoryScaleCount` (default 1000, cap 50000),
- * dimension 384, local HashingTextEmbedder only: no apiEmbedder/vision/network.
+ * production-default dimension (512), local HashingTextEmbedder only: no apiEmbedder/vision/network.
  *
  * FIXTURE SEMANTICS: one genuinely imported self-authored text gives a legal KB /
  * document_version / space / READY generation / chunk / embedding / member start.
@@ -50,7 +50,7 @@ import runtime.mobileagent.vector.UsearchVectorIndex
 @RunWith(AndroidJUnit4::class)
 class KnowledgeRepositoryScaleDeviceTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
-    private val dimension = 384
+    private val dimension = runtime.mobileagent.embedding.AndroidModelPackLoader.DEFAULT_DIMENSION
     private val topK = 8
 
     @Test(timeout = 3_600_000)

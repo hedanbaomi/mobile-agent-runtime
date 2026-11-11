@@ -253,6 +253,15 @@ fun registerSettingsAuthorityPortProvider(context: Context, provider: SettingsAu
     settingsAuthorityPorts.remove(appContext)
 }
 
+/** Retire only this initialization attempt, never a replacement container. */
+@Synchronized
+internal fun unregisterSettingsAuthorityPortProvider(context: Context, provider: SettingsAuthorityPortProvider) {
+    val appContext = context.applicationContext
+    if (settingsAuthorityProviders[appContext] !== provider) return
+    settingsAuthorityProviders.remove(appContext)
+    settingsAuthorityPorts.remove(appContext)
+}
+
 /**
  * Resolve the application adapter. The fallback is deliberately unavailable
  * with respect to durable authority policy: it does not infer live platform

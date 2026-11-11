@@ -23,4 +23,5 @@ dependencies {
     // Pure-JVM tests for the provider list labels: no android.* API is touched.
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.junit.jupiter.engine)
+    testRuntimeOnly(libs.junit.platform.launcher)
 }

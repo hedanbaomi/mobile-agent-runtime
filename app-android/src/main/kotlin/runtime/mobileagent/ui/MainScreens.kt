@@ -450,7 +450,9 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
                     requestRoute(target)
                 },
             ) { padding ->
-                Box(Modifier.fillMaxSize().padding(padding)) {
+                Column(Modifier.fillMaxSize().padding(padding)) {
+                    QuickStartCard(app.container, route, shellDetailOpen, drawerChatState.streaming, { drawerOpen = true }, ::requestRoute)
+                    Box(Modifier.weight(1f)) {
                     NavHost(navController = navController, startDestination = initialRoute) {
                         composable(AppRoutes.CHAT) {
                             ChatRoute(
@@ -580,6 +582,7 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
                                 },
                             )
                         }
+                    }
                     }
                 }
             }

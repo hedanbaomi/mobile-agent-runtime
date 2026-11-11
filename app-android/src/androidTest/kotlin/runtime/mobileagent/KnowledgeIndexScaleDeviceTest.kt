@@ -49,7 +49,8 @@ class KnowledgeIndexScaleDeviceTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext
 
     private val dimension: Int
-        get() = InstrumentationRegistry.getArguments().getString("indexScaleDimension")?.toIntOrNull() ?: 384
+        get() = (InstrumentationRegistry.getArguments().getString("indexScaleDimension")?.toIntOrNull()
+            ?: runtime.mobileagent.embedding.AndroidModelPackLoader.DEFAULT_DIMENSION).also { require(it in 1..4096) }
 
     private val topK = 8
     private val queryCount = 24

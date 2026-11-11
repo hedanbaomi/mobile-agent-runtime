@@ -606,7 +606,8 @@ private fun ChatConversationContent(
                         modifier = Modifier.testTag("conversation.visualDegradation"))
                 }
                 if (!state.streaming && (state.status.contains("压缩失败") || state.status.contains("预算不足") ||
-                        state.status.contains("CONTEXT_OVERFLOW") || state.error?.contains("预算不足") == true ||
+                        hasContextOverflowCode(state.status, state.error, state.messages.lastOrNull()?.eventSummary) ||
+                        state.error?.contains("预算不足") == true ||
                         state.messages.lastOrNull()?.eventSummary?.let { it.contains("压缩失败") || it.contains("预算不足") } == true)) {
                     Text(if (state.language.equals("zh-CN", true)) "原始历史保留。可在智能体设置调整配置后新建会话；新会话不会自动复制历史或重做工具。"
                         else "Original history is retained. Adjust the Agent settings and start a new conversation; history and tool actions are not replayed.",

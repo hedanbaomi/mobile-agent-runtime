@@ -74,6 +74,41 @@ class ContextCompactionUiTest {
         compose.runOnIdle { assertEquals("24", editor.contextPolicyDraft.maxHistoryMessages) }
     }
 
+    @Test fun stableContextOverflowCodeOffersRecoveryInBothLanguagesOnlyWhenIdle() {
+        var ui by mutableStateOf(ChatUiState(selectedSessionId = "overflow",
+            language = "en-US", error = "CONTEXT_OVERFLOW: Input budget exceeded"))
+        var newSessions = 0
+        compose.setContent {
+            MaterialTheme { ConversationScreen(ui, ChatActions(onNewSession = { newSessions++ })) }
+        }
+        compose.onNodeWithTag("conversation.contextRecovery.new").assertIsDisplayed().performClick()
+        compose.runOnIdle { assertEquals(1, newSessions) }
+        screenshot("context-overflow-en.png")
+        compose.runOnIdle { ui = ui.copy(language = "zh-CN", error = "CONTEXT_OVERFLOW: 输入预算已超限") }
+        compose.onNodeWithTag("conversation.contextRecovery.new").assertIsDisplayed()
+        compose.runOnIdle { ui = ui.copy(streaming = true) }
+        compose.onNodeWithTag("conversation.contextRecovery.new").assertDoesNotExist()
+        compose.runOnIdle { ui = ui.copy(streaming = false, error = "Unrelated connection failure") }
+        compose.onNodeWithTag("conversation.contextRecovery.new").assertDoesNotExist()
+        compose.runOnIdle {
+            ui = ui.copy(
+                language = "en-US",
+                status = "Using configuration snapshot",
+                error = null,
+                messages = listOf(
+                    ChatMessageUi(
+                        id = "persisted-overflow",
+                        role = "assistant",
+                        text = "",
+                        timeLabel = "2026-11-11T10:00",
+                        eventSummary = "CONTEXT_OVERFLOW · Input budget exceeded",
+                    ),
+                ),
+            )
+        }
+        compose.onNodeWithTag("conversation.contextRecovery.new").assertIsDisplayed()
+    }
+
     private fun screenshot(name: String) {
         compose.waitForIdle()
         val instrumentation = InstrumentationRegistry.getInstrumentation()

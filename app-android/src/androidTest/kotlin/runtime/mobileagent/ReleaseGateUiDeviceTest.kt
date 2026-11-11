@@ -51,10 +51,18 @@ class ReleaseGateUiDeviceTest {
     val notificationPromptHandled = TestRule { base, _ ->
         object : Statement() {
             override fun evaluate() {
-                ApplicationProvider.getApplicationContext<MobileAgentApp>()
-                    .getSharedPreferences("notification-permission", android.content.Context.MODE_PRIVATE)
-                    .edit().putBoolean("requested", true).commit()
-                base.evaluate()
+                System.err.println("[MAR-NAV-PROBE] rule-enter")
+                try {
+                    ApplicationProvider.getApplicationContext<MobileAgentApp>()
+                        .getSharedPreferences("notification-permission", android.content.Context.MODE_PRIVATE)
+                        .edit().putBoolean("requested", true).commit()
+                    base.evaluate()
+                } catch (failure: Throwable) {
+                    System.err.println("[MAR-FIRST-RULE-FAILURE] " + failure.stackTraceToString())
+                    throw failure
+                } finally {
+                    System.err.println("[MAR-NAV-PROBE] rule-exit")
+                }
             }
         }
     }
@@ -62,24 +70,47 @@ class ReleaseGateUiDeviceTest {
     @get:Rule(order = 1)
     val compose = createAndroidComposeRule<MainActivity>()
 
+    @get:Rule(order = 2)
+    val pendingComposeFailures = TestRule { base, _ ->
+        object : Statement() {
+            override fun evaluate() {
+                try {
+                    base.evaluate()
+                } finally {
+                    recordPendingComposeFailure()
+                }
+            }
+        }
+    }
+
     @Test
     fun drawerReachesEveryTopLevelDestinationDirectly() {
-        waitForText("对话", "Chat")
-        listOf(
-            "knowledge" to ("知识" to "Knowledge"),
-            "providers" to ("服务商" to "Providers"),
-            "news" to ("公告" to "News"),
-            "settings" to ("设置" to "Settings"),
-            "mcp" to ("MCP" to "MCP"),
-            "inspector" to ("请求检查器" to "Request inspector"),
-        ).forEach { (route, labels) ->
-            openDrawer()
-            compose.onNodeWithTag("global.drawer")
-                .performScrollToNode(hasTestTag("global.drawer.navigation.$route"))
-            compose.onNodeWithTag("global.drawer.navigation.$route")
-                .assertExists().assertHasClickAction().performClick()
-            waitForText(labels.first, labels.second)
-            assertMenuShownAndBackAbsent()
+        try {
+            System.err.println("[MAR-NAV-PROBE] body-enter")
+            waitForText("对话", "Chat")
+            listOf(
+                "knowledge" to ("知识" to "Knowledge"),
+                "providers" to ("服务商" to "Providers"),
+                "news" to ("公告" to "News"),
+                "settings" to ("设置" to "Settings"),
+                "mcp" to ("MCP" to "MCP"),
+                "inspector" to ("请求检查器" to "Request inspector"),
+            ).forEach { (route, labels) ->
+                openDrawer()
+                compose.onNodeWithTag("global.drawer")
+                    .performScrollToNode(hasTestTag("global.drawer.navigation.$route"))
+                compose.onNodeWithTag("global.drawer.navigation.$route")
+                    .assertExists().assertHasClickAction().performClick()
+                waitForText(labels.first, labels.second)
+                assertMenuShownAndBackAbsent()
+                System.err.println("[MAR-NAV-PROBE] reached=" + route)
+            }
+            compose.waitForIdle()
+            System.err.println("[MAR-NAV-PROBE] body-complete")
+        } catch (failure: Throwable) {
+            // Retain the first failure before ActivityScenarioRule teardown can replace it.
+            System.err.println("[MAR-FIRST-COMPOSE-FAILURE] " + failure.stackTraceToString())
+            throw failure
         }
     }
 
@@ -255,6 +286,29 @@ class ReleaseGateUiDeviceTest {
             assertTrue(request.url.toString().contains("channel=stable"))
         } finally {
             client.close()
+        }
+    }
+
+    // Diagnostic for the pinned ui-test 1.7.6: idling can fail before its queue is drained.
+    // Read only; clearing or throwing this queue would change the framework's failure handling.
+    private fun recordPendingComposeFailure() {
+        try {
+            val environment = compose.javaClass.getDeclaredField("environment")
+                .apply { isAccessible = true }.get(compose)
+            val handler = Class.forName("androidx.compose.ui.test.AndroidComposeUiTestEnvironment")
+                .getDeclaredField("coroutineExceptionHandler")
+                .apply { isAccessible = true }.get(environment)
+            val pending = synchronized(handler) {
+                handler.javaClass.getDeclaredField("exception")
+                    .apply { isAccessible = true }.get(handler) as? Throwable
+            }
+            if (pending == null) {
+                System.err.println("[MAR-COMPOSE-QUEUE-PROBE] empty")
+            } else {
+                System.err.println("[MAR-PENDING-COMPOSE-FAILURE] " + pending.stackTraceToString())
+            }
+        } catch (unavailable: Exception) {
+            System.err.println("[MAR-COMPOSE-PROBE-UNAVAILABLE] " + unavailable.javaClass.name + ": " + unavailable.message)
         }
     }
 

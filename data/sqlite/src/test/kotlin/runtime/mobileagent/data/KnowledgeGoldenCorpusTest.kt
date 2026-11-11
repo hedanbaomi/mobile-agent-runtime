@@ -286,6 +286,7 @@ class KnowledgeGoldenCorpusTest {
     fun interruptedBatchKeepsOwnershipUntilNestedVisionActuallyExits() {
         val case = KnowledgeGoldenCorpus.cases().single { it.id == "scanned-multipage" }
         val entered = java.util.concurrent.CountDownLatch(1)
+        val providerInterrupted = java.util.concurrent.CountDownLatch(1)
         val release = java.util.concurrent.CountDownLatch(1)
         val callerExited = java.util.concurrent.CountDownLatch(1)
         val calls = java.util.concurrent.atomic.AtomicInteger()
@@ -296,7 +297,10 @@ class KnowledgeGoldenCorpusTest {
                 calls.incrementAndGet()
                 entered.countDown()
                 while (release.count > 0) {
-                    try { release.await() } catch (_: InterruptedException) { /* delayed provider shutdown */ }
+                    try { release.await() } catch (_: InterruptedException) {
+                        providerInterrupted.countDown()
+                        // The provider remains in flight after observing cancellation.
+                    }
                 }
                 VisionOutcome.Success(VisionSuccess("preserved late response", "synthetic response"))
             }
@@ -318,6 +322,9 @@ class KnowledgeGoldenCorpusTest {
                 assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
                 caller.interrupt()
                 assertTrue(callerExited.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                // The outer waiter can exit before cancellation reaches the nested Vision worker.
+                assertTrue(providerInterrupted.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                    "nested vision must observe interruption before its delayed shutdown is released")
                 assertThrows(IllegalStateException::class.java) {
                     repo.reconfigureBatchPipeline(batch, "vision-unconfigured", repo.batchReuseSummary(batch, "vision-unconfigured"), true)
                 }

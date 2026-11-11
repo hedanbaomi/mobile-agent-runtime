@@ -28,4 +28,5 @@ dependencies {
     // Pure-JVM tests for the presentation model and the bilingual resource contract.
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.junit.jupiter.engine)
+    testRuntimeOnly(libs.junit.platform.launcher)
 }

@@ -1,0 +1,62 @@
+// SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+package runtime.mobileagent.data
+
+import java.nio.file.Files
+import java.nio.file.Path
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.*
+import org.junit.jupiter.api.Test
+import runtime.mobileagent.domain.*
+import runtime.mobileagent.knowledge.*
+import runtime.mobileagent.serialization.TransferOptions
+
+class ReleasedArchiveGenerationTest {
+    @Test fun freezePhysicalDatabaseAndPortableArchiveFromReleasedCode() {
+        val root = Path.of(System.getenv("MAR_RELEASE_FIXTURE_OUTPUT") ?: error("Set a new external fixture output directory"))
+        check(!Files.exists(root))
+        Files.createDirectories(root)
+        val blobs = FileBlobSink(root.resolve("cas").toFile())
+        JdbcSqlConnection("jdbc:sqlite:${root.resolve("source.db")}").use { db ->
+            Migrations.apply(db)
+            val profiles = ProfileRepository(db)
+            profiles.createProvider(ProviderProfile("archive-provider", "Synthetic", ApiFormat.OPENAI_COMPATIBLE,
+                "https://example.invalid/v1", secretRef = "unresolvable-local-reference", revision = 1))
+            profiles.createModel(ModelProfile("archive-model", "archive-provider", ModelRole.CHAT, "synthetic",
+                capabilities = emptySet(), contextLimit = 1000, outputLimit = 100, revision = 1))
+            val knowledge = KnowledgeRepository(db, blobs)
+            val kb = knowledge.createKnowledgeBase("Released evidence", "archive-kb")
+            val source = "旧版归档证据 archive source evidence".toByteArray()
+            val imported = knowledge.importBytes("evidence.txt", "text/plain", source, false, kb)
+            check(imported.stage == ImportStage.READY)
+            val agents = AgentRepository(db)
+            val agent = agents.saveWithPrompt(AgentProfile("archive-agent", "Synthetic", "initial", "archive-model",
+                knowledgeBaseIds = listOf(kb), revision = 0), "Synthetic prompt")
+            CapabilityGrantRepository(db).save(CapabilityGrant("archive-grant", agent.id,
+                CapabilityId(CapabilityId.MEMORY_READ), revision = 1))
+            val snapshot = agents.createSnapshot(agent.id, "archive-snapshot")
+            val chats = ConversationRepository(db)
+            val conversation = chats.create(snapshot.id, "Released archive", "archive-conversation")
+            chats.append(conversation.id, MessageRole.USER, "保留旧版归档消息", messageId = "archive-message")
+            val citations = knowledge.retrieve("archive-run", "archive source evidence", 8, listOf(kb)).citations
+            check(citations.isNotEmpty())
+            chats.append(conversation.id, MessageRole.ASSISTANT, "Synthetic cited reply", messageId = "archive-answer",
+                metadataJson = buildJsonObject { put("citations", JsonArray(citations.map { citation -> buildJsonObject {
+                    put("citationId", citation.citationId); put("documentId", citation.documentId)
+                    put("chunkId", citation.chunkId); put("documentVersionId", citation.documentVersionId)
+                    put("knowledgeBaseId", citation.knowledgeBaseId); put("page", citation.page)
+                    put("sourceSpan", citation.sourceSpan)
+                } })) }.toString())
+            RunRepository(db).create(RunRecord("archive-run", snapshot.id, conversation.id,
+                state = RunStatus.UNKNOWN_OUTCOME, inputTokens = 37, createdAt = "2026-10-01T00:00:00Z"))
+            db.execute("INSERT INTO tool_invocations(invocation_id,run_id,call_id,name,arguments_json,permission_decision,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                listOf("archive-invocation", "archive-run", "call", "synthetic_tool", "{}", "APPROVED", "UNKNOWN_OUTCOME",
+                    "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z"))
+            knowledge.closeVectorIndexes()
+            Files.newOutputStream(root.resolve("v1.4.0.zip")).use { output ->
+                TransferRepository(db, blobSink = blobs).exportArchive(agent.id,
+                    TransferOptions(includeKnowledgeContent = true, includeConversations = true), output)
+            }
+        }
+    }
+}

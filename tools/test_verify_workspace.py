@@ -4,10 +4,20 @@ import pathlib
 import subprocess
 import tempfile
 import unittest
-from verify_workspace import check
+from verify_workspace import check, check_local_git_baseline
 
 
 class WorkspaceGuardTest(unittest.TestCase):
+    def test_stale_explicit_local_baseline_is_rejected(self):
+        self.identity(15, "1.1.5")
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"], cwd=self.root, check=True)
+        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.root, text=True).strip()
+        self.assertEqual([], check_local_git_baseline(self.root, f'<!-- local-head: {sha} -->'))
+        self.assertTrue(check_local_git_baseline(self.root, '<!-- local-head: 0000000 -->'))
+        self.assertTrue(check_local_git_baseline(self.root, '<!-- local-head: not-a-sha -->'))
+        self.assertTrue(check_local_git_baseline(self.root, 'stale baseline without markers', required=True))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -75,6 +85,45 @@ class WorkspaceGuardTest(unittest.TestCase):
         self.assertTrue(any("missing link" in error for error in check(self.root)))
         (self.root / "docs/agents/handoff").mkdir()
         self.assertTrue(any("budget" in error for error in check(self.root)))
+
+    def test_publication_checks_candidate_and_revision_without_mixing_trees(self):
+        self.identity(15, "1.1.5")
+        doc = self.root / "docs/CURRENT.md"
+        doc.write_text("[broken](missing.md)\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                        "commit", "-qm", "published broken link"], cwd=self.root, check=True)
+        doc.write_text("[fixed](PRESENT.md)\n", encoding="utf-8")
+        target = self.root / "docs/PRESENT.md"
+        target.write_text("portable\n", encoding="utf-8")
+        self.assertTrue(check(self.root, publication=True), "untracked local targets must fail")
+        subprocess.run(["git", "add", "docs/PRESENT.md"], cwd=self.root, check=True)
+        self.assertEqual([], check(self.root, publication=True))
+        self.assertTrue(any("missing.md" in error for error in check(self.root, publication=True, revision="HEAD")))
+        target.unlink()
+        self.assertTrue(check(self.root, publication=True), "tracked but deleted targets must fail")
+        self.assertTrue(check(self.root, publication=True, revision="absent-revision"))
+
+    def test_publication_rejects_nested_private_artifact_even_if_tracked(self):
+        self.identity(15, "1.1.5")
+        doc = self.root / "docs/agents/CURRENT.md"
+        target = self.root / ".private/proof.md"
+        target.parent.mkdir()
+        target.write_text("private\n", encoding="utf-8")
+        doc.write_text("[private](../../.private/proof.md)\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        self.assertTrue(any("local artifact" in error for error in check(self.root, publication=True)))
+
+    def test_revision_checks_documents_deleted_from_worktree(self):
+        self.identity(15, "1.1.5")
+        doc = self.root / "docs/CURRENT.md"
+        doc.write_text("[missing](missing.md)\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.root, check=True)
+        subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                        "commit", "-qm", "historical doc"], cwd=self.root, check=True)
+        doc.unlink()
+        self.assertEqual([], check(self.root, publication=True))
+        self.assertTrue(any("missing.md" in error for error in check(self.root, publication=True, revision="HEAD")))
 
 
 if __name__ == "__main__":

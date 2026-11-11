@@ -1,0 +1,36 @@
+// SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+package runtime.mobileagent.data
+
+import org.junit.jupiter.api.Test
+import runtime.mobileagent.domain.*
+import java.nio.file.Path
+import java.nio.file.Files
+
+class ReleasedFixtureGenerationTest {
+    @Test fun generateWithReleasedCodeOnly() {
+        val target = Path.of(System.getenv("MAR_RELEASE_FIXTURE_OUTPUT") ?: error("Set a new external fixture output path"))
+        check(!Files.exists(target))
+        JdbcSqlConnection("jdbc:sqlite:$target").use { db ->
+            Migrations.apply(db)
+            val profiles = ProfileRepository(db)
+            profiles.createProvider(ProviderProfile("fixture-provider", "Synthetic", ApiFormat.OPENAI_COMPATIBLE,
+                "https://example.invalid/v1", secretRef = "fixture-ref", revision = 1))
+            profiles.createModel(ModelProfile("fixture-model", "fixture-provider", ModelRole.CHAT, "synthetic-model",
+                capabilities = emptySet(), contextLimit = 1000, outputLimit = 100, revision = 1))
+            val agents = AgentRepository(db)
+            val agent = agents.saveWithPrompt(AgentProfile("fixture-agent", "Synthetic", "initial", "fixture-model", revision = 0), "Synthetic prompt")
+            val snapshot = agents.createSnapshot(agent.id, "fixture-snapshot")
+            val chats = ConversationRepository(db)
+            val chat = chats.create(snapshot.id, "旧版合成会话", "fixture-conversation", "2026-10-01T00:00:00Z")
+            chats.append(chat.id, MessageRole.USER, "保留旧版消息 / preserve old message", messageId = "fixture-message")
+            RunRepository(db).create(RunRecord("fixture-run", snapshot.id, chat.id,
+                state = RunStatus.UNKNOWN_OUTCOME, createdAt = "2026-10-01T00:00:00Z", inputTokens = 37,
+                stopReason = "synthetic unknown outcome"))
+            val knowledge = KnowledgeRepository(db, runtime.mobileagent.knowledge.MemoryBlobSink())
+            val job = knowledge.importBytes("fixture.txt", "text/plain", "旧版知识证据 synthetic knowledge evidence".toByteArray(), false)
+            check(job.stage == runtime.mobileagent.knowledge.ImportStage.READY)
+            knowledge.closeVectorIndexes()
+        }
+    }
+}

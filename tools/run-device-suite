@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+set -euo pipefail
+suite=${1:?suite required}
+variant=${2:-Debug}
+case "$variant" in Debug) build_type=debug ;; Review) build_type=review ;; *) exit 2 ;; esac
+if [[ $suite == smoke-api ]]; then
+  if [[ ${3:-} == 26 ]]; then suite=minimum; else suite=smoke; fi
+fi
+cd -- "$(dirname -- "$0")/.."
+groups=$(python3 tools/verify_test_selection.py --suite "$suite" --groups)
+evidence_root=app-android/build/reports/device-evidence
+if [[ -d $evidence_root ]]; then
+  previous=$(mktemp -d app-android/build/reports/previous-device-evidence.XXXXXX)
+  mv "$evidence_root" "$previous/"
+fi
+mkdir -p "$evidence_root"
+evidence=$(mktemp -d "$evidence_root/invocation.XXXXXX")
+capture_failure() {
+  status=$?
+  if [[ $status != 0 ]]; then
+    # Fresh CI AVD with synthetic fixtures only; never attach this runner to a personal device.
+    adb -s "${ANDROID_SERIAL:-emulator-${EMULATOR_PORT:-5554}}" logcat -d -t 2000 > "$evidence/first-failure.log" 2>/dev/null || true
+    adb -s "${ANDROID_SERIAL:-emulator-${EMULATOR_PORT:-5554}}" exec-out screencap -p > "$evidence/first-failure.png" 2>/dev/null || true
+  fi
+  exit "$status"
+}
+trap capture_failure EXIT
+group=0
+while IFS= read -r classes; do
+  group=$((group + 1))
+  destination="$evidence/$suite-$variant-$group"
+  mkdir -p "$destination"
+  results=app-android/build/outputs/androidTest-results/connected
+  if [[ -d $results ]]; then
+    previous=$(mktemp -d app-android/build/reports/previous-device-results.XXXXXX)
+    mv "$results" "$previous/"
+  fi
+  status=0
+  ./gradlew ":app-android:connected${variant}AndroidTest" "-PmarTestBuildType=$build_type" \
+    "-Pandroid.testInstrumentationRunnerArguments.class=$classes" --dependency-verification=strict --no-daemon || status=$?
+  produced=false
+  if [[ -d $results ]]; then
+    mv "$results" "$destination/"
+    produced=true
+  fi
+  printf '{"classes":"%s","variant":"%s","exitCode":%d,"producedResults":%s}\n' "$classes" "$variant" "$status" "$produced" > "$destination/invocation.json"
+  [[ $status == 0 ]] || exit "$status"
+done <<< "$groups"

@@ -4,10 +4,42 @@
 import pathlib
 import tempfile
 import unittest
-from verify_test_selection import violations, result_summary
+from verify_test_selection import violations, result_summary, select_suite, invocation_groups, workflow_matrix_violations
 
 
 class TestSelectionTest(unittest.TestCase):
+    def test_risk_matrix_rejects_missing_triggers_wrong_variants_and_minimum_routing(self):
+        import shutil
+        source = pathlib.Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            workflows = root / '.github/workflows'
+            workflows.mkdir(parents=True)
+            for name in ('ci.yml', 'full-instrumentation.yml'):
+                shutil.copyfile(source / '.github/workflows' / name, workflows / name)
+            self.assertEqual([], workflow_matrix_violations(root))
+            full = workflows / 'full-instrumentation.yml'
+            original = full.read_text(encoding='utf-8')
+            for old, new in [("'data/sqlite/src/main/kotlin/runtime/mobileagent/data/Root*'", "'unrelated/**'"),
+                             ("'app-android/src/main/kotlin/runtime/mobileagent/ChatExecutionController.kt'", "'unrelated/Controller.kt'"),
+                             ("&& 'Review'", "&& 'Debug'"), ('  schedule:', '  disabled_schedule:')]:
+                full.write_text(original.replace(old, new), encoding='utf-8')
+                self.assertTrue(workflow_matrix_violations(root))
+            full.write_text(original, encoding='utf-8')
+            ci = workflows / 'ci.yml'
+            ci.write_text(ci.read_text(encoding='utf-8').replace('smoke-api Debug', 'smoke Debug'), encoding='utf-8')
+            self.assertTrue(workflow_matrix_violations(root))
+
+    def test_fresh_host_classes_have_independent_invocations_and_complete_coverage(self):
+        manifest = {"suites": {"full": ["a", "b", "c", "d"]}, "fresh_host_first": ["a", "b"]}
+        self.assertEqual([["a"], ["b"], ["c", "d"]], invocation_groups(manifest, "full"))
+
+    def test_nightly_and_performance_partition_every_automated_class(self):
+        manifest = {"suites": {"full": ["fresh", "normal", "large"]}, "performance": ["large"], "minimum_api": ["fresh"]}
+        self.assertEqual(["fresh", "normal"], select_suite(manifest, "nightly"))
+        self.assertEqual(["large"], select_suite(manifest, "performance"))
+        self.assertEqual(["fresh"], select_suite(manifest, "minimum"))
+
     def fixture(self, root):
         source = root / "app-android/src/androidTest/kotlin/ActualTest.kt"
         source.parent.mkdir(parents=True)

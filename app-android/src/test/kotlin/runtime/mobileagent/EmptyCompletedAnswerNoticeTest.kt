@@ -10,20 +10,25 @@ import org.junit.jupiter.api.Test
 /**
  * R3 QA P3: a run that COMPLETED with no visible answer text must explain itself instead of
  * reading as a silent non-reply next to a bare retrieval-coverage notice.
+ *
+ * The copy itself is a resource, so this JVM test only pins the contract: the caller-supplied
+ * notice is used verbatim for a blank answer, and it never appears when an answer exists. The
+ * bilingual wording is asserted by `HostChatTextDeviceTest` against the real resources.
  */
 class EmptyCompletedAnswerNoticeTest {
     @Test
     fun blankAnswerProducesAnActionableNotice() {
+        val notice = "SYNTHETIC_NOTICE for the blank-answer contract"
         listOf("", "   ", "\n\n", "\t").forEach { blank ->
-            val notice = requireNotNull(emptyCompletedAnswerNotice(blank)) { "blank answer: '$blank'" }
-            assertTrue("没有给出可见答复" in notice, notice)
-            assertTrue("检索" in notice, notice)
+            val actual = requireNotNull(emptyCompletedAnswerNotice(blank, notice)) { "blank answer: '$blank'" }
+            assertTrue(actual == notice, actual)
         }
     }
 
     @Test
     fun anyVisibleAnswerSuppressesTheNotice() {
-        assertNull(emptyCompletedAnswerNotice("R3-OK-2026-09-24"))
-        assertNull(emptyCompletedAnswerNotice("  ok  "))
+        val notice = "SYNTHETIC_NOTICE"
+        assertNull(emptyCompletedAnswerNotice("R3-OK-2026-09-24", notice))
+        assertNull(emptyCompletedAnswerNotice("  ok  ", notice))
     }
 }

@@ -8,20 +8,14 @@ import android.content.Intent
 import android.net.Uri
 import java.io.File
 import java.nio.file.Files
-import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.time.Instant
-import java.security.MessageDigest
 import java.util.Locale
-import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import runtime.mobileagent.AgentGrantPort
 import runtime.mobileagent.ThreadWorkspacePort
@@ -32,7 +26,6 @@ import runtime.mobileagent.WorkspacePickerDirectoryAccess
 import runtime.mobileagent.WorkspacePickerPort
 import runtime.mobileagent.WorkspacePickerTarget
 import runtime.mobileagent.SettingsAuthorityPort
-import runtime.mobileagent.SettingsAuthorityPortProvider
 import runtime.mobileagent.SettingsAuthorityMutation
 import runtime.mobileagent.SettingsAuthorityProviderState
 import runtime.mobileagent.SettingsAuthoritySnapshot
@@ -59,42 +52,26 @@ import runtime.mobileagent.diagnostics.DangerousModeDecisionRecord
 import runtime.mobileagent.diagnostics.BridgeRequestStateRecord
 import runtime.mobileagent.diagnostics.DiagnosticReferenceHasher
 import runtime.mobileagent.diagnostics.DiagnosticBridgeRequestState
-import runtime.mobileagent.diagnostics.DiagnosticApprovalState
 import runtime.mobileagent.diagnostics.DiagnosticAuthority
 import runtime.mobileagent.diagnostics.DiagnosticAuthorityConfigurationReason
 import runtime.mobileagent.diagnostics.DiagnosticBackendProbeState
 import runtime.mobileagent.diagnostics.DiagnosticDangerousModeDecisionReason
 import runtime.mobileagent.diagnostics.DiagnosticDangerousModePolicy
-import runtime.mobileagent.diagnostics.DiagnosticExposureState
-import runtime.mobileagent.diagnostics.DiagnosticGrantScope
 import runtime.mobileagent.diagnostics.DiagnosticLimitBucket
 import runtime.mobileagent.diagnostics.DiagnosticLifecycleState
 import runtime.mobileagent.diagnostics.DiagnosticOperation
 import runtime.mobileagent.diagnostics.DiagnosticOperationState
-import runtime.mobileagent.diagnostics.DiagnosticTerminalState
-import runtime.mobileagent.diagnostics.DiagnosticWorkspaceBackendType
-import runtime.mobileagent.diagnostics.ShizukuLifecycleRecord
 import runtime.mobileagent.diagnostics.SkillMemoryOperationStateRecord
-import runtime.mobileagent.diagnostics.ShellExecutionStateRecord
-import runtime.mobileagent.diagnostics.ShellToolExposureChangedRecord
 import runtime.mobileagent.diagnostics.WiredAdbLifecycleRecord
-import runtime.mobileagent.diagnostics.WorkspaceGrantChangedRecord
-import runtime.mobileagent.diagnostics.WorkspaceOperationStateRecord
 import runtime.mobileagent.diagnostics.ConversationWorkspaceEvent
 import runtime.mobileagent.diagnostics.ConversationWorkspaceRecord
 import runtime.mobileagent.diagnostics.AgentWorkspaceDefaultChangedRecord
 import runtime.mobileagent.diagnostics.ConversationWorkspaceResolutionRecord
 import runtime.mobileagent.diagnostics.DiagnosticThreadWorkspaceState
 import runtime.mobileagent.diagnostics.DiagnosticWorkspaceDefaultResult
-import runtime.mobileagent.diagnostics.DiagnosticWorkspaceReattachPhase
-import runtime.mobileagent.diagnostics.PrivilegedWorkspaceBindingPersistedRecord
-import runtime.mobileagent.diagnostics.PrivilegedWorkspaceReattachRecord
 import runtime.mobileagent.domain.AgentSnapshot
 import runtime.mobileagent.domain.AgentWorkspaceDefault
 import runtime.mobileagent.domain.Authority
-import runtime.mobileagent.domain.AuthorityPolicy
-import runtime.mobileagent.domain.isRootAuthority
-import runtime.mobileagent.domain.AuthorityPreferences
 import runtime.mobileagent.domain.AuthorityUserIntent
 import runtime.mobileagent.domain.CapabilityGrant
 import runtime.mobileagent.domain.CapabilityId
@@ -103,15 +80,11 @@ import runtime.mobileagent.domain.DangerousMode
 import runtime.mobileagent.domain.DesktopTrustStatus
 import runtime.mobileagent.domain.EntityId
 import runtime.mobileagent.domain.SafGrantStatus
-import runtime.mobileagent.domain.SafWorkspaceGrant
 import runtime.mobileagent.domain.SnapshotGrantBinding
-import runtime.mobileagent.domain.PrivilegedWorkspaceBinding
 import runtime.mobileagent.domain.PrivilegedWorkspaceBindingStatus
-import runtime.mobileagent.domain.ToolAuditDetail
 import runtime.mobileagent.domain.Utc
 import runtime.mobileagent.domain.Workspace
 import runtime.mobileagent.workspace.READ_ONLY_WORKSPACE_CAPABILITIES
-import runtime.mobileagent.workspace.WorkspaceGrantSet
 import runtime.mobileagent.domain.WorkspaceBackendType
 import runtime.mobileagent.domain.WorkspaceDraft
 import runtime.mobileagent.domain.WorkspaceIntent
@@ -125,94 +98,52 @@ import runtime.mobileagent.workspace.WorkspaceUiPresentation
 import runtime.mobileagent.workspace.WorkspaceUiPresentationStore
 import runtime.mobileagent.workspace.fallbackWorkspaceUiPresentation
 import runtime.mobileagent.workspace.persistedWorkspaceFolderLabel
-import runtime.mobileagent.workspace.privilegedUiTitle
-import runtime.mobileagent.workspace.safTreeUiTitle
-import runtime.mobileagent.workspace.workspaceUiKind
-import runtime.mobileagent.memory.SkillMemoryBinding
 import runtime.mobileagent.memory.SkillMemoryAvailabilitySnapshot
-import runtime.mobileagent.memory.SkillMemoryDiagnosticEvent
 import runtime.mobileagent.memory.SkillMemoryDiagnosticOperation
 import runtime.mobileagent.memory.SkillMemoryDiagnosticRefProvider
 import runtime.mobileagent.memory.SkillMemoryDiagnosticReferences
-import runtime.mobileagent.memory.SkillMemoryDiagnosticRefRequest
 import runtime.mobileagent.memory.SkillMemoryDiagnosticSink
 import runtime.mobileagent.memory.SkillMemoryDiagnosticState
-import runtime.mobileagent.memory.SkillMemoryException
-import runtime.mobileagent.memory.SkillMemoryFailureCode
-import runtime.mobileagent.memory.SkillMemoryListResult
-import runtime.mobileagent.memory.SkillMemoryReadResult
-import runtime.mobileagent.memory.SkillMemorySearchHit
-import runtime.mobileagent.memory.SkillMemorySearchResult
-import runtime.mobileagent.memory.SkillMemoryWriteResult
 import runtime.mobileagent.memory.SkillMemoryRepositoryPort
 import runtime.mobileagent.memory.SkillMemoryToolExecutor
 import runtime.mobileagent.shizuku.ShizukuAuthorityBridge
 import runtime.mobileagent.shizuku.ShizukuPermissionResult
 import runtime.mobileagent.shizuku.ShizukuAuthorityState
-import runtime.mobileagent.shizuku.ShizukuBackendFactory
-import runtime.mobileagent.shizuku.ShizukuPrivilegedWorkspaceFactory
 import runtime.mobileagent.security.AndroidAppInstanceIdStoreFactory
 import runtime.mobileagent.security.AndroidKeystorePrivilegedWorkspaceBindingCipherFactory
-import runtime.mobileagent.security.PrivilegedWorkspaceBindingAad
-import runtime.mobileagent.security.PrivilegedWorkspaceBindingOpenResult
-import runtime.mobileagent.security.PrivilegedWorkspaceBindingSealResult
 import runtime.mobileagent.skills.PermissionGrant
 import runtime.mobileagent.skills.ToolExecutor
 import runtime.mobileagent.skills.tooling.AuditDegradedFuse
 import runtime.mobileagent.skills.tooling.Availability
-import runtime.mobileagent.skills.tooling.ApprovalLifecycleEvent
-import runtime.mobileagent.skills.tooling.ApprovalLifecycleSink
-import runtime.mobileagent.skills.tooling.ApprovalLifecycleTransition
-import runtime.mobileagent.skills.tooling.AuthoritySelection
 import runtime.mobileagent.skills.tooling.AuthorityState
 import runtime.mobileagent.skills.tooling.Connection
 import runtime.mobileagent.skills.tooling.ElevatedAuthority
-import runtime.mobileagent.skills.tooling.PlatformGrant
-import runtime.mobileagent.skills.tooling.ShellAuditSink
 import runtime.mobileagent.skills.tooling.ShellExecutor
 import runtime.mobileagent.skills.tooling.WorkspaceBackend
 import runtime.mobileagent.skills.tooling.ToolErrorCode
 import runtime.mobileagent.tooling.ApprovalEngine
 import runtime.mobileagent.tooling.AuthorityManager
-import runtime.mobileagent.tooling.AuthorityManagerState
-import runtime.mobileagent.tooling.AuthorityPersistentState
 import runtime.mobileagent.tooling.AuthorityStateStore
 import runtime.mobileagent.tooling.DangerousBuildPolicy
 import runtime.mobileagent.tooling.DangerousModeManager
-import runtime.mobileagent.tooling.DangerousModePersistentState
 import runtime.mobileagent.tooling.DangerousModeStateStore
 import runtime.mobileagent.tooling.EffectiveCapabilityResolver
-import runtime.mobileagent.tooling.ShellToolExecutor
 import runtime.mobileagent.tooling.ToolExecutionContext
 import runtime.mobileagent.tooling.ToolExecutorFactory
-import runtime.mobileagent.tooling.ToolingClock
-import runtime.mobileagent.tooling.UnifiedWorkspaceToolExecutor
-import runtime.mobileagent.tooling.WorkspaceAuditEvent
-import runtime.mobileagent.tooling.WorkspaceAuditBackendType
 import runtime.mobileagent.tooling.WorkspaceAuditFuse
-import runtime.mobileagent.tooling.WorkspaceAuditSink
 import runtime.mobileagent.tooling.WorkspaceRegistry
-import runtime.mobileagent.tooling.WorkspacePathPolicy
 import runtime.mobileagent.wired.WiredAdbAuthorityPort
-import runtime.mobileagent.wired.WiredAdbPrivilegedWorkspaceFactory
-import runtime.mobileagent.wired.WiredAdbConnectionState
 import runtime.mobileagent.wired.WiredAdbDiagnosticEvent
 import runtime.mobileagent.wired.WiredAdbDiagnosticSink
 import runtime.mobileagent.wired.WiredAdbErrorCode
 import runtime.mobileagent.wired.WiredAdbLifecycleState
-import runtime.mobileagent.wired.WiredAdbPlatformGrant
 import runtime.mobileagent.wired.WiredAdbStatus
-import runtime.mobileagent.wired.WiredAdbUserIntent
 import runtime.mobileagent.wired.WiredAdbResult
-import runtime.mobileagent.skills.tooling.ToolError
 import runtime.mobileagent.skills.tooling.FullDeviceFilesRequest
-import runtime.mobileagent.skills.tooling.FullDeviceFilesGrant
 import runtime.mobileagent.skills.tooling.PrivilegedWorkspaceProvider
 import runtime.mobileagent.skills.tooling.WorkspaceAttachRequest
 import runtime.mobileagent.skills.tooling.WorkspaceBrowseRequest
 import runtime.mobileagent.skills.tooling.WorkspaceDirectoryPage
-import runtime.mobileagent.skills.tooling.WorkspaceReattachRequest
-import runtime.mobileagent.skills.tooling.WorkspaceRecoveryLocator
 import runtime.mobileagent.skills.tooling.WorkspaceResult
 
 /**
@@ -229,45 +160,6 @@ internal fun safRequestedFlags(resultFlags: Int): Int =
     (resultFlags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION))
         .takeIf { it != 0 }
         ?: (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-
-/**
- * Records each authority's latest readiness and returns the authorities whose
- * own not-ready -> ready edge just fired and therefore hold stale remote
- * handles to sweep.  The edge is evaluated per authority — including one that
- * restarts while unselected — and is currently scoped to Shizuku; wired-ADB
- * workspaces recover through their own bridge reconnect.  Every observed
- * authority's readiness is recorded on every call so an edge is never
- * consumed early or missed late.
- */
-internal fun privilegedReadyEdgeAuthorities(
-    statuses: Map<ElevatedAuthority, AuthorityState>,
-    readySeen: MutableMap<ElevatedAuthority, Boolean>,
-): Set<ElevatedAuthority> {
-    val sweep = mutableSetOf<ElevatedAuthority>()
-    statuses.forEach { (authority, status) ->
-        if (authority == ElevatedAuthority.SHIZUKU &&
-            status.isReady && readySeen[authority] == false
-        ) {
-            sweep += authority
-        }
-        readySeen[authority] = status.isReady
-    }
-    return sweep
-}
-
-/**
- * Whether a missing privileged binding row makes a registered workspace an
- * orphan worth unregistering.  Wired-ADB workspaces carry no sealed binding
- * by contract — they re-establish through the wired bridge — so a missing
- * binding is normal for the legacy desktop provider, not for the resident provider.
- */
-internal fun missingBindingIsOrphan(authority: Authority?, residentWired: Boolean = false): Boolean =
-    authority != Authority.WIRED_ADB || residentWired
-
-/** Reopen sealed directory bindings when the resident daemon's ephemeral handles changed. */
-internal fun residentWorkspaceHandlesNeedReattach(previous: WiredAdbStatus?, current: WiredAdbStatus): Boolean =
-    previous != null && current.state == WiredAdbLifecycleState.READY &&
-        (previous.state != WiredAdbLifecycleState.READY || previous.serviceSessionId != current.serviceSessionId)
 
 /**
  * Non-sensitive counts used to explain why a run did or did not receive workspace tools.
@@ -313,11 +205,11 @@ class RuntimeIntegration(
     CanonicalWorkspaceSink, AutoCloseable {
     private val appContext = context.applicationContext
     private val workspaceUiPresentations = WorkspaceUiPresentationStore(appContext)
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scopeJob = SupervisorJob()
+    private val scope = CoroutineScope(scopeJob + Dispatchers.Default)
+    private val callbackGate = RuntimeCallbackGate()
     private val closed = AtomicBoolean(false)
     private val wiredReconnectInFlight = AtomicBoolean(false)
-    /** True only after the bridge's successfully loaded intent matches the canonical manager. */
-    private val wiredIntentReconciled = AtomicBoolean(false)
     private val buildPolicy = DangerousBuildPolicy.fromBuildFlags(
         isDebuggable = BuildConfig.DEBUG,
         controlPlaneAllowed = BuildConfig.HIGH_PRIVILEGE_CONTROL_PLANE_ENABLED,
@@ -355,11 +247,11 @@ class RuntimeIntegration(
 
     private val authorityManager = AuthorityManager(authorityStateStore)
     private val dangerousModeManager = DangerousModeManager(dangerousModeStateStore, buildPolicy)
-    val rootCoordinator = runtime.mobileagent.privileged.RootRuntimeCoordinator(appContext, db)
+    private val rootCoordinatorDelegate = lazy { runtime.mobileagent.privileged.RootRuntimeCoordinator(appContext, db) }
+    val rootCoordinator by rootCoordinatorDelegate
     private val workspaceRegistry = WorkspaceRegistry()
     private val bindingCipher = AndroidKeystorePrivilegedWorkspaceBindingCipherFactory.create()
     private val appInstanceId = AndroidAppInstanceIdStoreFactory.create(appContext).loadOrCreateAppInstanceId()
-    private val reattachInFlight = ConcurrentHashMap.newKeySet<String>()
     private val auditFuse = AuditDegradedFuse()
     private val workspaceAuditFuse = WorkspaceAuditFuse()
     private val authorityDiagnostics = RuntimeAuthorityDiagnosticSink(diagnostics)
@@ -415,8 +307,6 @@ class RuntimeIntegration(
     val workspaceAccessPort: WorkspaceAccessPort
         get() = workspaceAccessAdapter
 
-    private var previousSelection: Authority? = null
-    private val authorityReadySeen = HashMap<ElevatedAuthority, Boolean>()
     private val safLivenessProbe = SafLivenessProbe(
         scope = scope,
         isRegisteredBackend = { workspaceId, backend ->
@@ -433,35 +323,92 @@ class RuntimeIntegration(
     override val workspaceHealthRevision: StateFlow<Long> = safLivenessProbe.revision
     private val shizukuPermissionRequestPending = AtomicBoolean(false)
     private val shizukuStateListener: (ShizukuAuthorityState) -> Unit = { state ->
-        applyShizukuState(state)
-        recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.PLATFORM_STATE_CHANGE)
+      callbackGate.run {
+        authorityLifecycle.applyShizukuState(state)
+        authorityLifecycle.recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.PLATFORM_STATE_CHANGE)
+      }
     }
     private val shizukuPermissionListener: (ShizukuPermissionResult) -> Unit = { result ->
+      callbackGate.run {
         if (shizukuPermissionRequestPending.compareAndSet(true, false)) {
             // Only an explicit foreground grant may persist configuration as
             // enabled. A later live Binder denial may clear it, while Binder
             // loss, reconnect and process restart preserve the last grant.
             authorityManager.setConfigured(ElevatedAuthority.SHIZUKU, result.granted)
-            recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
+            authorityLifecycle.recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
         }
+      }
     }
 
+    private val workspaceGrantStore = RuntimeWorkspaceGrantStore(
+        db, workspaceRepository, capabilityGrantRepository, authorityPolicyRepository,
+        conversationWorkspaceBindingRepository, agentWorkspaceDefaultRepository,
+    )
+    private val directoryAccess = RuntimeDirectoryAccess(
+        appContext, db, workspaceRepository, capabilityGrantRepository, authorityPolicyRepository,
+        privilegedWorkspaceBindingRepository, safWorkspaceGrantRepository, fullDeviceFilesGrantRepository,
+        workspaceRegistry, bindingCipher, appInstanceId, wiredAuthority, buildPolicy, dangerousModeManager,
+        diagnostics, workspaceGrantStore, ::authorityProviderFor, ::privilegedFailure,
+        isRootWorkspace = { rootWorkspaceUi.isRoot(it) },
+        presentation = object : RuntimeWorkspacePresentation {
+            override fun item(workspace: Workspace, agentId: String?) = workspaceAccessItem(workspace, agentId = agentId)
+            override fun displayName(workspace: Workspace, ordinal: Int) = safeWorkspaceDisplayName(workspace, ordinal)
+            override fun authority(workspace: Workspace) = workspace.authorityOrNull()
+            override fun recordBinding(binding: ConversationWorkspaceBinding, agentId: String) =
+                recordConversationWorkspaceBinding(binding, agentId, ConversationWorkspaceEvent.BOUND, previousWorkspaceId = null)
+            override fun recordDefault(previous: String?, persisted: AgentWorkspaceDefault) =
+                recordAgentWorkspaceDefaultChanged(previous, persisted, DiagnosticWorkspaceDefaultResult.SET)
+            override fun remember(workspaceId: String, kind: WorkspaceUiKind, title: String) =
+                rememberUiPresentation(workspaceId, kind, title)
+        },
+    )
+    private val workspaceRecovery = RuntimeWorkspaceRecovery(
+        appContext, agents, workspaceRepository, safWorkspaceGrantRepository, privilegedWorkspaceBindingRepository,
+        fullDeviceFilesGrantRepository, capabilityGrantRepository, workspaceRegistry, authorityManager, wiredAuthority,
+        bindingCipher, appInstanceId, diagnostics, scope, closed, ::authorityProviderFor,
+    )
+
+    /** Fixture seam sharing the production registry and canonical repository. */
+    internal fun registerAppPrivateWorkspace(workspaceId: String, root: Path): Workspace =
+        workspaceRecovery.registerAppPrivateWorkspace(workspaceId, root)
+
+    private val runToolAssembly = RuntimeRunToolAssembly(
+        db, workspaceRegistry, approvalEngine, effectiveCapabilityResolver, capabilityGrantRepository,
+        authorityPolicyRepository, authorityManager, dangerousModeManager, shellBackends, auditSink, auditFuse,
+        workspaceAuditFuse, skillMemoryRepositoryPort, skillMemoryDiagnosticSink, skillMemoryDiagnosticRefProvider,
+        rootCoordinator = { rootCoordinator }, freezeContext = ::freezeContext,
+    )
+
+    private val authorityLifecycle = RuntimeAuthorityLifecycle(
+        authorityManager, dangerousModeManager, buildPolicy, wiredAuthority, diagnostics, authorityDiagnostics,
+        privilegedWorkspaceBindingRepository, workspaceRegistry, workspaceRecovery,
+        rootCoordinator = { rootCoordinator }, scope = scope, closed = closed, wiredReconnectInFlight = wiredReconnectInFlight,
+    )
+
+    /** Low-level bridge guard shares the lifecycle's reconciled intent and canonical live state. */
+    internal fun wiredShellPermissionAvailable(): Boolean = authorityLifecycle.wiredShellPermissionAvailable()
+
     init {
+      try {
         rootCoordinator.reconcileStartupRecovery()
         wireShizukuBackend()
         wireWiredBackend()
-        reconcileFullDeviceGrants()
-        hydrateWorkspaces()
-        installDiagnosticsCollectors()
+        workspaceRecovery.reconcileFullDeviceGrants()
+        workspaceRecovery.hydrateWorkspaces()
+        authorityLifecycle.installDiagnosticsCollectors()
         shizukuAuthority?.addStateListener(shizukuStateListener)
         shizukuAuthority?.addPermissionResultListener(shizukuPermissionListener)
-        shizukuAuthority?.let { applyShizukuState(it.state.value) }
+        shizukuAuthority?.let { authorityLifecycle.applyShizukuState(it.state.value) }
         rootCoordinator.refreshLiveSessions(shizukuAuthority?.state?.value)
         rootCoordinator.syncAuthorityManagerStates(authorityManager, shizukuAuthority?.state?.value)
-        applyWiredState(wiredAuthority.status.value)
-        scheduleWiredReconnect()
-        refreshSafWorkspace()
-        recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.SNAPSHOT)
+        authorityLifecycle.applyWiredState(wiredAuthority.status.value)
+        authorityLifecycle.scheduleWiredReconnect()
+        workspaceRecovery.refreshSafWorkspace()
+        authorityLifecycle.recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.SNAPSHOT)
+      } catch (failure: Throwable) {
+          close()
+          throw failure
+      }
     }
 
     /** UI-safe, repository-backed grant port used by AgentsViewModel. */
@@ -702,7 +649,7 @@ class RuntimeIntegration(
         target: WorkspacePickerTarget,
     ): WorkspaceAccessResult {
         val plan = planFor(target)
-        return attachPrivilegedDirectoryInternal(
+        return directoryAccess.attachPrivilegedDirectoryInternal(
             authority,
             request,
             grantTargetFor(plan, target.toWorkspaceTarget()),
@@ -717,7 +664,7 @@ class RuntimeIntegration(
         target: WorkspacePickerTarget,
     ): WorkspaceAccessResult {
         val plan = planFor(target)
-        return attachSafWorkspace(
+        return directoryAccess.attachSafWorkspace(
             uri,
             resultFlags,
             grantTargetFor(plan, target.toWorkspaceTarget()),
@@ -755,22 +702,22 @@ class RuntimeIntegration(
         if (workspace.backendType == WorkspaceBackendType.PRIVILEGED &&
             workspaceRegistry.registered(workspaceId) == null
         ) {
-            reattachPrivilegedWorkspace(workspaceId)
+            workspaceRecovery.reattachPrivilegedWorkspace(workspaceId)
         }
         val selection = try {
             db.transaction {
                 val grant = grantTargetFor(plan, pickerTarget.toWorkspaceTarget())
-                persistPickerSelection(workspace, pickerTarget, plan, grant) {
+                workspaceGrantStore.persistPickerSelection(workspace, pickerTarget, plan, grant) {
                     workspaceRegistry.registered(workspaceId)?.backend
-                        ?: throw WorkspaceAccessException(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
+                        ?: throw RuntimeWorkspaceAccessException(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
                 }
             }
-        } catch (failure: WorkspaceAccessException) {
+        } catch (failure: RuntimeWorkspaceAccessException) {
             return workspaceAccessFailure(failure.accessCode)
         } catch (_: RuntimeException) {
             return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
         }
-        return finishPickerSelection(workspace, pickerTarget, selection)
+        return directoryAccess.finishPickerSelection(workspace, pickerTarget, selection)
     }
 
     override suspend fun confirmNewThreadWorkspace(
@@ -805,7 +752,7 @@ class RuntimeIntegration(
                     return workspaceAccessFailure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
                 }
                 if (workspaceRegistry.registered(workspace.id) == null) {
-                    reattachPrivilegedWorkspace(workspace.id)
+                    workspaceRecovery.reattachPrivilegedWorkspace(workspace.id)
                 }
                 if (workspaceRegistry.registered(workspace.id) == null) {
                     return workspaceAccessFailure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
@@ -832,7 +779,7 @@ class RuntimeIntegration(
             WorkspaceBackendType.INTERNAL -> {
                 if (workspaceRegistry.registered(workspace.id) == null) {
                     if (workspace.id == INTERNAL_WORKSPACE_ID) {
-                        adoptInternalWorkspace()
+                        workspaceRecovery.adoptInternalWorkspace()
                     } else {
                         val root = runCatching { java.nio.file.Paths.get(workspace.rootReference) }.getOrNull()
                         if (root != null && (java.nio.file.Files.exists(root) || runCatching { java.nio.file.Files.createDirectories(root) }.isSuccess)) {
@@ -850,14 +797,14 @@ class RuntimeIntegration(
 
         val committedGrants = try {
             db.transaction {
-                persistWorkspaceGrantBundle(
+                workspaceGrantStore.persistWorkspaceGrantBundle(
                     workspace = workspace,
                     backend = registered.backend,
                     target = WorkspaceAccessGrantTarget(agentId = agentId),
                     preserveActiveWholeDirectoryCapabilities = true,
                 )
             }
-        } catch (failure: WorkspaceAccessException) {
+        } catch (failure: RuntimeWorkspaceAccessException) {
             return workspaceAccessFailure(failure.accessCode)
         } catch (_: AuthorityPolicyConflictException) {
             return workspaceAccessFailure(WorkspaceAccessErrorCode.CONFLICT)
@@ -902,7 +849,7 @@ class RuntimeIntegration(
         request: WorkspaceAttachRequest,
         plan: WorkspaceIntentPlan,
         target: WorkspaceTarget,
-    ): WorkspaceAccessResult = attachPrivilegedDirectoryInternal(
+    ): WorkspaceAccessResult = directoryAccess.attachPrivilegedDirectoryInternal(
         authority = authority,
         request = request,
         grant = grantTargetFor(plan, target),
@@ -915,7 +862,7 @@ class RuntimeIntegration(
         resultFlags: Int,
         plan: WorkspaceIntentPlan,
         target: WorkspaceTarget,
-    ): WorkspaceAccessResult = attachSafWorkspace(
+    ): WorkspaceAccessResult = directoryAccess.attachSafWorkspace(
         uri = uri,
         resultFlags = resultFlags,
         grant = grantTargetFor(plan, target),
@@ -930,7 +877,7 @@ class RuntimeIntegration(
         absolutePath: String,
         plan: WorkspaceIntentPlan,
         target: WorkspaceTarget,
-    ): WorkspaceAccessResult = attachPrivilegedPathInternal(
+    ): WorkspaceAccessResult = directoryAccess.attachPrivilegedPathInternal(
         authority = authority,
         workspaceId = workspaceId,
         displayName = displayName,
@@ -951,7 +898,7 @@ class RuntimeIntegration(
         if (plan.setAgentDefault || plan.bindThread) {
             return workspaceAccessFailure(WorkspaceAccessErrorCode.INVALID_REQUEST)
         }
-        return openFullDeviceFilesInternal(
+        return directoryAccess.openFullDeviceFilesInternal(
             authority = authority,
             request = request,
             grant = grantTargetFor(plan, target),
@@ -1080,84 +1027,16 @@ class RuntimeIntegration(
         }
     }
 
-    /**
-     * Build the tool set for exactly one frozen run context. Null web/MCP/
-     * Python inputs mean that provider is absent for this run; this method
-     * never creates or substitutes one.
-     */
+    /** Compose only the tools admitted by this run's frozen and live canonical authorization. */
     fun createToolExecutorFactory(
         context: ToolExecutionContext,
         web: ToolExecutor? = null,
         mcp: ToolExecutor? = null,
         python: ToolExecutor? = null,
-    ): ToolExecutorFactory {
-        val frozen = freezeContext(context)
-        // Attached Skill identity is only for Skill-owned tools (such as memory).
-        // Built-in Agent workspace tools must resolve the Agent's own grants again;
-        // changing only effectiveCapabilities would still select Skill grants at dispatch.
-        val agentContext = freezeContext(context.copy(skillId = null, skillRevision = null, trustedSkillEnvelope = false))
-        val workspace = UnifiedWorkspaceToolExecutor(
-            registry = workspaceRegistry,
-            approvalEngine = approvalEngine,
-            resolver = effectiveCapabilityResolver,
-            contextProvider = { agentContext },
-            auditSink = auditSink,
-            auditFuse = workspaceAuditFuse,
-            dangerousModeProvider = { dangerousModeManager.policy() },
-            authoritySelectionProvider = { authorityManager.selection.value },
-            onceGrantConsumer = { grant ->
-                capabilityGrantRepository.tryConsumeOnce(
-                    grantId = grant.grantId,
-                    expectedRevision = grant.revision,
-                    taskIdentity = frozen.taskIdentity.takeIf { it.isNotBlank() },
-                    sessionIdentity = frozen.sessionIdentity,
-                )
-            },
-        )
-        val shell = ShellToolExecutor(
-            authorityManager = authorityManager,
-            dangerousModeManager = dangerousModeManager,
-            approvalEngine = approvalEngine,
-            // This is the built-in Agent tool. An attached Skill is not the
-            // owner of its global Dangerous Mode consent or its audit identity.
-            contextProvider = { agentContext },
-            backends = shellBackends.toMap(),
-            resolver = effectiveCapabilityResolver,
-            grantChanges = capabilityGrantRepository.changes,
-            auditSink = auditSink,
-            auditFuse = auditFuse,
-            agentShellAuthorization = {
-                dangerousModeManager.isEnabled() && authorityPolicyRepository.getPolicy().policyVersion == frozen.policyVersion
-            },
-            onceGrantConsumer = { grant ->
-                capabilityGrantRepository.tryConsumeOnce(
-                    grantId = grant.grantId,
-                    expectedRevision = grant.revision,
-                    taskIdentity = frozen.taskIdentity.takeIf { it.isNotBlank() },
-                    sessionIdentity = frozen.sessionIdentity,
-                )
-            },
-        )
-        val memory = createSkillMemoryToolExecutor(frozen)
-        val root = runtime.mobileagent.privileged.RootToolExecutorAdmission.create(db, rootCoordinator, agentContext)
-        val rootSelected = authorityPolicyRepository.getPolicy().selectedAuthority.isRootAuthority
-        return ToolExecutorFactory(
-            web = web,
-            mcp = mcp,
-            python = python,
-            memory = memory,
-            workspace = workspace,
-            shell = if (rootSelected) null else shell,
-            root = root,
-            boundSnapshotId = agentContext.snapshotId,
-            rootWorkspaceIds = frozenRootWorkspaceIds(agentContext),
-        )
-    }
+    ): ToolExecutorFactory = runToolAssembly.createToolExecutorFactory(context, web, mcp, python)
 
-    /** Frozen binding IDs reserve their Root route even while the corresponding service is offline. */
-    fun frozenRootWorkspaceIds(context: ToolExecutionContext): Set<String> =
-        (context.snapshotGrantBindings.mapNotNull { it.workspaceId } + context.canonicalGrants.mapNotNull { it.workspaceId })
-            .filter { runtime.mobileagent.data.RootWorkspaceRepository(db).getOrigin(it) != null }.toSet()
+    /** Frozen Root routes remain reserved while their live service is unavailable. */
+    fun frozenRootWorkspaceIds(context: ToolExecutionContext): Set<String> = runToolAssembly.frozenRootWorkspaceIds(context)
 
     /**
      * Return a closed, aggregate-only explanation of the workspace exposure inputs for one run.
@@ -1236,22 +1115,8 @@ class RuntimeIntegration(
         )
     }
 
-    /** Create the memory executor for this run; bindings are rechecked at each approval. */
-    fun createSkillMemoryToolExecutor(context: ToolExecutionContext): SkillMemoryToolExecutor {
-        val frozen = freezeContext(context)
-        return SkillMemoryToolExecutor(
-            repository = skillMemoryRepositoryPort,
-            agentId = frozen.agentId,
-            snapshotId = frozen.snapshotId,
-            trustedSkillId = frozen.skillId,
-            // Every frozen Skill identity gets its own runtime-assigned tool
-            // namespace; single-Skill runs keep the legacy shared names.
-            trustedSkillIds = frozen.trustedSkillIds,
-            effectiveCapabilities = frozen.effectiveCapabilityNames,
-            diagnosticSink = skillMemoryDiagnosticSink,
-            diagnosticRefProvider = skillMemoryDiagnosticRefProvider,
-        )
-    }
+    fun createSkillMemoryToolExecutor(context: ToolExecutionContext): SkillMemoryToolExecutor =
+        runToolAssembly.createSkillMemoryToolExecutor(context)
 
     /**
      * Read-only Skill Memory availability projection for Skills UI. The
@@ -1357,16 +1222,16 @@ class RuntimeIntegration(
                 bridge.bindUserService()
                 live = bridge.refresh()
             }
-            applyShizukuState(live)
+            authorityLifecycle.applyShizukuState(live)
         }
-        refreshSafWorkspace()
+        workspaceRecovery.refreshSafWorkspace()
         val liveShizuku = RootPermissionEntry.resolveState(shizukuAuthority?.state?.value)
         rootCoordinator.refreshLiveSessions(liveShizuku)
         rootCoordinator.syncAuthorityManagerStates(authorityManager, liveShizuku)
-        applyWiredState(wiredAuthority.status.value)
-        scheduleWiredReconnect()
+        authorityLifecycle.applyWiredState(wiredAuthority.status.value)
+        authorityLifecycle.scheduleWiredReconnect()
         return settingsSnapshot().also {
-            recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.REFRESH)
+            authorityLifecycle.recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.REFRESH)
         }
     }
 
@@ -1375,7 +1240,7 @@ class RuntimeIntegration(
         check(authorityManager.selectAuthority(authority.toElevated())) { "Authority policy changed; reload and retry" }
         rootCoordinator.syncAuthorityManagerStates(authorityManager, RootPermissionEntry.resolveState(shizukuAuthority?.state?.value))
         return settingsSnapshot().also {
-            recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
+            authorityLifecycle.recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
         }
     }
 
@@ -1395,9 +1260,9 @@ class RuntimeIntegration(
                 wiredAuthority.setUserIntent(enabled)
             }
         }
-        if (authority == Authority.WIRED_ADB && enabled) scheduleWiredReconnect()
+        if (authority == Authority.WIRED_ADB && enabled) authorityLifecycle.scheduleWiredReconnect()
         return settingsSnapshot().also {
-            recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
+            authorityLifecycle.recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
         }
     }
 
@@ -1490,7 +1355,7 @@ class RuntimeIntegration(
         }
         if (bridge.state.value.permissionGranted) bridge.bindUserService()
         return refresh().also {
-            recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
+            authorityLifecycle.recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
         }
     }
 
@@ -1512,7 +1377,7 @@ class RuntimeIntegration(
             check(authorityManager.setConfigured(ElevatedAuthority.WIRED_ADB, true))
         }
         return settingsSnapshot().also {
-            recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
+            authorityLifecycle.recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
         }
     }
 
@@ -1534,7 +1399,7 @@ class RuntimeIntegration(
         return try {
             check(authorityManager.setConfigured(ElevatedAuthority.WIRED_ADB, false))
             val current = refresh()
-            recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
+            authorityLifecycle.recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.USER_ACTION)
             SettingsAuthorityMutation(accepted = true, snapshot = current)
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
@@ -1552,7 +1417,7 @@ class RuntimeIntegration(
 
     override fun authorizeSaf(uri: Uri, resultFlags: Int): SettingsAuthoritySnapshot {
         return when (
-            val result = attachSafWorkspace(
+            val result = directoryAccess.attachSafWorkspace(
                 uri,
                 resultFlags,
                 grant = null,
@@ -1572,7 +1437,7 @@ class RuntimeIntegration(
         // leaving newer opaque SAF bindings active.
         safWorkspaceGrantRepository.list(includeRevoked = false)
             .map { it.workspaceId }
-            .forEach { workspaceId -> revokeWorkspaceInternal(workspaceId) }
+            .forEach { workspaceId -> directoryAccess.revokeWorkspaceInternal(workspaceId) }
         return settingsSnapshot()
     }
 
@@ -1627,705 +1492,23 @@ class RuntimeIntegration(
         snapshotProvider = ::settingsSnapshot,
     )
 
+    private fun Long.toDiagnosticGeneration(): Int = coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
+
     // ---- Backend hydration and state -------------------------------------------------------
 
     private fun wireShizukuBackend() {
         val bridge = shizukuAuthority ?: return
-        shellBackends[ElevatedAuthority.SHIZUKU] = ShizukuBackendFactory.createShellExecutor(bridge)
-        val workspace = ShizukuBackendFactory.createWorkspaceBackend(bridge)
-        workspaceBackends[ElevatedAuthority.SHIZUKU] = workspace
-        privilegedWorkspaceProviders[Authority.SHIZUKU] = ShizukuPrivilegedWorkspaceFactory.createDeviceRoot(
-            bridge = bridge,
-            workspaceId = workspace.descriptor.id,
-            displayName = workspace.descriptor.displayName,
-            fullDeviceGrantStore = fullDeviceFilesGrantRepository,
-        )
+        installBackendAssembly(Authority.SHIZUKU, AuthorityBackendAssembly.shizuku(bridge, fullDeviceFilesGrantRepository))
     }
 
     private fun wireWiredBackend() {
-        val resident = wiredAuthority as? runtime.mobileagent.resident.ResidentAdbAuthorityBridge
-        if (resident != null) {
-            shellBackends[ElevatedAuthority.WIRED_ADB] = resident.createShellExecutor()
-            val workspace = resident.createWorkspaceBackend()
-            workspaceBackends[ElevatedAuthority.WIRED_ADB] = workspace
-            privilegedWorkspaceProviders[Authority.WIRED_ADB] = resident.createWorkspaceProvider(
-                workspaceId = workspace.descriptor.id,
-                displayName = workspace.descriptor.displayName,
-                fullDeviceGrantStore = fullDeviceFilesGrantRepository,
-            )
-            return
-        }
-        shellBackends[ElevatedAuthority.WIRED_ADB] = WiredShellExecutor(wiredAuthority)
-        val workspace = WiredWorkspaceBackend(wiredAuthority)
-        workspaceBackends[ElevatedAuthority.WIRED_ADB] = workspace
-        privilegedWorkspaceProviders[Authority.WIRED_ADB] = WiredAdbPrivilegedWorkspaceFactory.create(
-            authority = wiredAuthority,
-            workspaceId = workspace.descriptor.id,
-            displayName = workspace.descriptor.displayName,
-            fullDeviceGrantStore = fullDeviceFilesGrantRepository,
-        )
+        installBackendAssembly(Authority.WIRED_ADB, AuthorityBackendAssembly.wired(wiredAuthority, fullDeviceFilesGrantRepository))
     }
 
-    private fun hydrateWorkspaces() {
-        adoptInternalWorkspace()
-        adoptLegacyWorkspaces()
-        workspaceRepository.list(enabledOnly = true)
-            .filter { it.backendType == WorkspaceBackendType.SAF_TREE }
-            .forEach { workspace ->
-                val grant = safWorkspaceGrantRepository.get(workspace.id)
-                if (grant != null && grant.status == SafGrantStatus.ACTIVE) {
-                    val uri = grant.activePersistedUri()
-                    if (uri != null) {
-                        runCatching {
-                            workspaceRegistry.registerOrReplace(
-                                workspace,
-                                runtime.mobileagent.workspace.SharedWorkspaceBackendAdapter.createSaf(appContext, uri, workspace.id),
-                            )
-                        }
-                    } else {
-                        safWorkspaceGrantRepository.markLost(workspace.id)
-                    }
-                }
-            }
-        // Authority root backends are navigation/attach providers, not Agent
-        // workspaces.  Only a user-attached directory may enter the runtime
-        // registry and become model-facing.
-        privilegedWorkspaceBindingRepository.list()
-            .filter { it.status != PrivilegedWorkspaceBindingStatus.REVOKED }
-            .forEach { binding -> workspaceRegistry.unregister(binding.workspaceId) }
-        // Registered privileged workspaces without an active binding carry no
-        // recovery locator (for example full-device rows opened before bindings
-        // were persisted for that scope).  They can never re-attach, so they
-        // must not stay listed as available.  Wired-ADB workspaces are exempt:
-        // they carry no sealed binding by contract and recover through their
-        // own bridge reconnect, so a missing binding is normal there.
-        workspaceRegistry.descriptors()
-            .filter { it.backendType == WorkspaceBackendType.PRIVILEGED }
-            .forEach { descriptor ->
-                val authority = workspaceRepository.get(descriptor.id)
-                    ?.rootReference?.removePrefix("authority:")
-                    ?.let { runCatching { Authority.valueOf(it) }.getOrNull() }
-                if (!missingBindingIsOrphan(authority, wiredAuthority is runtime.mobileagent.resident.ResidentAdbAuthorityBridge)) return@forEach
-                val binding = privilegedWorkspaceBindingRepository.get(descriptor.id)
-                if (binding == null || binding.status == PrivilegedWorkspaceBindingStatus.REVOKED) {
-                    workspaceRegistry.unregister(descriptor.id)
-                }
-            }
-        schedulePrivilegedWorkspaceReattach()
-    }
-
-    private fun schedulePrivilegedWorkspaceReattach() {
-        if (closed.get()) return
-        val manager = authorityManager.state.value
-        val selected = manager.selectedAuthority ?: return
-        if (manager.statuses[selected]?.isReady != true) return
-        privilegedWorkspaceBindingRepository.forAuthority(selected)
-            .asSequence()
-            .filter { binding ->
-                binding.status !in setOf(
-                    PrivilegedWorkspaceBindingStatus.REVOKED,
-                    PrivilegedWorkspaceBindingStatus.BINDING_UNRECOVERABLE,
-                    PrivilegedWorkspaceBindingStatus.GRANT_LOST,
-                ) &&
-                    workspaceRegistry.registered(binding.workspaceId) == null &&
-                    workspaceRepository.get(binding.workspaceId)?.enabled == true &&
-                    (
-                        binding.scope != WorkspaceScope.FULL_DEVICE_FILES ||
-                            fullDeviceFilesGrantRepository.load(binding.workspaceId) != null
-                        )
-            }
-            .forEach { binding ->
-                if (!reattachInFlight.add(binding.workspaceId)) return@forEach
-                scope.launch {
-                    try {
-                        reattachPrivilegedWorkspace(binding.workspaceId)
-                    } finally {
-                        reattachInFlight.remove(binding.workspaceId)
-                    }
-                }
-            }
-    }
-
-    private suspend fun reattachPrivilegedWorkspace(workspaceId: String) {
-        val startedAt = System.currentTimeMillis()
-        var binding = privilegedWorkspaceBindingRepository.get(workspaceId) ?: return
-        val workspace = workspaceRepository.get(workspaceId) ?: return
-        val authority = binding.authority
-        val provider = authorityProviderFor(authority)
-        if (provider == null) {
-            markPrivilegedBindingStatus(binding, PrivilegedWorkspaceBindingStatus.UNAVAILABLE_AUTHORITY)
-            return
-        }
-        binding = runCatching {
-            privilegedWorkspaceBindingRepository.updateStatus(
-                workspaceId,
-                binding.revision,
-                PrivilegedWorkspaceBindingStatus.REATTACHING,
-            )
-        }.getOrNull() ?: return
-        diagnostics.recordPrivilegedWorkspaceReattachStarted(
-            reattachDiagnostic(binding, DiagnosticWorkspaceReattachPhase.STARTED),
-        )
-        if (binding.aadAppInstanceId != appInstanceId || binding.aadWorkspaceId != workspaceId) {
-            failPrivilegedReattach(binding, PrivilegedWorkspaceBindingStatus.BINDING_UNRECOVERABLE, "BINDING_IDENTITY_MISMATCH", startedAt)
-            return
-        }
-        val aad = runCatching {
-            PrivilegedWorkspaceBindingAad(appInstanceId, workspaceId, authority, binding.locatorVersion)
-        }.getOrNull()
-        if (aad == null) {
-            failPrivilegedReattach(binding, PrivilegedWorkspaceBindingStatus.BINDING_UNRECOVERABLE, "BINDING_AAD_INVALID", startedAt)
-            return
-        }
-        val opened = bindingCipher.open(binding.encryptedLocatorCopy(), binding.locatorNonceCopy(), aad)
-        val recovered = when (opened) {
-            is PrivilegedWorkspaceBindingOpenResult.Failure -> {
-                failPrivilegedReattach(binding, PrivilegedWorkspaceBindingStatus.BINDING_UNRECOVERABLE, opened.error.code.name, startedAt)
-                return
-            }
-            is PrivilegedWorkspaceBindingOpenResult.Success -> opened.locator
-        }
-        val locator = try {
-            WorkspaceRecoveryLocator.fromBytes(recovered)
-        } catch (_: RuntimeException) {
-            recovered.fill(0)
-            failPrivilegedReattach(binding, PrivilegedWorkspaceBindingStatus.BINDING_UNRECOVERABLE, "LOCATOR_INVALID", startedAt)
-            return
-        } finally {
-            recovered.fill(0)
-        }
-        val fullDeviceGrantRevision = if (binding.scope == WorkspaceScope.FULL_DEVICE_FILES) {
-            val grant = fullDeviceFilesGrantRepository.load(workspaceId)
-            if (grant == null) {
-                failPrivilegedReattach(binding, PrivilegedWorkspaceBindingStatus.GRANT_LOST, "GRANT_LOST", startedAt)
-                return
-            }
-            grant.revision
-        } else {
-            null
-        }
-        val reopened = try {
-            provider.reopenDirectory(
-                WorkspaceReattachRequest(
-                    workspaceId = workspaceId,
-                    displayName = workspace.displayName,
-                    recoveryLocator = locator,
-                    scope = binding.scope,
-                    grantRevision = fullDeviceGrantRevision,
-                ),
-            )
-        } catch (cancelled: kotlinx.coroutines.CancellationException) {
-            throw cancelled
-        } catch (_: RuntimeException) {
-            WorkspaceResult.Failure(ToolError(ToolErrorCode.UNKNOWN_OUTCOME))
-        } finally {
-            locator.clear()
-        }
-        val attachment = when (reopened) {
-            is WorkspaceResult.Failure -> {
-                val status = when (reopened.error.code) {
-                    ToolErrorCode.WORKSPACE_NOT_FOUND -> PrivilegedWorkspaceBindingStatus.WORKSPACE_NOT_FOUND
-                    ToolErrorCode.AUTHORITY_NOT_GRANTED,
-                    ToolErrorCode.SHIZUKU_PERMISSION_DENIED,
-                    ToolErrorCode.CAPABILITY_DENIED,
-                        -> PrivilegedWorkspaceBindingStatus.PERMISSION_DENIED
-                    ToolErrorCode.CONFLICT,
-                    ToolErrorCode.INVALID_REQUEST,
-                    ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH,
-                        -> PrivilegedWorkspaceBindingStatus.BINDING_UNRECOVERABLE
-                    else -> PrivilegedWorkspaceBindingStatus.UNAVAILABLE
-                }
-                failPrivilegedReattach(binding, status, reopened.error.code.name, startedAt)
-                return
-            }
-            is WorkspaceResult.Success -> reopened.value
-        }
-        if (attachment.descriptor.id != workspaceId) {
-            attachment.recoveryLocator?.clear()
-            failPrivilegedReattach(binding, PrivilegedWorkspaceBindingStatus.BINDING_UNRECOVERABLE, "WORKSPACE_ID_MISMATCH", startedAt)
-            return
-        }
-        val freshLocator = attachment.recoveryLocator
-        if (freshLocator == null) {
-            failPrivilegedReattach(binding, PrivilegedWorkspaceBindingStatus.BINDING_UNRECOVERABLE, "LOCATOR_MISSING", startedAt)
-            return
-        }
-        val freshBytes = runCatching { freshLocator.copyBytes() }.getOrNull()
-        if (freshBytes == null) {
-            freshLocator.clear()
-            failPrivilegedReattach(binding, PrivilegedWorkspaceBindingStatus.BINDING_UNRECOVERABLE, "LOCATOR_INVALID", startedAt)
-            return
-        }
-        val envelope = try {
-            when (val sealed = bindingCipher.seal(freshBytes, aad)) {
-                is PrivilegedWorkspaceBindingSealResult.Success -> sealed.envelope
-                is PrivilegedWorkspaceBindingSealResult.Failure -> {
-                    failPrivilegedReattach(binding, PrivilegedWorkspaceBindingStatus.BINDING_UNRECOVERABLE, sealed.error.code.name, startedAt)
-                    return
-                }
-            }
-        } finally {
-            freshBytes.fill(0)
-            freshLocator.clear()
-        }
-        val active = try {
-            privilegedWorkspaceBindingRepository.save(
-                binding.copy(
-                    encryptedLocator = envelope.encryptedLocator,
-                    locatorNonce = envelope.locatorNonce,
-                    status = PrivilegedWorkspaceBindingStatus.ACTIVE,
-                    revision = binding.revision + 1L,
-                    updatedAt = Utc.nowIso(),
-                ),
-            )
-        } catch (_: RuntimeException) {
-            failPrivilegedReattach(binding, PrivilegedWorkspaceBindingStatus.UNAVAILABLE, "PERSISTENCE_FAILED", startedAt)
-            return
-        }
-        try {
-            workspaceRegistry.registerOrReplace(workspace, attachment.backend)
-        } catch (_: RuntimeException) {
-            failPrivilegedReattach(active, PrivilegedWorkspaceBindingStatus.UNAVAILABLE, "REGISTRY_FAILED", startedAt)
-            return
-        }
-        diagnostics.recordPrivilegedWorkspaceReattachSucceeded(
-            reattachDiagnostic(
-                active,
-                DiagnosticWorkspaceReattachPhase.COMPLETED,
-                durationMs = System.currentTimeMillis() - startedAt,
-            ),
-        )
-    }
-
-    private fun markPrivilegedBindingStatus(
-        binding: PrivilegedWorkspaceBinding,
-        status: PrivilegedWorkspaceBindingStatus,
-    ): PrivilegedWorkspaceBinding? = if (binding.status == status) {
-        binding
-    } else {
-        runCatching {
-            privilegedWorkspaceBindingRepository.updateStatus(binding.workspaceId, binding.revision, status)
-        }.getOrNull()
-    }
-
-    private fun failPrivilegedReattach(
-        binding: PrivilegedWorkspaceBinding,
-        status: PrivilegedWorkspaceBindingStatus,
-        errorCode: String,
-        startedAt: Long,
-    ) {
-        workspaceRegistry.unregister(binding.workspaceId)
-        val persisted = markPrivilegedBindingStatus(binding, status) ?: binding
-        diagnostics.recordPrivilegedWorkspaceReattachFailed(
-            reattachDiagnostic(
-                persisted,
-                DiagnosticWorkspaceReattachPhase.FAILED,
-                durationMs = System.currentTimeMillis() - startedAt,
-                errorCode = errorCode,
-            ),
-        )
-    }
-
-    private fun reattachDiagnostic(
-        binding: PrivilegedWorkspaceBinding,
-        phase: DiagnosticWorkspaceReattachPhase,
-        durationMs: Long? = null,
-        errorCode: String = "none",
-    ): PrivilegedWorkspaceReattachRecord = PrivilegedWorkspaceReattachRecord(
-        phase = phase,
-        workspaceId = binding.workspaceId,
-        authority = binding.authority.toDiagnostic(),
-        bindingRevision = binding.revision.toDiagnosticGeneration(),
-        grantGeneration = capabilityGrantRepository.forWorkspace(binding.workspaceId, includeRevoked = false)
-            .maxOfOrNull { it.revision }
-            ?.toDiagnosticGeneration()
-            ?: 0,
-        durationMs = durationMs,
-        errorCode = errorCode.toDiagnosticErrorCode(),
-    )
-
-    private fun Long.toDiagnosticGeneration(): Int = coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
-
-    private fun String.toDiagnosticErrorCode(): String {
-        val normalized = uppercase(Locale.ROOT)
-            .map { character -> if (character.isLetterOrDigit() || character == '_') character else '_' }
-            .joinToString("")
-            .trim('_')
-            .take(64)
-        return normalized.takeIf { it.matches(Regex("[A-Z][A-Z0-9_]{0,63}")) } ?: "UNKNOWN"
-    }
-
-    /**
-     * Defense-in-depth gate for the low-level Wired shell port. The shared
-     * ShellToolExecutor remains the authority for per-call capability and
-     * approval checks; this callback only prevents direct bridge dispatch
-     * while Wired is not the selected, configured, ready provider.
-     */
-    internal fun wiredShellPermissionAvailable(): Boolean {
-        if (closed.get()) return false
-        val state = authorityManager.state.value
-        val wired = state.statuses[ElevatedAuthority.WIRED_ADB] ?: return false
-        return state.selectedAuthority == ElevatedAuthority.WIRED_ADB &&
-            wired.isConfiguredForSelection &&
-            wired.isReady &&
-            wiredIntentReconciled.get() &&
-            dangerousModeManager.policy() != DangerousMode.DISABLED &&
-            buildPolicy.permitsDangerousMode()
-    }
-
-    private fun refreshSafWorkspace() {
-        safWorkspaceGrantRepository.list(includeRevoked = true).forEach { grant ->
-            val workspaceId = grant.workspaceId
-            val uri = grant.activePersistedUri()
-            if (uri != null) {
-                val workspace = workspaceRepository.get(workspaceId)
-                if (workspace != null && workspace.enabled) {
-                    runCatching {
-                        workspaceRegistry.registerOrReplace(
-                            workspace,
-                            runtime.mobileagent.workspace.SharedWorkspaceBackendAdapter.createSaf(appContext, uri, workspaceId),
-                        )
-                    }.onFailure { workspaceRegistry.unregister(workspaceId) }
-                } else if (workspace == null) {
-                    // An active SAF row without its canonical workspace is an
-                    // incomplete old transaction. Retain the row for user
-                    // recovery, but do not leave it looking active to the
-                    // runtime or to diagnostics.
-                    safWorkspaceGrantRepository.markLost(workspaceId)
-                    workspaceRegistry.unregister(workspaceId)
-                }
-            } else if (grant.status == SafGrantStatus.ACTIVE) {
-                safWorkspaceGrantRepository.markLost(workspaceId)
-                workspaceRegistry.unregister(workspaceId)
-            } else if (grant.status == SafGrantStatus.REVOKED) {
-                workspaceRegistry.unregister(workspaceId)
-            }
-        }
-    }
-
-    private fun reconcileFullDeviceGrants() {
-        fullDeviceFilesGrantRepository.activeWorkspaceIds().forEach { workspaceId ->
-            val workspace = workspaceRepository.get(workspaceId)
-            if (workspace == null || !workspace.enabled || workspace.scope != WorkspaceScope.FULL_DEVICE_FILES) {
-                fullDeviceFilesGrantRepository.load(workspaceId)?.let { grant ->
-                    fullDeviceFilesGrantRepository.revoke(workspaceId, grant.revision)
-                }
-            }
-        }
-    }
-
-    private fun adoptInternalWorkspace() {
-        val id = INTERNAL_WORKSPACE_ID
-        val existing = workspaceRepository.get(id)
-        val defaultRoot = File(appContext.filesDir, "agent-workspace").toPath().toAbsolutePath().normalize()
-        val root = existing?.takeIf { it.backendType == WorkspaceBackendType.INTERNAL }
-            ?.rootReference?.let { safePrivatePath(it) } ?: defaultRoot
-        runCatching { Files.createDirectories(root) }.getOrElse { return }
-        val workspace = existing ?: Workspace(
-            id = id,
-            displayName = "Application workspace",
-            backendType = WorkspaceBackendType.INTERNAL,
-            rootReference = root.toString(),
-            readable = true,
-            writable = true,
-            quotaBytes = 4L * 1024L * 1024L,
-            maxFileBytes = 256L * 1024L,
-            enabled = true,
-        ).also(workspaceRepository::save)
-        runCatching {
-            workspaceRegistry.registerOrReplace(
-                workspace,
-                runtime.mobileagent.workspace.SharedWorkspaceBackendAdapter.createInternal(root, id),
-            )
-        }
-    }
-
-    /**
-     * Register another app-private workspace beside the canonical internal
-     * root. Production UI does not create a second INTERNAL backend; tests use
-     * this to prove a bound Thread cannot be rewritten onto a different
-     * registered workspace.
-     */
-    internal fun registerAppPrivateWorkspace(workspaceId: String, root: Path): Workspace {
-        require(workspaceId != INTERNAL_WORKSPACE_ID) {
-            "The canonical app-private workspace is adopted by the host"
-        }
-        runCatching { Files.createDirectories(root) }.getOrElse {
-            error("App-private workspace root is unavailable")
-        }
-        val existing = workspaceRepository.get(workspaceId)
-        val workspace = Workspace(
-            id = workspaceId,
-            displayName = existing?.displayName?.takeIf { it.isNotBlank() } ?: "Application workspace",
-            backendType = WorkspaceBackendType.INTERNAL,
-            rootReference = root.toAbsolutePath().normalize().toString(),
-            readable = true,
-            writable = true,
-            quotaBytes = existing?.quotaBytes ?: (4L * 1024L * 1024L),
-            maxFileBytes = existing?.maxFileBytes ?: (256L * 1024L),
-            enabled = true,
-            revision = existing?.revision ?: 0,
-            createdAt = existing?.createdAt.orEmpty(),
-            updatedAt = existing?.updatedAt.orEmpty(),
-            scope = WorkspaceScope.SELECTED_DIRECTORY,
-        )
-        val persisted = workspaceRepository.save(workspace)
-        workspaceRegistry.registerOrReplace(
-            persisted,
-            runtime.mobileagent.workspace.SharedWorkspaceBackendAdapter.createInternal(root, persisted.id),
-        )
-        return persisted
-    }
-
-    /** Map the old snapshot namespace to an opaque, neutral workspace id. */
-    private fun adoptLegacyWorkspaces() {
-        val legacyParent = File(appContext.filesDir, "agent-workspaces").toPath()
-        val snapshots = runCatching { agents.listSnapshots() }.getOrDefault(emptyList())
-        snapshots.forEach { snapshot ->
-            val namespace = legacyNamespace(snapshot)
-            val root = legacyParent.resolve(namespace).normalize()
-            if (!Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)) return@forEach
-            val id = "legacy-" + sha256("legacy-workspace-id\u0000${snapshot.agentId}\u0000${snapshot.id}").take(48)
-            val existing = workspaceRepository.get(id)
-            val workspace = existing ?: Workspace(
-                id = id,
-                displayName = "Legacy application workspace",
-                backendType = WorkspaceBackendType.INTERNAL,
-                rootReference = root.toString(),
-                readable = true,
-                writable = true,
-                quotaBytes = 4L * 1024L * 1024L,
-                maxFileBytes = 256L * 1024L,
-                enabled = true,
-            ).also(workspaceRepository::save)
-            runCatching {
-                workspaceRegistry.registerOrReplace(
-                    workspace,
-                    runtime.mobileagent.workspace.SharedWorkspaceBackendAdapter.createInternal(root, id),
-                )
-            }
-        }
-    }
-
-
-    private fun applyShizukuState(state: ShizukuAuthorityState) {
-        val definitiveGrant = when {
-            state.errorCode == ShizukuAuthorityBridge.PERMISSION_CHECK_FAILED -> null
-            state.permissionGranted -> PlatformGrant.GRANTED
-            state.binderAlive -> PlatformGrant.DENIED
-            else -> null
-        }
-        val availability = when {
-            !state.installedHint || state.preV11 -> Availability.UNSUPPORTED
-            state.ready -> Availability.READY
-            else -> Availability.TEMPORARILY_UNAVAILABLE
-        }
-        val connection = when {
-            state.ready -> Connection.CONNECTED
-            state.binderAlive && state.permissionGranted && !state.userServiceAlive -> Connection.CONNECTING
-            state.binderAlive && state.permissionGranted -> Connection.DEGRADED
-            else -> Connection.DISCONNECTED
-        }
-        // Binder loss cannot prove that Shizuku permission was revoked. Keep
-        // the last confirmed grant across disconnects and process restarts;
-        // only a live Binder reporting denial invalidates the durable setup.
-        definitiveGrant?.let { grant ->
-            authorityManager.updatePlatformGrant(ElevatedAuthority.SHIZUKU, grant)
-            val canonical = authorityManager.state.value.statuses[ElevatedAuthority.SHIZUKU]
-            when {
-                // User intent is the explicit app-side authorization, while
-                // Shizuku's live GRANTED result is the platform-side proof.
-                // Their conjunction may durably restore configuration even
-                // when the user granted access from Shizuku Manager instead
-                // of this app's permission button. Grant alone never selects
-                // or enables the authority.
-                grant == PlatformGrant.GRANTED &&
-                    canonical?.userIntent == AuthorityUserIntent.SHIZUKU &&
-                    canonical?.configured == false -> {
-                    authorityManager.setConfigured(ElevatedAuthority.SHIZUKU, true)
-                }
-                grant == PlatformGrant.DENIED && canonical?.configured == true -> {
-                    authorityManager.setConfigured(ElevatedAuthority.SHIZUKU, false)
-                }
-            }
-        }
-        authorityManager.updateAvailability(ElevatedAuthority.SHIZUKU, availability)
-        authorityManager.updateConnection(ElevatedAuthority.SHIZUKU, connection)
-        // The live listener must fence the Root session too, not only refresh the UI: an explicit
-        // platform denial invalidates old approvals even if the UID0 service is still responsive.
-        rootCoordinator.refreshLiveSessions(state)
-        // A permission answer or passive refresh only updates state; it never starts the Root
-        // service. The user performs the explicit second "enable" click after authorizing.
-        rootCoordinator.syncAuthorityManagerStates(authorityManager, state)
-        diagnostics.recordShizukuLifecycle(
-            ShizukuLifecycleRecord(
-                state = when {
-                    state.ready -> DiagnosticLifecycleState.READY
-                    state.binderAlive && state.permissionGranted && !state.userServiceAlive -> DiagnosticLifecycleState.STARTED
-                    state.binderAlive && state.permissionGranted -> DiagnosticLifecycleState.FAILED
-                    state.binderAlive -> DiagnosticLifecycleState.DISCONNECTED
-                    else -> DiagnosticLifecycleState.UNKNOWN
-                },
-                errorCode = state.errorCode ?: "unknown",
-            ),
-        )
-    }
-
-    private fun applyWiredState(state: WiredAdbStatus) {
-        val bindingInvalidated = state.lastError in setOf(
-            WiredAdbErrorCode.BRIDGE_BINDING_MISMATCH,
-            WiredAdbErrorCode.BRIDGE_PROTOCOL_MISMATCH,
-            WiredAdbErrorCode.BRIDGE_AUTH_FAILED,
-            WiredAdbErrorCode.BRIDGE_SECRET_UNAVAILABLE,
-        )
-        val definitiveGrant = when {
-            bindingInvalidated -> PlatformGrant.REVOKED
-            else -> when (state.platformGrant) {
-                WiredAdbPlatformGrant.GRANTED -> PlatformGrant.GRANTED
-                WiredAdbPlatformGrant.DENIED -> PlatformGrant.DENIED
-                WiredAdbPlatformGrant.REVOKED -> PlatformGrant.REVOKED
-                WiredAdbPlatformGrant.UNKNOWN -> null
-            }
-        }
-        val availability = when (state.availability) {
-            runtime.mobileagent.wired.WiredAdbAvailability.READY -> Availability.READY
-            runtime.mobileagent.wired.WiredAdbAvailability.TEMPORARILY_UNAVAILABLE -> Availability.TEMPORARILY_UNAVAILABLE
-            runtime.mobileagent.wired.WiredAdbAvailability.UNSUPPORTED -> Availability.UNSUPPORTED
-        }
-        val connection = when (state.connection) {
-            WiredAdbConnectionState.CONNECTED -> Connection.CONNECTED
-            WiredAdbConnectionState.CONNECTING -> Connection.CONNECTING
-            WiredAdbConnectionState.DEGRADED -> Connection.DEGRADED
-            WiredAdbConnectionState.DISCONNECTED -> Connection.DISCONNECTED
-        }
-        // A missing cable, Wi-Fi route or desktop process yields UNKNOWN and
-        // must retain paired trust. Only a definitive trust/binding failure
-        // invalidates the persistent configured state.
-        definitiveGrant?.let { grant ->
-            authorityManager.updatePlatformGrant(ElevatedAuthority.WIRED_ADB, grant)
-            if (grant in setOf(PlatformGrant.DENIED, PlatformGrant.REVOKED) &&
-                authorityManager.state.value.statuses[ElevatedAuthority.WIRED_ADB]?.configured == true
-            ) {
-                authorityManager.setConfigured(ElevatedAuthority.WIRED_ADB, false)
-            }
-        }
-        authorityManager.updateAvailability(ElevatedAuthority.WIRED_ADB, availability)
-        authorityManager.updateConnection(ElevatedAuthority.WIRED_ADB, connection)
-        // Reconcile both enabled and disabled bridge intent. An older one-way
-        // sync could leave a canonical manager enabled after a restart where
-        // the durable bridge intent had been cleared. Never write a value when
-        // the bridge reports a persistence/load failure; in that case the
-        // shell gate stays closed until a later healthy status is observed.
-        val intentLoadSucceeded = state.lastError != WiredAdbErrorCode.INTERNAL_ERROR &&
-            !(state.state == WiredAdbLifecycleState.REAUTH_REQUIRED && state.lastError == null)
-        if (!intentLoadSucceeded) {
-            wiredIntentReconciled.set(false)
-        } else {
-            val desired = if (state.userIntent == WiredAdbUserIntent.ENABLED) {
-                AuthorityUserIntent.WIRED_ADB
-            } else {
-                AuthorityUserIntent.NONE
-            }
-            val current = authorityManager.state.value.statuses[ElevatedAuthority.WIRED_ADB]?.userIntent
-            val matches = current == desired || runCatching {
-                authorityManager.setUserIntent(
-                    ElevatedAuthority.WIRED_ADB,
-                    state.userIntent == WiredAdbUserIntent.ENABLED,
-                )
-            }.getOrDefault(false)
-            wiredIntentReconciled.set(
-                matches && authorityManager.state.value.statuses[ElevatedAuthority.WIRED_ADB]?.userIntent == desired,
-            )
-        }
-        diagnostics.recordWiredAdbLifecycle(
-            WiredAdbLifecycleRecord(
-                state = when (state.state) {
-                    WiredAdbLifecycleState.READY -> DiagnosticLifecycleState.READY
-                    WiredAdbLifecycleState.CONNECTING,
-                    WiredAdbLifecycleState.AUTHENTICATING,
-                        -> DiagnosticLifecycleState.STARTED
-                    WiredAdbLifecycleState.REAUTH_REQUIRED -> DiagnosticLifecycleState.FAILED
-                    WiredAdbLifecycleState.DISCONNECTED -> DiagnosticLifecycleState.DISCONNECTED
-                    else -> DiagnosticLifecycleState.UNKNOWN
-                },
-                errorCode = state.lastError?.name ?: "unknown",
-            ),
-        )
-    }
-
-    private fun installDiagnosticsCollectors() {
-        scope.launch {
-            authorityManager.selection.collect { selection ->
-                val selected = selection.selected ?: Authority.NONE
-                val previous = previousSelection
-                if (previous != selected) {
-                    authorityDiagnostics.recordSelection(selected.toDiagnostic(), previous?.toDiagnostic())
-                    previousSelection = selected
-                }
-            }
-        }
-        scope.launch {
-            dangerousModeManager.state.collect { state ->
-                authorityDiagnostics.recordDangerousMode(state.enabled, state.policy.toDiagnostic())
-            }
-        }
-        scope.launch {
-            var previous: WiredAdbStatus? = null
-            wiredAuthority.status.collect { state ->
-                val prior = previous
-                previous = state
-                if (wiredAuthority is runtime.mobileagent.resident.ResidentAdbAuthorityBridge &&
-                    residentWorkspaceHandlesNeedReattach(prior, state)
-                ) {
-                    privilegedWorkspaceBindingRepository.forAuthority(ElevatedAuthority.WIRED_ADB)
-                        .filter { it.status != PrivilegedWorkspaceBindingStatus.REVOKED }
-                        .forEach { workspaceRegistry.unregister(it.workspaceId) }
-                }
-                applyWiredState(state)
-                schedulePrivilegedWorkspaceReattach()
-                recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.PLATFORM_STATE_CHANGE)
-                // A transport/provider transition may be the only signal that
-                // USB became available again. Retry only on the meaningful
-                // disconnected -> trusted edge; reconnect failures themselves
-                // never create a tight retry loop.
-                if (prior?.state == WiredAdbLifecycleState.DISCONNECTED &&
-                    state.state == WiredAdbLifecycleState.TRUSTED
-                ) {
-                    scheduleWiredReconnect()
-                }
-            }
-        }
-        scope.launch {
-            authorityManager.state.collect { state ->
-                authorityDiagnostics.recordStates(state)
-                recordAuthorityConfigurationSnapshot(DiagnosticAuthorityConfigurationReason.SNAPSHOT, state)
-                // A privileged UserService restart kills every remote workspace
-                // handle while the local registry entries stay registered and
-                // look alive to enumerate.  The edge is evaluated per authority
-                // — including an authority that restarts while unselected,
-                // whose stale handles would otherwise survive the later
-                // switch — and drops that authority's stale entries so the
-                // reattach pass below actually re-opens them instead of
-                // skipping them.  Reattach itself stays selected-only;
-                // Wired ADB uses its own status collector above; resident
-                // daemon generations also invalidate its ephemeral handles.
-                privilegedReadyEdgeAuthorities(state.statuses, authorityReadySeen)
-                    .forEach { authority ->
-                        privilegedWorkspaceBindingRepository.forAuthority(authority)
-                            .asSequence()
-                            .filter { it.status != PrivilegedWorkspaceBindingStatus.REVOKED }
-                            .forEach { workspaceRegistry.unregister(it.workspaceId) }
-                    }
-                schedulePrivilegedWorkspaceReattach()
-            }
-        }
-    }
-
-    private fun recordAuthorityConfigurationSnapshot(
-        reason: DiagnosticAuthorityConfigurationReason,
-        state: AuthorityManagerState = authorityManager.state.value,
-    ) {
-        authorityDiagnostics.recordConfiguration(reason, state)
+    private fun installBackendAssembly(authority: Authority, assembly: AuthorityBackendAssembly) {
+        shellBackends[authority] = assembly.shell
+        workspaceBackends[authority] = assembly.workspace
+        privilegedWorkspaceProviders[authority] = assembly.browser
     }
 
     /**
@@ -2336,41 +1519,13 @@ class RuntimeIntegration(
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         shizukuPermissionRequestPending.set(false)
-        shizukuAuthority?.removeStateListener(shizukuStateListener)
-        shizukuAuthority?.removePermissionResultListener(shizukuPermissionListener)
-        scope.cancel()
-        wiredReconnectInFlight.set(false)
-        runCatching { rootCoordinator.close() }
-        privilegedWorkspaceProviders.values.forEach { provider -> runCatching { provider.close() } }
-        privilegedWorkspaceProviders.clear()
-    }
-
-    /**
-     * Best-effort process/foreground reconnect for an already trusted, selected
-     * Wired provider. This never pairs, changes selection, or retries in a
-     * loop; a failed attempt is retried only by a later explicit refresh or
-     * disconnected -> trusted status transition.
-     */
-    private fun scheduleWiredReconnect() {
-        if (closed.get() || wiredReconnectInFlight.get()) return
-        val manager = authorityManager.state.value
-        val wired = manager.statuses[ElevatedAuthority.WIRED_ADB] ?: return
-        val bridge = runCatching { wiredAuthority.status.value }.getOrNull() ?: return
-        if (manager.selectedAuthority != ElevatedAuthority.WIRED_ADB ||
-            !wired.isConfiguredForSelection ||
-            wired.userIntent != AuthorityUserIntent.WIRED_ADB ||
-            bridge.userIntent != WiredAdbUserIntent.ENABLED ||
-            !bridge.trusted ||
-            bridge.state == WiredAdbLifecycleState.REAUTH_REQUIRED ||
-            bridge.connection == WiredAdbConnectionState.CONNECTED
-        ) return
-        if (!wiredReconnectInFlight.compareAndSet(false, true)) return
-        scope.launch {
-            try {
-                if (!closed.get()) runCatching { wiredAuthority.connect() }
-            } finally {
-                wiredReconnectInFlight.set(false)
-            }
+        runCatching { shizukuAuthority?.removeStateListener(shizukuStateListener) }
+        runCatching { shizukuAuthority?.removePermissionResultListener(shizukuPermissionListener) }
+        retireRuntimeCallbacks(callbackGate, scopeJob) {
+            wiredReconnectInFlight.set(false)
+            if (rootCoordinatorDelegate.isInitialized()) runCatching { rootCoordinator.close() }
+            privilegedWorkspaceProviders.values.forEach { provider -> runCatching { provider.close() } }
+            privilegedWorkspaceProviders.clear()
         }
     }
 
@@ -2450,7 +1605,7 @@ class RuntimeIntegration(
                 readGranted = activeSafGrants.any { it.readGranted },
                 writeGranted = activeSafGrants.any { it.writeGranted },
                 persisted = activeSafGrants.any { grant ->
-                    runCatching { grant.activePersistedUri() != null }.getOrDefault(false)
+                    runCatching { grant.activePersistedUri(appContext) != null }.getOrDefault(false)
                 },
                 status = SafGrantStatus.ACTIVE,
             )
@@ -2490,26 +1645,6 @@ class RuntimeIntegration(
             revision = maxOf(state.persistenceRevision, policy.policyVersion, dangerousModeManager.state.value.revision),
         )
     }
-
-    private fun SafWorkspaceGrant.activePersistedUri(): Uri? {
-        if (status != SafGrantStatus.ACTIVE || (!readGranted && !writeGranted)) return null
-        val uri = runCatching { Uri.parse(uriReference) }.getOrNull() ?: return null
-        val held = appContext.contentResolver.persistedUriPermissions.firstOrNull { it.uri == uri } ?: return null
-        return uri.takeIf { held.isReadPermission && (!writeGranted || held.isWritePermission) }
-    }
-
-    private fun safePrivatePath(raw: String): Path? = runCatching {
-        val candidate = File(raw).toPath().toAbsolutePath().normalize()
-        val privateRoot = appContext.filesDir.toPath().toAbsolutePath().normalize()
-        candidate.takeIf { it.startsWith(privateRoot) }
-    }.getOrNull()
-
-    private fun legacyNamespace(snapshot: AgentSnapshot): String =
-        sha256("mobile-agent-runtime/workspace-v1\n${snapshot.agentId}\n${snapshot.id}")
-
-    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
-        .digest(value.toByteArray(Charsets.UTF_8))
-        .joinToString("") { byte -> "%02x".format(byte) }
 
     private fun Authority?.toElevated(): ElevatedAuthority? = when (this) {
         null, Authority.NONE -> null
@@ -2557,7 +1692,7 @@ class RuntimeIntegration(
         if (safGrant?.status == SafGrantStatus.REVOKED) return WorkspaceAccessStatus.REVOKED
         if (!workspace.enabled) return WorkspaceAccessStatus.DISABLED
         if (safGrant?.status == SafGrantStatus.GRANT_LOST) return WorkspaceAccessStatus.GRANT_LOST
-        if (safGrant?.status == SafGrantStatus.ACTIVE && safGrant.activePersistedUri() == null) return WorkspaceAccessStatus.GRANT_LOST
+        if (safGrant?.status == SafGrantStatus.ACTIVE && safGrant.activePersistedUri(appContext) == null) return WorkspaceAccessStatus.GRANT_LOST
         if (workspace.backendType == WorkspaceBackendType.PRIVILEGED &&
             workspace.scope == WorkspaceScope.SELECTED_DIRECTORY
         ) {
@@ -2724,238 +1859,6 @@ class RuntimeIntegration(
         )
     }
 
-    private class WorkspaceAccessException(
-        val accessCode: WorkspaceAccessErrorCode,
-    ) : IllegalStateException()
-
-    private sealed interface PickerSelection {
-        data class NewThread(val agentId: String, val binding: ConversationWorkspaceBinding) : PickerSelection
-        data class Committed(
-            val grants: List<CapabilityGrant>,
-            val conversation: ConversationWorkspaceBinding? = null,
-            val agentDefault: AgentWorkspaceDefault? = null,
-            val previousAgentDefaultWorkspaceId: String? = null,
-        ) : PickerSelection
-    }
-
-    /**
-     * Decide under the same writer transaction that grants and binds. A competing selection
-     * may already have bound this Thread. Its losing candidate can enter the workspace library,
-     * but must wait for confirmation before granting anything or requiring a live backend.
-     */
-    private inline fun persistPickerSelection(
-        workspace: Workspace,
-        target: WorkspacePickerTarget?,
-        plan: WorkspaceIntentPlan,
-        grant: WorkspaceAccessGrantTarget?,
-        backend: () -> WorkspaceBackend,
-    ): PickerSelection {
-        val threadId = if (plan.bindThread) target?.threadId else null
-        val binding = threadId?.let(conversationWorkspaceBindingRepository::get)
-        if (binding != null && binding.workspaceId != workspace.id) {
-            return PickerSelection.NewThread(requireNotNull(target?.agentId), binding)
-        }
-        val registered = backend()
-        val grants = grant?.let {
-            persistWorkspaceGrantBundle(workspace, registered, it, preserveActiveWholeDirectoryCapabilities = plan.bindThread)
-        }.orEmpty()
-        val setDefault = plan.setAgentDefault && !plan.deferred
-        val agentId = target?.agentId
-        if (agentId == null) {
-            require(!plan.bindThread && !setDefault) { "A workspace binding target requires an Agent" }
-            return PickerSelection.Committed(grants)
-        }
-        require(grants.any { it.agentId == agentId && it.workspaceId == workspace.id }) {
-            "Workspace binding requires an active Agent grant"
-        }
-        val conversation = threadId?.let { conversationWorkspaceBindingRepository.bind(it, workspace.id) }
-        require(!setDefault || workspace.scope == WorkspaceScope.SELECTED_DIRECTORY) {
-            "Full-device workspace cannot be an Agent default"
-        }
-        val previousDefault = if (setDefault) agentWorkspaceDefaultRepository.get(agentId) else null
-        val agentDefault = if (setDefault) {
-            agentWorkspaceDefaultRepository.set(agentId, workspace.id, expectedRevision = previousDefault?.revision)
-        } else null
-        return PickerSelection.Committed(
-            grants = grants,
-            conversation = conversation,
-            agentDefault = agentDefault,
-            previousAgentDefaultWorkspaceId = previousDefault?.workspaceId,
-        )
-    }
-
-    private fun finishPickerSelection(
-        workspace: Workspace,
-        target: WorkspacePickerTarget?,
-        selection: PickerSelection,
-        attachedName: String? = null,
-        attachedAuthority: Authority? = null,
-    ): WorkspaceAccessResult {
-        val grants = when (selection) {
-            is PickerSelection.NewThread -> {
-                val now = Instant.ofEpochMilli(System.currentTimeMillis())
-                val policyVersion = authorityPolicyRepository.getPolicy().policyVersion
-                capabilityGrantRepository.forAgent(selection.agentId, includeRevoked = false).filter {
-                    it.workspaceId == workspace.id && it.policyVersion == policyVersion && it.isActiveFor(now, null, null)
-                }
-            }
-            is PickerSelection.Committed -> {
-                selection.conversation?.let { binding ->
-                    recordConversationWorkspaceBinding(
-                        binding, target?.agentId.orEmpty(), ConversationWorkspaceEvent.BOUND, previousWorkspaceId = null,
-                    )
-                }
-                selection.agentDefault?.let { persisted ->
-                    recordAgentWorkspaceDefaultChanged(
-                        selection.previousAgentDefaultWorkspaceId, persisted, DiagnosticWorkspaceDefaultResult.SET,
-                    )
-                }
-                selection.grants
-            }
-        }
-        val committed = selection is PickerSelection.Committed
-        val item = committedWorkspaceAccessItem(
-            workspace = workspace,
-            displayName = attachedName?.takeIf { committed } ?: safeWorkspaceDisplayName(workspace, 1),
-            status = WorkspaceAccessStatus.ACTIVE,
-            authority = attachedAuthority?.takeIf { committed } ?: workspace.authorityOrNull(),
-            activeGrants = grants,
-            fullDeviceConfirmationPresent = true,
-        )
-        val summaries = grants.map { it.toWorkspaceAccessSummary() }
-        return when (selection) {
-            is PickerSelection.Committed -> WorkspaceAccessResult.Success(item, summaries)
-            is PickerSelection.NewThread -> WorkspaceAccessResult.NewThreadRequired(
-                agentId = selection.agentId,
-                currentThreadId = selection.binding.sessionId,
-                currentWorkspaceId = selection.binding.workspaceId,
-                requestedWorkspaceId = workspace.id,
-                workspace = item,
-                grants = summaries,
-                authorizationState = if (grants.isEmpty()) {
-                    NewThreadAuthorizationState.REQUIRES_CONFIRMATION_COMMIT
-                } else {
-                    NewThreadAuthorizationState.ALREADY_GRANTED
-                },
-            )
-        }
-    }
-
-    private fun ToolErrorCode.toWorkspaceAccessCode(): WorkspaceAccessErrorCode = when (this) {
-        ToolErrorCode.WORKSPACE_NOT_FOUND -> WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND
-        ToolErrorCode.AUTHORITY_PROVIDER_NOT_SELECTED -> WorkspaceAccessErrorCode.AUTHORITY_NOT_SELECTED
-        ToolErrorCode.AUTHORITY_NOT_GRANTED,
-        ToolErrorCode.SHIZUKU_PERMISSION_DENIED,
-        ToolErrorCode.SHELL_CAPABILITY_DENIED,
-            -> WorkspaceAccessErrorCode.CAPABILITY_DENIED
-        ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE,
-        ToolErrorCode.SHIZUKU_SERVICE_UNAVAILABLE,
-        ToolErrorCode.BRIDGE_NOT_PAIRED,
-        ToolErrorCode.BRIDGE_DISCONNECTED,
-        ToolErrorCode.ADB_DEVICE_UNAUTHORIZED,
-        ToolErrorCode.ADB_DEVICE_OFFLINE,
-        ToolErrorCode.ADB_DEVICE_DISCONNECTED,
-            -> WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE
-        ToolErrorCode.CONFLICT -> WorkspaceAccessErrorCode.CONFLICT
-        ToolErrorCode.INVALID_REQUEST,
-        ToolErrorCode.PATH_OUT_OF_SCOPE,
-        ToolErrorCode.ROOT_OPERATION_FORBIDDEN,
-            -> WorkspaceAccessErrorCode.INVALID_REQUEST
-        ToolErrorCode.AUDIT_UNAVAILABLE,
-        ToolErrorCode.AUDIT_FUSE_OPEN,
-        ToolErrorCode.IO_ERROR,
-            -> WorkspaceAccessErrorCode.PERSISTENCE_FAILED
-        ToolErrorCode.UNKNOWN_OUTCOME,
-        ToolErrorCode.TIMEOUT,
-        ToolErrorCode.SHELL_TIMED_OUT,
-        ToolErrorCode.SHELL_CANCELLED,
-            -> WorkspaceAccessErrorCode.UNKNOWN_OUTCOME
-        else -> WorkspaceAccessErrorCode.UNSUPPORTED
-    }
-
-    private fun <T> workspaceFailure(code: ToolErrorCode): WorkspaceResult<T> =
-        WorkspaceResult.Failure(ToolError(code))
-
-    private fun workspaceAccessFailure(code: WorkspaceAccessErrorCode): WorkspaceAccessResult =
-        WorkspaceAccessResult.Failure(code)
-
-    private fun persistWorkspaceGrantBundle(
-        workspace: Workspace,
-        backend: runtime.mobileagent.skills.tooling.WorkspaceBackend,
-        target: WorkspaceAccessGrantTarget,
-        preserveActiveWholeDirectoryCapabilities: Boolean = false,
-    ): List<CapabilityGrant> {
-        var requestedCapabilities = target.capabilities.ifEmpty {
-            if (workspace.scope == WorkspaceScope.FULL_DEVICE_FILES) {
-                canonicalFullDeviceWorkspaceGrantCapabilities(backend.capabilities)
-            } else {
-                canonicalDefaultWorkspaceGrantCapabilities(backend.capabilities)
-            }
-        }
-        if (requestedCapabilities.isEmpty()) throw WorkspaceAccessException(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
-        if (requestedCapabilities.any { it !in backend.capabilities }) {
-            throw WorkspaceAccessException(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
-        }
-        if (target.lifetime != runtime.mobileagent.domain.GrantLifetime.PERSISTENT) {
-            // Workspace access is an Agent-level setting shared by all of its
-            // sessions. Scoped or one-shot overlays are intentionally not part
-            // of this facade; they would create a second session truth.
-            throw WorkspaceAccessException(WorkspaceAccessErrorCode.INVALID_REQUEST)
-        }
-        val normalizedPath = try {
-            WorkspacePathPolicy.normalize(target.pathScope, allowRoot = true)
-                .takeIf { it.isNotEmpty() }
-        } catch (_: RuntimeException) {
-            throw WorkspaceAccessException(WorkspaceAccessErrorCode.INVALID_REQUEST)
-        }
-        val policyVersion = authorityPolicyRepository.getPolicy().policyVersion
-        val now = Instant.ofEpochMilli(System.currentTimeMillis())
-        val bundle = WorkspaceGrantSet(
-            target.agentId, workspace.id, capabilityGrantRepository.list(target.agentId, workspace.id), normalizedPath,
-        )
-        val active = bundle.activeAt(policyVersion, now)
-        // Picking/reattaching a directory is not a request to downgrade the
-        // Agent's access preset. An empty target seeds read-only authority for
-        // a new workspace and preserves existing consent for the same scope.
-        // An explicit capability bundle still reconciles exactly as requested.
-        val preserveExistingAuthorization = target.capabilities.isEmpty() &&
-            (preserveActiveWholeDirectoryCapabilities || normalizedPath == null)
-        if (preserveExistingAuthorization) {
-            if (normalizedPath != null) throw WorkspaceAccessException(WorkspaceAccessErrorCode.INVALID_REQUEST)
-            requestedCapabilities = requestedCapabilities + active.map { it.capability }.intersect(backend.capabilities)
-        }
-        if (requestedCapabilities.any { it !in backend.capabilities }) {
-            throw WorkspaceAccessException(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
-        }
-        // Reconcile only this bundle's scope. Path-scoped, one-shot, task,
-        // session and Skill grants are independent of an automatic default.
-        bundle.rows.filter { grant ->
-            // A temporarily unsupported operation stays consented until the user changes the preset.
-            grant.policyVersion != policyVersion || (!preserveExistingAuthorization && grant.capability !in requestedCapabilities)
-        }.forEach { grant -> capabilityGrantRepository.revoke(grant.grantId, grant.revision) }
-        return requestedCapabilities.sortedBy { it.value }.map { capability ->
-            active.firstOrNull { it.capability == capability }
-                ?: capabilityGrantRepository.save(bundle.newGrant(capability, policyVersion))
-        }
-    }
-
-    private fun persistWorkspaceAndGrants(
-        workspace: Workspace,
-        backend: runtime.mobileagent.skills.tooling.WorkspaceBackend,
-        target: WorkspaceAccessGrantTarget?,
-    ): List<CapabilityGrant> = try {
-        db.transaction {
-            workspaceRepository.save(workspace)
-            target?.let { persistWorkspaceGrantBundle(workspace, backend, it) }.orEmpty()
-        }
-    } catch (failure: WorkspaceAccessException) {
-        throw failure
-    } catch (_: AuthorityPolicyConflictException) {
-        throw WorkspaceAccessException(WorkspaceAccessErrorCode.CONFLICT)
-    } catch (_: RuntimeException) {
-        throw WorkspaceAccessException(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
-    }
-
     /** Save one canonical Agent grant without mutating grants for other workspaces. */
     private fun saveAgentGrantWithCurrentWorkspaceInvariant(grant: CapabilityGrant): CapabilityGrant {
         rootWorkspaceUi.requireOrdinaryGrantTarget(grant.workspaceId)
@@ -2964,135 +1867,6 @@ class RuntimeIntegration(
         }
         return capabilityGrantRepository.save(grant)
     }
-
-    private fun attachSafWorkspace(
-        uri: Uri,
-        resultFlags: Int,
-        grant: WorkspaceAccessGrantTarget?,
-        pickerTarget: WorkspacePickerTarget? = null,
-        plan: WorkspaceIntentPlan,
-    ): WorkspaceAccessResult {
-        if (pickerTarget?.agentId != null && grant?.agentId != pickerTarget.agentId) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.INVALID_REQUEST)
-        }
-        if (!uri.scheme.equals("content", ignoreCase = true) || uri.authority.isNullOrBlank()) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.INVALID_REQUEST)
-        }
-        val requestedFlags = safRequestedFlags(resultFlags)
-        try {
-            // OpenDocumentTree may return a read-only grant. Preserve exactly
-            // the provider's actual flags rather than assuming write access.
-            appContext.contentResolver.takePersistableUriPermission(uri, requestedFlags)
-        } catch (_: RuntimeException) {
-            if (requestedFlags == Intent.FLAG_GRANT_READ_URI_PERMISSION) {
-                return workspaceAccessFailure(WorkspaceAccessErrorCode.URI_PERMISSION_REQUIRED)
-            }
-            try {
-                appContext.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            } catch (_: RuntimeException) {
-                return workspaceAccessFailure(WorkspaceAccessErrorCode.URI_PERMISSION_REQUIRED)
-            }
-        }
-        val persisted = appContext.contentResolver.persistedUriPermissions.firstOrNull { it.uri == uri }
-            ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.URI_PERMISSION_REQUIRED)
-        val actualFlags = safPersistableFlags(persisted.isReadPermission, persisted.isWritePermission)
-        if (actualFlags and Intent.FLAG_GRANT_READ_URI_PERMISSION == 0) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.URI_PERMISSION_REQUIRED)
-        }
-
-        val existingGrant = safWorkspaceGrantRepository.list(includeRevoked = true)
-            .firstOrNull { it.uriReference == uri.toString() }
-        val existingWorkspace = existingGrant?.let { workspaceRepository.get(it.workspaceId) }
-        val id = existingGrant?.workspaceId ?: "saf-" + UUID.randomUUID().toString().replace("-", "")
-        if (existingWorkspace != null && existingWorkspace.backendType != WorkspaceBackendType.SAF_TREE) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.CONFLICT)
-        }
-        val safTitle = safTreeUiTitle(appContext, uri)
-        val workspace = Workspace(
-            id = id,
-            displayName = persistedWorkspaceFolderLabel(
-                backendType = WorkspaceBackendType.SAF_TREE,
-                requestedName = safTitle,
-                ordinal = (workspaceRepository.list().count { it.backendType == WorkspaceBackendType.SAF_TREE } + 1),
-                fullDevice = false,
-            ),
-            backendType = WorkspaceBackendType.SAF_TREE,
-            rootReference = uri.toString(),
-            readable = true,
-            writable = actualFlags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION != 0,
-            quotaBytes = 4L * 1024L * 1024L,
-            maxFileBytes = 256L * 1024L,
-            enabled = true,
-            revision = (existingWorkspace?.revision ?: 0L) + 1L,
-            createdAt = existingWorkspace?.createdAt.orEmpty(),
-            scope = WorkspaceScope.SELECTED_DIRECTORY,
-        )
-        val backend = try {
-            runtime.mobileagent.workspace.SharedWorkspaceBackendAdapter.createSaf(appContext, uri, id)
-        } catch (_: RuntimeException) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.UNKNOWN_OUTCOME)
-        }
-        val safGrant = SafWorkspaceGrant(
-            workspaceId = id,
-            uriReference = uri.toString(),
-            readGranted = true,
-            writeGranted = actualFlags and Intent.FLAG_GRANT_WRITE_URI_PERMISSION != 0,
-            persistedFlags = actualFlags,
-            status = SafGrantStatus.ACTIVE,
-            createdAt = existingGrant?.createdAt ?: existingWorkspace?.createdAt.orEmpty(),
-        )
-        val selection = try {
-            db.transaction {
-                workspaceRepository.save(workspace)
-                safWorkspaceGrantRepository.save(safGrant)
-                persistPickerSelection(workspace, pickerTarget, plan, grant) { backend }
-            }
-        } catch (failure: WorkspaceAccessException) {
-            return workspaceAccessFailure(failure.accessCode)
-        } catch (_: AuthorityPolicyConflictException) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.CONFLICT)
-        } catch (_: RuntimeException) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
-        }
-        try {
-            workspaceRegistry.registerOrReplace(workspace, backend)
-        } catch (_: RuntimeException) {
-            runCatching {
-                workspaceRepository.save(
-                    workspace.copy(
-                        enabled = false,
-                        readable = false,
-                        writable = false,
-                        revision = workspace.revision + 1L,
-                    ),
-                )
-            }
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.UNKNOWN_OUTCOME)
-        }
-        rememberUiPresentation(
-            workspaceId = workspace.id,
-            kind = WorkspaceUiKind.SAF,
-            title = safTitle,
-        )
-        if (selection is PickerSelection.Committed) {
-            diagnostics.recordWorkspaceGrantChanged(
-                WorkspaceGrantChangedRecord(
-                    id,
-                    if (workspace.writable) DiagnosticGrantScope.READ_WRITE else DiagnosticGrantScope.READ,
-                    true,
-                ),
-            )
-        }
-        return finishPickerSelection(workspace, pickerTarget, selection, attachedName = workspace.displayName)
-    }
-
-    private fun CapabilityGrant.toWorkspaceAccessSummary(): WorkspaceAccessGrantSummary =
-        WorkspaceAccessGrantSummary(
-            grantId = grantId,
-            capability = capability,
-            lifetime = lifetime,
-            revision = revision,
-        )
 
     private fun authorityProviderFor(authority: Authority): PrivilegedWorkspaceProvider? {
         if (authority == Authority.NONE) return null
@@ -3109,583 +1883,24 @@ class RuntimeIntegration(
         return ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE
     }
 
-    private suspend fun attachPrivilegedDirectoryInternal(
-        authority: Authority,
-        request: WorkspaceAttachRequest,
-        grant: WorkspaceAccessGrantTarget?,
-        pickerTarget: WorkspacePickerTarget? = null,
-        plan: WorkspaceIntentPlan,
-    ): WorkspaceAccessResult {
-        if (pickerTarget?.agentId != null && grant?.agentId != pickerTarget.agentId) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.INVALID_REQUEST)
-        }
-        val provider = authorityProviderFor(authority)
-            ?: return workspaceAccessFailure(privilegedFailure(authority).toWorkspaceAccessCode())
-        val attachment = try {
-            provider.attachDirectory(request)
-        } catch (cancelled: kotlinx.coroutines.CancellationException) {
-            throw cancelled
-        } catch (_: RuntimeException) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.UNKNOWN_OUTCOME)
-        }
-        val value = when (attachment) {
-            is WorkspaceResult.Failure -> return workspaceAccessFailure(attachment.error.code.toWorkspaceAccessCode())
-            is WorkspaceResult.Success -> attachment.value
-        }
-        return persistPrivilegedAttachment(authority, request.workspaceId, request.displayName, value, grant, pickerTarget, plan)
-    }
-
-    private suspend fun attachPrivilegedPathInternal(
-        authority: Authority,
-        workspaceId: String,
-        displayName: String,
-        absolutePath: String,
-        grant: WorkspaceAccessGrantTarget?,
-        pickerTarget: WorkspacePickerTarget? = null,
-        plan: WorkspaceIntentPlan,
-    ): WorkspaceAccessResult {
-        if (authority != Authority.WIRED_ADB) return workspaceAccessFailure(WorkspaceAccessErrorCode.UNSUPPORTED)
-        val provider = authorityProviderFor(authority) as? runtime.mobileagent.wired.WiredAdbDeviceWorkspaceProvider
-            ?: return workspaceAccessFailure(privilegedFailure(authority).toWorkspaceAccessCode())
-        val attachment = try {
-            provider.attachUserPath(workspaceId, displayName, absolutePath)
-        } catch (cancelled: kotlinx.coroutines.CancellationException) {
-            throw cancelled
-        } catch (_: RuntimeException) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.UNKNOWN_OUTCOME)
-        }
-        val value = when (attachment) {
-            is WorkspaceResult.Failure -> return workspaceAccessFailure(attachment.error.code.toWorkspaceAccessCode())
-            is WorkspaceResult.Success -> attachment.value
-        }
-        return persistPrivilegedAttachment(authority, workspaceId, displayName, value, grant, pickerTarget, plan)
-    }
-
-    private fun persistPrivilegedAttachment(
-        authority: Authority,
-        workspaceId: String,
-        displayName: String,
-        value: runtime.mobileagent.skills.tooling.WorkspaceAttachment,
-        grant: WorkspaceAccessGrantTarget?,
-        pickerTarget: WorkspacePickerTarget? = null,
-        plan: WorkspaceIntentPlan,
-    ): WorkspaceAccessResult {
-        if (value.descriptor.id != workspaceId) {
-            value.recoveryLocator?.clear()
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.CONFLICT)
-        }
-        val existing = workspaceRepository.get(workspaceId)
-        if (existing != null && (
-            existing.backendType != WorkspaceBackendType.PRIVILEGED ||
-                existing.scope == WorkspaceScope.FULL_DEVICE_FILES
-            )
-        ) {
-            value.recoveryLocator?.clear()
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.CONFLICT)
-        }
-        val recoveryLocator = value.recoveryLocator
-            ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.UNSUPPORTED)
-        val locatorBytes = runCatching { recoveryLocator.copyBytes() }.getOrNull()
-            ?: run {
-                recoveryLocator.clear()
-                return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
-            }
-        val locatorVersion = PRIVILEGED_LOCATOR_VERSION
-        val aad = PrivilegedWorkspaceBindingAad(
-            appInstanceId = appInstanceId,
-            workspaceId = workspaceId,
-            authority = authority,
-            locatorVersion = locatorVersion,
-        )
-        val envelope = try {
-            when (val sealed = bindingCipher.seal(locatorBytes, aad)) {
-                is PrivilegedWorkspaceBindingSealResult.Success -> sealed.envelope
-                is PrivilegedWorkspaceBindingSealResult.Failure -> {
-                    return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
-                }
-            }
-        } finally {
-            locatorBytes.fill(0)
-            recoveryLocator.clear()
-        }
-        val workspace = Workspace(
-            id = value.descriptor.id,
-            displayName = safeWorkspaceDisplayName(
-                Workspace(
-                    id = value.descriptor.id,
-                    displayName = displayName,
-                    backendType = WorkspaceBackendType.PRIVILEGED,
-                    rootReference = "authority:${authority.name}",
-                    scope = WorkspaceScope.SELECTED_DIRECTORY,
-                ),
-                ordinal = workspaceRepository.list().count { it.backendType == WorkspaceBackendType.PRIVILEGED } + 1,
-            ),
-            backendType = WorkspaceBackendType.PRIVILEGED,
-            rootReference = "authority:${authority.name}",
-            readable = value.descriptor.readable,
-            writable = value.descriptor.writable,
-            quotaBytes = value.descriptor.quotaBytes,
-            maxFileBytes = value.descriptor.maxFileBytes,
-            enabled = true,
-            revision = (existing?.revision ?: 0L) + 1L,
-            createdAt = existing?.createdAt.orEmpty(),
-            scope = WorkspaceScope.SELECTED_DIRECTORY,
-        )
-        val previousBinding = privilegedWorkspaceBindingRepository.get(workspaceId)
-        val binding = PrivilegedWorkspaceBinding(
-            workspaceId = workspaceId,
-            authority = authority,
-            encryptedLocator = envelope.encryptedLocator,
-            locatorNonce = envelope.locatorNonce,
-            locatorVersion = locatorVersion,
-            keyVersion = PRIVILEGED_BINDING_KEY_VERSION,
-            aadAppInstanceId = appInstanceId,
-            scope = WorkspaceScope.SELECTED_DIRECTORY,
-            status = PrivilegedWorkspaceBindingStatus.ACTIVE,
-            revision = (previousBinding?.revision ?: 0L) + 1L,
-            createdAt = previousBinding?.createdAt.orEmpty(),
-        )
-        val selection = try {
-            db.transaction {
-                workspaceRepository.save(workspace)
-                privilegedWorkspaceBindingRepository.save(binding)
-                persistPickerSelection(workspace, pickerTarget, plan, grant) { value.backend }
-            }
-        } catch (failure: WorkspaceAccessException) {
-            return workspaceAccessFailure(failure.accessCode)
-        } catch (_: RuntimeException) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
-        }
-        try {
-            workspaceRegistry.registerOrReplace(workspace, value.backend)
-        } catch (_: RuntimeException) {
-            runCatching {
-                privilegedWorkspaceBindingRepository.updateStatus(
-                    workspaceId,
-                    binding.revision,
-                    PrivilegedWorkspaceBindingStatus.UNAVAILABLE,
-                )
-            }
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.UNKNOWN_OUTCOME)
-        }
-        diagnostics.recordPrivilegedWorkspaceBindingPersisted(
-            PrivilegedWorkspaceBindingPersistedRecord(
-                workspaceId = workspaceId,
-                authority = authority.toDiagnostic(),
-                bindingRevision = binding.revision.toDiagnosticGeneration(),
-                grantGeneration = (selection as? PickerSelection.Committed)?.grants
-                    ?.maxOfOrNull { it.revision }?.toDiagnosticGeneration() ?: 0,
-            ),
-        )
-        val privilegedKind = if (authority == Authority.WIRED_ADB) {
-            WorkspaceUiKind.PRIVILEGED_WIRED
-        } else {
-            WorkspaceUiKind.PRIVILEGED_SHIZUKU
-        }
-        rememberUiPresentation(
-            workspaceId = workspaceId,
-            kind = privilegedKind,
-            title = privilegedUiTitle(displayName) ?: displayName.substringAfterLast('/').ifBlank { displayName },
-        )
-        return finishPickerSelection(
-            workspace, pickerTarget, selection, attachedName = workspace.displayName, attachedAuthority = authority,
-        )
-    }
-
-    private suspend fun openFullDeviceFilesInternal(
-        authority: Authority,
-        request: FullDeviceFilesRequest,
-        grant: WorkspaceAccessGrantTarget?,
-    ): WorkspaceAccessResult {
-        if (!buildPolicy.permitsDangerousMode() || dangerousModeManager.policy() == DangerousMode.DISABLED) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
-        }
-        if (!request.confirmedByUser) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
-        }
-        val provider = authorityProviderFor(authority)
-            ?: return workspaceAccessFailure(privilegedFailure(authority).toWorkspaceAccessCode())
-        if (!provider.supportsFullDeviceFiles) return workspaceAccessFailure(WorkspaceAccessErrorCode.UNSUPPORTED)
-
-        // The provider must observe a durable, monotonic confirmation before
-        // it opens the device-root handle. A new confirmation starts at one;
-        // a revoked tombstone can only be re-enabled with its next revision.
-        // This keeps a stale toggle or replayed request from reactivating an
-        // older full-device grant.
-        val existingFullDeviceGrant = fullDeviceFilesGrantRepository.load(request.workspaceId)
-        val currentFullDeviceRevision = fullDeviceFilesGrantRepository.currentRevision(request.workspaceId)
-        val expectedFullDeviceRevision = when {
-            existingFullDeviceGrant != null -> existingFullDeviceGrant.revision
-            currentFullDeviceRevision != null -> currentFullDeviceRevision + 1L
-            else -> 1L
-        }
-        if (request.grantRevision != expectedFullDeviceRevision) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.CONFLICT)
-        }
-        val fullDeviceGrant = FullDeviceFilesGrant(
-            workspaceId = request.workspaceId,
-            revision = request.grantRevision,
-            confirmedAtEpochMs = System.currentTimeMillis(),
-        )
-        when (val saved = fullDeviceFilesGrantRepository.save(fullDeviceGrant)) {
-            is WorkspaceResult.Failure -> return workspaceAccessFailure(saved.error.code.toWorkspaceAccessCode())
-            is WorkspaceResult.Success -> Unit
-        }
-        val newlyCreatedFullDeviceGrant = existingFullDeviceGrant == null
-
-        fun rollbackNewFullDeviceGrant(): WorkspaceAccessResult.Failure? {
-            if (!newlyCreatedFullDeviceGrant) return null
-            return when (val rollback = fullDeviceFilesGrantRepository.revoke(request.workspaceId, request.grantRevision)) {
-                is WorkspaceResult.Success -> null
-                is WorkspaceResult.Failure -> WorkspaceAccessResult.Failure(
-                    rollback.error.code.toWorkspaceAccessCode().takeIf { it != WorkspaceAccessErrorCode.UNSUPPORTED }
-                        ?: WorkspaceAccessErrorCode.UNKNOWN_OUTCOME,
-                )
-            }
-        }
-
-        val attachment = try {
-            provider.openFullDeviceFiles(request)
-        } catch (cancelled: kotlinx.coroutines.CancellationException) {
-            throw cancelled
-        } catch (_: RuntimeException) {
-            rollbackNewFullDeviceGrant()?.let { return it }
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.UNKNOWN_OUTCOME)
-        }
-        val value = when (attachment) {
-            is WorkspaceResult.Failure -> {
-                rollbackNewFullDeviceGrant()?.let { return it }
-                return workspaceAccessFailure(attachment.error.code.toWorkspaceAccessCode())
-            }
-            is WorkspaceResult.Success -> attachment.value
-        }
-        val existing = workspaceRepository.get(request.workspaceId)
-        if (existing != null && (
-            existing.backendType != WorkspaceBackendType.PRIVILEGED ||
-                existing.scope != WorkspaceScope.FULL_DEVICE_FILES
-            )
-        ) {
-            rollbackNewFullDeviceGrant()?.let { return it }
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.CONFLICT)
-        }
-        val workspace = Workspace(
-            id = value.descriptor.id,
-            displayName = "设备文件区",
-            backendType = WorkspaceBackendType.PRIVILEGED,
-            rootReference = "authority:${authority.name}",
-            readable = value.descriptor.readable,
-            writable = value.descriptor.writable,
-            quotaBytes = value.descriptor.quotaBytes,
-            maxFileBytes = value.descriptor.maxFileBytes,
-            enabled = true,
-            revision = (existing?.revision ?: 0L) + 1L,
-            createdAt = existing?.createdAt.orEmpty(),
-            scope = WorkspaceScope.FULL_DEVICE_FILES,
-        )
-        // Persist the sealed recovery locator exactly like a selected-directory
-        // attachment — but only when the provider supplies one.  Shizuku
-        // and resident attachments must carry it: the remote file-service handle dies with
-        // its process and the sealed locator is the only material a later
-        // reattach can re-open. Legacy desktop Wired-ADB full-device attachments carry no
-        // locator by contract — the wired bridge re-establishes its own
-        // session on reconnect — so requiring one rejected every wired attach
-        // as UNSUPPORTED.
-        val recoveryLocator = value.recoveryLocator
-        if (recoveryLocator == null && (authority != Authority.WIRED_ADB ||
-            wiredAuthority is runtime.mobileagent.resident.ResidentAdbAuthorityBridge)
-        ) {
-            rollbackNewFullDeviceGrant()?.let { return it }
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.UNSUPPORTED)
-        }
-        val locatorVersion = PRIVILEGED_LOCATOR_VERSION
-        val locatorEnvelope = recoveryLocator?.let { locator ->
-            val locatorBytes = runCatching { locator.copyBytes() }.getOrNull()
-            if (locatorBytes == null) {
-                locator.clear()
-                rollbackNewFullDeviceGrant()?.let { return it }
-                return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
-            }
-            val bindingAad = PrivilegedWorkspaceBindingAad(
-                appInstanceId = appInstanceId,
-                workspaceId = workspace.id,
-                authority = authority,
-                locatorVersion = locatorVersion,
-            )
-            try {
-                when (val sealed = bindingCipher.seal(locatorBytes, bindingAad)) {
-                    is PrivilegedWorkspaceBindingSealResult.Success -> sealed.envelope
-                    is PrivilegedWorkspaceBindingSealResult.Failure -> {
-                        rollbackNewFullDeviceGrant()?.let { return it }
-                        return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
-                    }
-                }
-            } finally {
-                locatorBytes.fill(0)
-                locator.clear()
-            }
-        }
-        val previousBinding = privilegedWorkspaceBindingRepository.get(workspace.id)
-        val binding = locatorEnvelope?.let { envelope ->
-            PrivilegedWorkspaceBinding(
-                workspaceId = workspace.id,
-                authority = authority,
-                encryptedLocator = envelope.encryptedLocator,
-                locatorNonce = envelope.locatorNonce,
-                locatorVersion = locatorVersion,
-                keyVersion = PRIVILEGED_BINDING_KEY_VERSION,
-                aadAppInstanceId = appInstanceId,
-                scope = WorkspaceScope.FULL_DEVICE_FILES,
-                status = PrivilegedWorkspaceBindingStatus.ACTIVE,
-                revision = (previousBinding?.revision ?: 0L) + 1L,
-                createdAt = previousBinding?.createdAt.orEmpty(),
-            )
-        }
-        val grants = try {
-            db.transaction {
-                workspaceRepository.save(workspace)
-                binding?.let { privilegedWorkspaceBindingRepository.save(it) }
-                grant?.let { persistWorkspaceGrantBundle(workspace, value.backend, it) }.orEmpty()
-            }
-        } catch (failure: WorkspaceAccessException) {
-            rollbackNewFullDeviceGrant()?.let { return it }
-            return workspaceAccessFailure(failure.accessCode)
-        } catch (_: AuthorityPolicyConflictException) {
-            rollbackNewFullDeviceGrant()?.let { return it }
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.CONFLICT)
-        } catch (_: RuntimeException) {
-            rollbackNewFullDeviceGrant()?.let { return it }
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
-        }
-        try {
-            workspaceRegistry.registerOrReplace(workspace, value.backend)
-        } catch (_: RuntimeException) {
-            rollbackNewFullDeviceGrant()?.let { return it }
-            runCatching {
-                workspaceRepository.save(
-                    workspace.copy(
-                        enabled = false,
-                        readable = false,
-                        writable = false,
-                        revision = workspace.revision + 1L,
-                    ),
-                )
-            }
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.UNKNOWN_OUTCOME)
-        }
-        return WorkspaceAccessResult.Success(
-            workspaceAccessItem(workspace, agentId = grant?.agentId),
-            grants.map { it.toWorkspaceAccessSummary() },
-        )
-    }
-
-    private fun grantWorkspaceInternal(
-        workspaceId: String,
-        target: WorkspaceAccessGrantTarget,
-    ): WorkspaceAccessResult {
-        if (rootWorkspaceUi.isRoot(workspaceId)) return workspaceAccessFailure(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
-        val workspace = workspaceRepository.get(workspaceId)
-            ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND)
-        if (!workspace.enabled) return workspaceAccessFailure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
-        val registered = workspaceRegistry.registered(workspaceId)
-            ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
-        if (workspace.backendType == WorkspaceBackendType.SAF_TREE) {
-            if (safWorkspaceGrantRepository.get(workspaceId)?.activePersistedUri() == null) {
-                return workspaceAccessFailure(WorkspaceAccessErrorCode.URI_PERMISSION_REQUIRED)
-            }
-        } else if (workspace.scope == WorkspaceScope.FULL_DEVICE_FILES) {
-            if (fullDeviceFilesGrantRepository.load(workspaceId) == null) {
-                return workspaceAccessFailure(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
-            }
-            val authority = workspace.rootReference.removePrefix("authority:")
-                .let { runCatching { Authority.valueOf(it) }.getOrNull() }
-                ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
-            if (authorityProviderFor(authority) == null) {
-                return workspaceAccessFailure(privilegedFailure(authority).toWorkspaceAccessCode())
-            }
-        }
-        val grants = try {
-            persistWorkspaceAndGrants(workspace, registered.backend, target)
-        } catch (failure: WorkspaceAccessException) {
-            return workspaceAccessFailure(failure.accessCode)
-        }
-        return WorkspaceAccessResult.Success(
-            workspaceAccessItem(workspace, agentId = target.agentId),
-            grants.map { it.toWorkspaceAccessSummary() },
-        )
-    }
-
-    private fun renewExistingWorkspaceGrantsInternal(agentId: String, workspaceId: String): WorkspaceAccessResult {
-        if (rootWorkspaceUi.isRoot(workspaceId)) return workspaceAccessFailure(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
-        val workspace = workspaceRepository.get(workspaceId)
-            ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND)
-        if (workspace.scope != WorkspaceScope.SELECTED_DIRECTORY || !workspace.enabled) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
-        }
-        val registered = workspaceRegistry.registered(workspaceId)
-            ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
-        // System permission/provider checks can block. Complete them before the DB write lock.
-        if (workspace.backendType == WorkspaceBackendType.SAF_TREE) {
-            if (safWorkspaceGrantRepository.get(workspaceId)?.activePersistedUri() == null) {
-                return workspaceAccessFailure(WorkspaceAccessErrorCode.URI_PERMISSION_REQUIRED)
-            }
-        } else if (workspace.backendType == WorkspaceBackendType.PRIVILEGED) {
-            val authority = workspace.authorityOrNull()
-                ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE)
-            if (authorityProviderFor(authority) == null) {
-                return workspaceAccessFailure(privilegedFailure(authority).toWorkspaceAccessCode())
-            }
-        }
-        val renewed = try {
-            db.transaction {
-                val current = workspaceRepository.get(workspaceId)
-                    ?: throw WorkspaceAccessException(WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND)
-                if (current != workspace || workspaceRegistry.registered(workspaceId)?.backend !== registered.backend) {
-                    throw WorkspaceAccessException(WorkspaceAccessErrorCode.CONFLICT)
-                }
-                val policy = authorityPolicyRepository.getPolicy().policyVersion
-                val bundle = WorkspaceGrantSet(
-                    agentId, workspaceId, capabilityGrantRepository.list(agentId, workspaceId, includeRevoked = true),
-                )
-                val sources = bundle.renewableGrants(policy, Instant.now())
-                if (sources.isEmpty() || sources.any { it.capability !in registered.backend.capabilities }) {
-                    throw WorkspaceAccessException(WorkspaceAccessErrorCode.CAPABILITY_DENIED)
-                }
-                sources.map { source ->
-                    if (source.policyVersion == policy) return@map source
-                    bundle.rows.filter { !it.revoked && it.capability == source.capability && it.policyVersion != policy }
-                        .forEach { capabilityGrantRepository.revoke(it.grantId, it.revision) }
-                    capabilityGrantRepository.save(
-                        source.copy(grantId = EntityId.random().value, policyVersion = policy, createdAt = Utc.nowIso(), revision = 1L),
-                    )
-                }
-            }
-        } catch (failure: WorkspaceAccessException) {
-            return workspaceAccessFailure(failure.accessCode)
-        } catch (_: RuntimeException) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
-        }
-        return WorkspaceAccessResult.Success(
-            workspaceAccessItem(workspace, agentId = agentId),
-            renewed.map { it.toWorkspaceAccessSummary() },
-        )
-    }
-
-    private fun revokeGrantInternal(grantId: String, expectedRevision: Long): WorkspaceAccessResult {
-        val current = capabilityGrantRepository.get(grantId)
-            ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND)
-        if (current.revision != expectedRevision) return workspaceAccessFailure(WorkspaceAccessErrorCode.CONFLICT)
-        val workspace = current.workspaceId?.let(workspaceRepository::get)
-            ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND)
-        val revoked = try {
-            capabilityGrantRepository.revoke(grantId, expectedRevision)
-            capabilityGrantRepository.get(grantId)
-        } catch (_: AuthorityPolicyConflictException) {
-            null
-        } catch (_: RuntimeException) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
-        } ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.UNKNOWN_OUTCOME)
-        return WorkspaceAccessResult.Success(
-            workspaceAccessItem(workspace, agentId = revoked.agentId),
-            listOf(revoked.toWorkspaceAccessSummary()),
-        )
-    }
-
-    private fun revokeWorkspaceInternal(workspaceId: String): WorkspaceAccessResult {
-        val workspace = workspaceRepository.get(workspaceId)
-            ?: return workspaceAccessFailure(WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND)
-        val activeGrants = capabilityGrantRepository.forWorkspace(workspaceId, includeRevoked = false)
-        try {
-            db.transaction {
-                activeGrants.forEach { grant ->
-                    capabilityGrantRepository.revoke(grant.grantId, grant.revision)
-                }
-                if (workspace.backendType == WorkspaceBackendType.SAF_TREE) {
-                    safWorkspaceGrantRepository.markRevoked(workspaceId)
-                }
-                privilegedWorkspaceBindingRepository.get(workspaceId)?.let { binding ->
-                    if (binding.status != PrivilegedWorkspaceBindingStatus.REVOKED) {
-                        privilegedWorkspaceBindingRepository.updateStatus(
-                            workspaceId,
-                            binding.revision,
-                            PrivilegedWorkspaceBindingStatus.REVOKED,
-                        )
-                    }
-                }
-                workspaceRepository.save(
-                    workspace.copy(
-                        enabled = false,
-                        readable = false,
-                        writable = false,
-                        revision = workspace.revision + 1L,
-                    ),
-                )
-            }
-        } catch (_: AuthorityPolicyConflictException) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.CONFLICT)
-        } catch (_: RuntimeException) {
-            return workspaceAccessFailure(WorkspaceAccessErrorCode.PERSISTENCE_FAILED)
-        }
-        if (workspace.scope == WorkspaceScope.FULL_DEVICE_FILES) {
-            val fullDeviceGrant = fullDeviceFilesGrantRepository.load(workspaceId)
-            if (fullDeviceGrant != null) {
-                when (val revoked = fullDeviceFilesGrantRepository.revoke(workspaceId, fullDeviceGrant.revision)) {
-                    is WorkspaceResult.Success -> Unit
-                    is WorkspaceResult.Failure -> {
-                        // The provider-side grant is the high-risk gate. If
-                        // its durable revoke cannot be confirmed, remove the
-                        // in-memory backend before returning so a stale
-                        // registry entry cannot dispatch against the scope.
-                        workspaceRegistry.unregister(workspaceId)
-                        return workspaceAccessFailure(revoked.error.code.toWorkspaceAccessCode())
-                    }
-                }
-            }
-        }
-        var platformReleaseFailed = false
-        val saf = safWorkspaceGrantRepository.get(workspaceId)
-        val safUri = saf?.uriReference
-        val sharedSafUriStillHeld = safUri != null && safWorkspaceGrantRepository.list(includeRevoked = false).any { other ->
-            other.workspaceId != workspaceId &&
-                other.status == SafGrantStatus.ACTIVE &&
-                other.uriReference == safUri
-        }
-        if (saf != null && !sharedSafUriStillHeld) {
-            platformReleaseFailed = runCatching {
-                val uri = Uri.parse(saf.uriReference)
-                val actual = appContext.contentResolver.persistedUriPermissions
-                    .firstOrNull { it.uri == uri }
-                    ?.let { safPersistableFlags(it.isReadPermission, it.isWritePermission) }
-                    ?: saf.persistedFlags
-                if (actual != 0) appContext.contentResolver.releasePersistableUriPermission(uri, actual)
-            }.isFailure
-        }
-        workspaceRegistry.unregister(workspaceId)
-        diagnostics.recordWorkspaceGrantChanged(
-            WorkspaceGrantChangedRecord(workspaceId, DiagnosticGrantScope.NONE, false),
-        )
-        if (platformReleaseFailed) return workspaceAccessFailure(WorkspaceAccessErrorCode.UNKNOWN_OUTCOME)
-        val disabled = workspaceRepository.get(workspaceId) ?: workspace.copy(enabled = false)
-        return WorkspaceAccessResult.Success(workspaceAccessItem(disabled), emptyList())
-    }
-
     private inner class RuntimeWorkspaceAccessPort : WorkspaceAccessPort {
         override fun listWorkspaces(agentId: String?): List<WorkspaceAccessItem> =
             listWorkspaceAccessItems(agentId)
 
         override fun attachSaf(uri: Uri, resultFlags: Int, grant: WorkspaceAccessGrantTarget?): WorkspaceAccessResult =
-            attachSafWorkspace(uri, resultFlags, grant, pickerTarget = null, plan = planFor(null))
+            directoryAccess.attachSafWorkspace(uri, resultFlags, grant, pickerTarget = null, plan = planFor(null))
 
         override fun grantWorkspace(workspaceId: String, grant: WorkspaceAccessGrantTarget): WorkspaceAccessResult =
-            grantWorkspaceInternal(workspaceId, grant)
+            directoryAccess.grantWorkspaceInternal(workspaceId, grant)
 
         override fun renewExistingWorkspaceGrants(agentId: String, workspaceId: String): WorkspaceAccessResult =
-            renewExistingWorkspaceGrantsInternal(agentId, workspaceId)
+            directoryAccess.renewExistingWorkspaceGrantsInternal(agentId, workspaceId)
 
         override fun revokeGrant(grantId: String, expectedRevision: Long): WorkspaceAccessResult =
-            revokeGrantInternal(grantId, expectedRevision)
+            directoryAccess.revokeGrantInternal(grantId, expectedRevision)
 
         override fun revokeWorkspace(workspaceId: String): WorkspaceAccessResult =
-            revokeWorkspaceInternal(workspaceId)
+            directoryAccess.revokeWorkspaceInternal(workspaceId)
 
         override fun fullDeviceFilesGrantRevision(workspaceId: String): Long? =
             fullDeviceFilesGrantRepository.currentRevision(workspaceId)
@@ -3711,7 +1926,7 @@ class RuntimeIntegration(
             authority: Authority,
             request: WorkspaceAttachRequest,
             grant: WorkspaceAccessGrantTarget?,
-        ): WorkspaceAccessResult = attachPrivilegedDirectoryInternal(
+        ): WorkspaceAccessResult = directoryAccess.attachPrivilegedDirectoryInternal(
             authority,
             request,
             grant,
@@ -3725,7 +1940,7 @@ class RuntimeIntegration(
             displayName: String,
             absolutePath: String,
             grant: WorkspaceAccessGrantTarget?,
-        ): WorkspaceAccessResult = attachPrivilegedPathInternal(
+        ): WorkspaceAccessResult = directoryAccess.attachPrivilegedPathInternal(
             authority,
             workspaceId,
             displayName,
@@ -3739,7 +1954,7 @@ class RuntimeIntegration(
             authority: Authority,
             request: FullDeviceFilesRequest,
             grant: WorkspaceAccessGrantTarget?,
-        ): WorkspaceAccessResult = openFullDeviceFilesInternal(authority, request, grant)
+        ): WorkspaceAccessResult = directoryAccess.openFullDeviceFilesInternal(authority, request, grant)
 
         override suspend fun revokeFullDeviceFiles(
             authority: Authority,
@@ -3760,7 +1975,7 @@ class RuntimeIntegration(
             // available while Wi-Fi, the desktop companion, or Shizuku is
             // temporarily disconnected; transport handles are merely stale
             // resources once the registry entry and grants are removed.
-            return revokeWorkspaceInternal(workspaceId).also { result ->
+            return directoryAccess.revokeWorkspaceInternal(workspaceId).also { result ->
                 if (result is WorkspaceAccessResult.Failure) workspaceRegistry.unregister(workspaceId)
             }
         }
@@ -3840,8 +2055,6 @@ class RuntimeIntegration(
     companion object {
         const val INTERNAL_WORKSPACE_ID = "internal"
         const val SAF_WORKSPACE_ID = "saf-tree"
-        private const val PRIVILEGED_LOCATOR_VERSION = 1
-        private const val PRIVILEGED_BINDING_KEY_VERSION = 1
         private const val SAF_LIVENESS_PROBE_INTERVAL_MS = 2_000L
         private const val SAF_LIVENESS_PROBE_DEADLINE_MS = 800L
     }

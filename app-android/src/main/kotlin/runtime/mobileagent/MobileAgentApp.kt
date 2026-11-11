@@ -57,8 +57,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 class MobileAgentApp : Application() {
-    lateinit var database: AndroidContextSqlite
-        private set
+    private var openedDatabase: AndroidContextSqlite? = null
+    private var databaseRetirementPending = false
+    val database: AndroidContextSqlite get() = checkNotNull(openedDatabase)
     lateinit var container: AppContainer
         private set
     lateinit var diagnostics: AndroidDiagnosticLogger
@@ -70,6 +71,8 @@ class MobileAgentApp : Application() {
     private val initialization = MutableStateFlow(HostInitialization.INITIALIZING)
     internal val hostInitialization = initialization.asStateFlow()
     private var hostJob: Job? = null
+    private val startupFailure = MutableStateFlow<HostStartupFailure?>(null)
+    internal val hostStartupFailure = startupFailure.asStateFlow()
 
     override fun onCreate() {
         super.onCreate()
@@ -100,26 +103,54 @@ class MobileAgentApp : Application() {
         if (initialization.value == HostInitialization.READY || databaseRecovery != null) return
         synchronized(this) {
             if (initialization.value == HostInitialization.READY || databaseRecovery != null) return
-            if (!::database.isInitialized) database = AndroidContextSqlite(this)
+            initialization.value = HostInitialization.INITIALIZING
+            startupFailure.value = null
+            var stage = HostStartupStage.DATABASE
+            var candidate: AppContainer? = null
             try {
+                if (databaseRetirementPending) retireFailedHost(null)
+                if (openedDatabase == null) openedDatabase = AndroidContextSqlite(this)
+                stage = HostStartupStage.MIGRATION
                 Migrations.apply(database)
-            } catch (failure: runtime.mobileagent.domain.AppException) {
-                if (failure.error.code != runtime.mobileagent.domain.ErrorCode.SCHEMA_UNSUPPORTED) throw failure
-                database.close()
-                databaseRecovery = DatabaseRecoveryStore(getDatabasePath("mobile-agent.db"), File(filesDir, "database-recovery"))
-                initialization.value = HostInitialization.RECOVERY
-                return
+                stage = HostStartupStage.CONTAINER
+                candidate = AppContainer.create(this)
+                stage = HostStartupStage.RUN_RECOVERY
+                candidate.runs.markInFlightUnknown()
+                candidate.activate(this)
+                container = candidate
+                initialization.value = HostInitialization.READY
+            } catch (failure: Throwable) {
+                val cleanup = runCatching { retireFailedHost(candidate) }.exceptionOrNull()
+                if (cleanup == null && failure is runtime.mobileagent.domain.AppException &&
+                    failure.error.code == runtime.mobileagent.domain.ErrorCode.SCHEMA_UNSUPPORTED) {
+                    databaseRecovery = DatabaseRecoveryStore(getDatabasePath("mobile-agent.db"), File(filesDir, "database-recovery"))
+                    initialization.value = HostInitialization.RECOVERY
+                    return
+                } else {
+                    startupFailure.value = hostStartupFailure(stage, failure)
+                    initialization.value = HostInitialization.FAILED
+                }
+                throw failure
             }
-            container = AppContainer(this)
-            container.runs.markInFlightUnknown()
-            initialization.value = HostInitialization.READY
         }
+    }
+
+    private fun retireFailedHost(candidate: AppContainer?) {
+        databaseRetirementPending = openedDatabase != null
+        retireHostAttempt(releaseResources = { candidate?.close() }, closeStorage = {
+            openedDatabase?.close()
+            // Keep the only reference and retry retirement before opening anything if close failed.
+            openedDatabase = null
+            databaseRetirementPending = false
+        })
     }
 
     internal fun initializeHostAsync(): Job = synchronized(hostLaunchLock) {
         hostJob?.takeIf { it.isActive } ?: hostScope.launch {
             try { ensureHostInitialized() }
-            catch (_: Exception) { initialization.value = HostInitialization.FAILED }
+            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (fatal: VirtualMachineError) { throw fatal }
+            catch (_: Throwable) { /* ensureHostInitialized published the bounded failure. */ }
         }.also { hostJob = it }
     }
 
@@ -127,7 +158,7 @@ class MobileAgentApp : Application() {
         synchronized(this) {
             val recovery = checkNotNull(databaseRecovery)
             recovery.preserveForNewDatabase()
-            database = AndroidContextSqlite(this)
+            openedDatabase = null
             databaseRecovery = null
             initialization.value = HostInitialization.INITIALIZING
             ensureHostInitialized()
@@ -143,7 +174,7 @@ class MobileAgentApp : Application() {
     }
 }
 
-class AppContainer(app: MobileAgentApp) :
+class AppContainer internal constructor(app: MobileAgentApp, private val resources: HostResources = HostResources()) :
     AgentGrantPortProvider,
     SettingsAuthorityPortProvider,
     ThreadWorkspacePortProvider,
@@ -168,7 +199,7 @@ class AppContainer(app: MobileAgentApp) :
     })
     val contextCompactions = runtime.mobileagent.data.ContextCompactionRepository(db)
     val settings = SettingsRepository(db)
-    val shizuku = ShizukuAuthorityBridge(app).also { bridge ->
+    val shizuku = resources.own(ShizukuAuthorityBridge(app)) { it.close() }.also { bridge ->
         // A persisted Shizuku grant represents the user's earlier explicit consent. Re-bind the
         // typed UserService after process restart, but never request permission or start Shizuku.
         bridge.addPermissionResultListener { result ->
@@ -188,9 +219,9 @@ class AppContainer(app: MobileAgentApp) :
     val audits = AuditRepository(db)
     val transfer = TransferRepository(db, blobSink = CasBlobSink(File(app.filesDir, "cas")),
         vectorIndexDirectory = File(app.cacheDir, "knowledge-index"))
-    val http: HttpClient = createProviderHttpClient()
+    val http: HttpClient = resources.own(createProviderHttpClient()) { it.close() }
     /** Large visual pages can legitimately run past the ordinary chat timeout. */
-    val visionHttp: HttpClient = createProviderHttpClient(timeoutMillis = 600_000)
+    val visionHttp: HttpClient = resources.own(createProviderHttpClient(timeoutMillis = 600_000)) { it.close() }
     val apiEmbeddings = ApiEmbeddingRegistry(profiles, secrets, http)
     val knowledge = KnowledgeRepository(
         db,
@@ -198,7 +229,9 @@ class AppContainer(app: MobileAgentApp) :
         embedder = object : TextEmbedder {
             override val spaceId = AndroidModelPackLoader.DEFAULT_SPACE_ID
             override val dimension = AndroidModelPackLoader.DEFAULT_DIMENSION
-            private val implementation by lazy { OnnxTextEmbedder(AndroidModelPackLoader(app).load()) }
+            private val implementation by lazy {
+                resources.own(OnnxTextEmbedder(AndroidModelPackLoader(app).load())) { it.close() }
+            }
             override fun embed(text: String) = implementation.embed(text)
         },
         pdfRasterizer = AndroidPdfRendererAdapter(app),
@@ -258,20 +291,20 @@ class AppContainer(app: MobileAgentApp) :
      * factory. It creates canonical app-private metadata and the independent
      * Android Keystore secret store; no serial/desktop/token is inferred here.
      */
-    val wiredAuthority = WiredAdbAuthorityBridgeFactory.create(
+    val wiredAuthority = resources.own(WiredAdbAuthorityBridgeFactory.create(
         context = app,
         diagnostics = createWiredAdbDiagnosticSink(app.diagnostics),
         shellPermission = {
             runCatching { runtimeIntegrationRef.get()?.wiredShellPermissionAvailable() == true }
                 .getOrDefault(false)
         },
-    )
+    )) { it.close() }
     /**
      * The process-lifetime v2 runtime facade.  All UI/tool consumers resolve
      * adapters through this object; it owns the canonical repositories and
      * never exposes backend roots, URI grants, or bridge credentials.
      */
-    val runtimeIntegration = RuntimeIntegration(
+    val runtimeIntegration = resources.own(RuntimeIntegration(
         context = app,
         db = db,
         agents = agents,
@@ -280,7 +313,7 @@ class AppContainer(app: MobileAgentApp) :
         diagnostics = app.diagnostics,
         shizukuAuthority = shizuku,
         wiredAuthority = wiredAuthority,
-    )
+    )) { it.close() }
     init {
         runtimeIntegrationRef.set(runtimeIntegration)
     }
@@ -306,16 +339,16 @@ class AppContainer(app: MobileAgentApp) :
             setPublicKeyHex(BuildConfig.ANNOUNCEMENTS_PUBLIC_KEY_HEX)
         }
     }
-    val announcementHttp: HttpClient = HttpClient(OkHttp) {
+    val announcementHttp: HttpClient = resources.own(HttpClient(OkHttp) {
         configurePublicAnnouncementTransport()
-    }
+    }) { it.close() }
     val announcementFetcher = AnnouncementFetcher(announcementHttp)
-    private val announcementScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val announcementScope = resources.own(CoroutineScope(SupervisorJob() + Dispatchers.IO)) { it.cancel() }
     /**
      * App-lifetime scope for storage recovery that must not run on the main thread during
      * `Application.onCreate`.  Cancelled in [close] together with the other process bridges.
      */
-    private val recoveryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val recoveryScope = resources.own(CoroutineScope(SupervisorJob() + Dispatchers.IO)) { it.cancel() }
     internal val chatDraftPersistence by lazy { ChatDraftPersistence(chatDrafts, recoveryScope) }
     internal val appUpdates = runtime.mobileagent.updates.createAppUpdates(app, recoveryScope)
     val announcementRefreshCoordinator = AnnouncementRefreshCoordinator(
@@ -341,19 +374,15 @@ class AppContainer(app: MobileAgentApp) :
      */
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        announcementScope.cancel()
-        recoveryScope.cancel()
-        runCatching { runtimeIntegration.close() }
+        resources.close()
         runtimeIntegrationRef.set(null)
-        runCatching { wiredAuthority.close() }
-        runCatching { shizuku.close() }
-        runCatching { announcementHttp.close() }
-        runCatching { visionHttp.close() }
-        runCatching { http.close() }
+        runCatching { knowledge.closeVectorIndexes() }
     }
 
-    init {
+    internal fun activate(app: MobileAgentApp) {
+        check(!closed.get())
         registerSettingsAuthorityPortProvider(app, this)
+        resources.onClose { unregisterSettingsAuthorityPortProvider(app, this) }
         ImportWorkerRegistry.handler = ImportJobHandler { id, configured -> knowledge.resumeImport(id, visionConfigured = configured) }
         ImportWorkerRegistry.cancellationHandler = ImportCancellationHandler { id -> knowledge.cancelImport(id); Unit }
         ImportWorkerRegistry.batchCancellationHandler = ImportBatchCancellationHandler { id -> knowledge.cancelBatch(id); Unit }
@@ -376,6 +405,20 @@ class AppContainer(app: MobileAgentApp) :
             knowledge.markConsentWorkerFailure(ticketId)
             Unit
         }
+        val registeredHandler = ImportWorkerRegistry.handler
+        val registeredCancellation = ImportWorkerRegistry.cancellationHandler
+        val registeredBatchCancellation = ImportWorkerRegistry.batchCancellationHandler
+        val registeredBatch = ImportWorkerRegistry.batchHandler
+        val registeredConsent = ImportWorkerRegistry.consentHandler
+        val registeredConsentFailure = ImportWorkerRegistry.consentFailureHandler
+        resources.onClose {
+            if (ImportWorkerRegistry.handler === registeredHandler) ImportWorkerRegistry.handler = null
+            if (ImportWorkerRegistry.cancellationHandler === registeredCancellation) ImportWorkerRegistry.cancellationHandler = null
+            if (ImportWorkerRegistry.batchCancellationHandler === registeredBatchCancellation) ImportWorkerRegistry.batchCancellationHandler = null
+            if (ImportWorkerRegistry.batchHandler === registeredBatch) ImportWorkerRegistry.batchHandler = null
+            if (ImportWorkerRegistry.consentHandler === registeredConsent) ImportWorkerRegistry.consentHandler = null
+            if (ImportWorkerRegistry.consentFailureHandler === registeredConsentFailure) ImportWorkerRegistry.consentFailureHandler = null
+        }
         // Resume one coordinator per durable batch. Consent and UNKNOWN states
         // are never enqueued here, and processBatch revalidates every external
         // operation before dispatch.  The recovery queries are SQLite reads, so they run on the
@@ -393,6 +436,14 @@ class AppContainer(app: MobileAgentApp) :
                     ImportWorkScheduler.enqueue(app, job.id, configured)
                 }
             }
+        }
+    }
+
+    companion object {
+        internal fun create(app: MobileAgentApp): AppContainer {
+            val resources = HostResources()
+            return try { AppContainer(app, resources) }
+            catch (failure: Throwable) { resources.close(); throw failure }
         }
     }
 }

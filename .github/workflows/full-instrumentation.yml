@@ -3,7 +3,56 @@
 
 name: full-instrumentation
 on:
+  schedule:
+    - cron: '30 18 * * 1,3,5'
+  pull_request:
+    paths:
+      - 'app-android/src/main/kotlin/runtime/mobileagent/privileged/**'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/integration/**'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/security/**'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/tooling/**'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/RunCoordinator.kt'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/RunTools.kt'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/BoundToolExecutor.kt'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/ChatExecutionController.kt'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/ChatRuntimeEvents.kt'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/ChatToolApprovalRequest.kt'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/ChatApprovalOutcome.kt'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/ChatRootPreflight.kt'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/ConfirmedDeviceActionCancellation.kt'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/ChatRun*'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/ChatKnowledgePreparation.kt'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/ChatViewModel.kt'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/ExecutionAuthorities.kt'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/shizuku/**'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/wired/**'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/resident/**'
+      - 'platform/android/security/**'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/MobileAgentApp.kt'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/HostStartup*'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/HostInitialization.kt'
+      - 'app-android/src/main/kotlin/runtime/mobileagent/DatabaseRecoveryStore.kt'
+      - 'data/sqlite/src/main/kotlin/runtime/mobileagent/data/*Migration*'
+      - 'data/sqlite/src/main/kotlin/runtime/mobileagent/data/Root*'
+      - 'data/sqlite/src/main/kotlin/runtime/mobileagent/data/RunRepository.kt'
+      - 'data/sqlite/src/main/kotlin/runtime/mobileagent/data/AuthorityRepository.kt'
+      - 'data/sqlite/src/main/kotlin/runtime/mobileagent/data/Knowledge*'
+      - 'tools/instrumentation-suites.json'
+      - 'tools/verify_test_selection.py'
+      - 'tools/run-device-suite'
+      - '.github/workflows/full-instrumentation.yml'
   workflow_dispatch:
+    inputs:
+      suite:
+        description: Automated suite (heavy scale measurements remain explicit)
+        type: choice
+        options: [nightly, performance, full]
+        default: nightly
+      variant:
+        description: Use review for authority and recovery evidence
+        type: choice
+        options: [Debug, Review]
+        default: Debug
 
 permissions:
   contents: read
@@ -28,6 +77,7 @@ jobs:
       - name: Verify explicit instrumentation inventory
         run: |
           chmod +x gradlew
+          python -m pip install "pyyaml==6.0.2"
           python tools/verify_test_selection.py
           python tools/test_verify_test_selection.py
       - name: Enable KVM acceleration
@@ -47,13 +97,16 @@ jobs:
           disable-animations: true
           script: |
             timeout 120 sh -c 'until adb -s "emulator-${EMULATOR_PORT:-5554}" shell service check package 2>/dev/null | grep -q "found"; do sleep 2; done'
-            ./gradlew :app-android:connectedDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=$(python tools/verify_test_selection.py --suite full)" --dependency-verification=strict --no-daemon
+            bash tools/run-device-suite '${{ github.event_name == 'pull_request' && 'recovery' || inputs.suite || 'nightly' }}' '${{ github.event_name == 'pull_request' && 'Review' || inputs.variant || 'Debug' }}'
       - name: Device result and explicit skip summary
         if: always()
-        run: python tools/verify_test_selection.py --summary app-android/build/outputs/androidTest-results/connected/ >> "$GITHUB_STEP_SUMMARY"
+        run: python tools/verify_test_selection.py --summary app-android/build/reports/device-evidence/ >> "$GITHUB_STEP_SUMMARY"
       - name: Upload full device results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: full-instrumentation-results
-          path: app-android/build/outputs/androidTest-results/connected/
+          name: instrumentation-${{ github.event_name == 'pull_request' && 'recovery' || inputs.suite || 'nightly' }}-${{ github.event_name == 'pull_request' && 'Review' || inputs.variant || 'Debug' }}-${{ github.run_attempt }}
+          path: |
+            app-android/build/reports/device-evidence/
+            app-android/build/outputs/androidTest-results/connected/
+            app-android/build/reports/androidTests/connected/

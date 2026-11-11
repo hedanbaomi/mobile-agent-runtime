@@ -283,6 +283,64 @@ class KnowledgeGoldenCorpusTest {
     }
 
     @Test
+    fun interruptedBatchKeepsOwnershipUntilNestedVisionActuallyExits() {
+        val case = KnowledgeGoldenCorpus.cases().single { it.id == "scanned-multipage" }
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val callerExited = java.util.concurrent.CountDownLatch(1)
+        val calls = java.util.concurrent.atomic.AtomicInteger()
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val vision = VisionBackend { input ->
+                check(input.beforeDispatch())
+                calls.incrementAndGet()
+                entered.countDown()
+                while (release.count > 0) {
+                    try { release.await() } catch (_: InterruptedException) { /* delayed provider shutdown */ }
+                }
+                VisionOutcome.Success(VisionSuccess("preserved late response", "synthetic response"))
+            }
+            val repo = KnowledgeRepository(db, MemoryBlobSink(), vision = vision, pdfRasterizer = GoldenRasterizer())
+            val kb = repo.ensureDefaultBase()
+            val batch = repo.beginBatch(kb, ImportBatchKind.FILES, "interrupted nested vision")
+            val copied = repo.importBytes(case.displayName, case.mediaType, case.bytes, false, kb, pauseAt = ImportStage.COPYING)
+            repo.bindJobToBatch(batch, copied, case.displayName)
+            val policy = PipelinePolicy(maxConcurrency = 1)
+            repo.configureBatchPipeline(batch, policy)
+            repo.authorizeBatchVision(batch, null)
+            val caller = Thread {
+                try { repo.processBatch(batch, false) }
+                catch (_: InterruptedException) { }
+                finally { callerExited.countDown() }
+            }
+            try {
+                caller.start()
+                assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                caller.interrupt()
+                assertTrue(callerExited.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                assertThrows(IllegalStateException::class.java) {
+                    repo.reconfigureBatchPipeline(batch, "vision-unconfigured", repo.batchReuseSummary(batch, "vision-unconfigured"), true)
+                }
+                assertFalse(repo.processBatch(batch, false))
+                assertEquals(1, calls.get(), "duplicate delivery must not start another vision request")
+            } finally {
+                release.countDown()
+                caller.join(5000)
+                // Reconfiguration is the public proof that every nested worker relinquished ownership.
+                kotlinx.coroutines.runBlocking {
+                    kotlinx.coroutines.withTimeout(5000) {
+                        while (runCatching {
+                            repo.reconfigureBatchPipeline(batch, "vision-unconfigured", repo.batchReuseSummary(batch, "vision-unconfigured"), true)
+                        }.isFailure) kotlinx.coroutines.delay(10)
+                    }
+                }
+                repo.closeVectorIndexes()
+            }
+            assertEquals(1, calls.get(), "interrupted document must not dispatch the next page")
+        }
+    }
+
+    @Test
     fun corruptedAndUnsupportedInputsFailClosedAndKeepTheCopiedBytes() {
         KnowledgeGoldenCorpus.cases().filter { it.failClosed }.forEach { case ->
             val db = JdbcSqlConnection()
@@ -298,6 +356,49 @@ class KnowledgeGoldenCorpusTest {
                 "${case.id}: a failed import must not be searchable",
             )
             repo.closeVectorIndexes()
+        }
+    }
+
+    @Test
+    fun visualFailureDoesNotReleaseBatchWhileNativeEmbeddingIsStillRunning() {
+        val case = KnowledgeGoldenCorpus.cases().single { it.kind == GoldenKind.MIXED_PDF }
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val visualFailed = java.util.concurrent.CountDownLatch(1)
+        val exited = java.util.concurrent.CountDownLatch(1)
+        val hashing = runtime.mobileagent.knowledge.HashingTextEmbedder()
+        val embedder = object : runtime.mobileagent.knowledge.TextEmbedder by hashing {
+            override fun embed(text: String): FloatArray {
+                entered.countDown()
+                check(release.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                return hashing.embed(text)
+            }
+        }
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val repo = KnowledgeRepository(db, MemoryBlobSink(), embedder, vision = VisionBackend {
+                check(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                visualFailed.countDown()
+                VisionOutcome.UnknownOutcome
+            }, pdfRasterizer = GoldenRasterizer())
+            val kb = repo.ensureDefaultBase()
+            val batch = repo.beginBatch(kb, ImportBatchKind.FILES, "mixed blocked native preparation")
+            val imported = repo.importBytes(case.displayName, case.mediaType, case.bytes, false, kb, pauseAt = ImportStage.COPYING)
+            repo.bindJobToBatch(batch, imported, case.displayName)
+            repo.configureBatchPipeline(batch, PipelinePolicy(maxConcurrency = 1))
+            repo.authorizeBatchVision(batch, null)
+            val caller = Thread { try { repo.processBatch(batch, false) } finally { exited.countDown() } }
+            try {
+                caller.start()
+                assertTrue(visualFailed.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                assertFalse(exited.await(100, java.util.concurrent.TimeUnit.MILLISECONDS))
+                assertFalse(repo.processBatch(batch, false), "duplicate delivery cannot run while native preparation is draining")
+            } finally {
+                release.countDown()
+                caller.join(5000)
+                assertFalse(caller.isAlive)
+                repo.closeVectorIndexes()
+            }
         }
     }
 

@@ -70,16 +70,21 @@ class RunCoordinator(
      * Persist a new run row and register its owner.  Re-preparing the same
      * run id by the same owner is idempotent; a different owner is rejected.
      */
-    fun prepare(record: RunRecord, ownerKey: String): RunRecord {
+    fun prepare(record: RunRecord, ownerKey: String): RunRecord = synchronized(lock) {
         require(ownerKey.isNotBlank()) { "Run owner must not be blank" }
+        val current = owners[record.runId]
+        require(current == null || current == ownerKey) { "Run ${record.runId} is already owned" }
         val existing = runs.get(record.runId)
-        val saved = if (existing == null) admitNewRun(record) else runs.save(record.copy(manifestJson = existing.manifestJson))
-        synchronized(lock) {
-            val current = owners[saved.runId]
-            require(current == null || current == ownerKey) { "Run ${saved.runId} is already owned" }
-            owners[saved.runId] = ownerKey
+        if (existing != null) {
+            require(existing.snapshotId == record.snapshotId && existing.conversationId == record.conversationId) {
+                "Run identity cannot be changed"
+            }
         }
-        return saved
+        // Re-entry observes durable progress; the caller may still hold the original CREATED row.
+        // Publish ownership only after successful admission, under the same lock as the check.
+        val saved = existing ?: admitNewRun(record)
+        owners[saved.runId] = ownerKey
+        saved
     }
 
     fun ownerOf(runId: String): String? = synchronized(lock) { owners[runId] }

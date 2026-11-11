@@ -17,6 +17,22 @@ import xml.etree.ElementTree as ET
 HAN = re.compile(r'[\u3400-\u9fff]')
 TOKEN = re.compile(r'"""[\s\S]*?"""|"(?:\\.|[^"\\])*"|//[^\n]*|/\*|\*/')
 FORMAT = re.compile(r'%%|%([1-9]\d*)\$([a-zA-Z])')
+HOST_FILES = (
+    'app-android/src/main/kotlin/runtime/mobileagent/ui/HostInitializationScreen.kt',
+    'app-android/src/main/kotlin/runtime/mobileagent/ui/QuickStartCard.kt',
+    'app-android/src/main/kotlin/runtime/mobileagent/HostStartupAttempt.kt',
+    'app-android/src/main/kotlin/runtime/mobileagent/ChatViewModel.kt',
+    'app-android/src/main/kotlin/runtime/mobileagent/ChatExecutionController.kt',
+    'app-android/src/main/kotlin/runtime/mobileagent/ChatRunFailure.kt',
+    'app-android/src/main/kotlin/runtime/mobileagent/ChatRuntimeEvents.kt',
+    'app-android/src/main/kotlin/runtime/mobileagent/ChatRunInterruption.kt',
+    'app-android/src/main/kotlin/runtime/mobileagent/ChatDisplayNotice.kt',
+    'app-android/src/main/kotlin/runtime/mobileagent/ChatMessageProjection.kt',
+    'app-android/src/main/kotlin/runtime/mobileagent/ChatHistoryReader.kt',
+)
+
+def presentation_modules(root):
+    return [*sorted((root/'feature').iterdir()), root/'app-android']
 
 def literals(source):
     depth = 0
@@ -41,6 +57,12 @@ def state(root):
             hits = Counter(literals(file.read_text(encoding='utf-8')))
             if hits:
                 result[file.relative_to(root).as_posix()] = dict(sorted(hits.items()))
+    for name in HOST_FILES:
+        file = root/name
+        if file.exists():
+            hits = Counter(literals(file.read_text(encoding='utf-8')))
+            if hits:
+                result[name] = dict(sorted(hits.items()))
     return result
 
 def resource_keys(file):
@@ -63,17 +85,18 @@ def check(root, baseline):
         excess = Counter(current) - Counter(baseline.get(file, {}))
         if excess:
             problems.append(f'{file}: {sum(excess.values())} new hardcoded Chinese literals; use bilingual resources')
-    for module in sorted((root/'feature').iterdir()):
+    for module in presentation_modules(root):
         if module.is_dir():
+            label = module.relative_to(root).as_posix()
             default = resource_keys(module/'src/main/res/values/strings.xml')
             chinese = resource_keys(module/'src/main/res/values-zh-rCN/strings.xml')
             if default != chinese:
-                problems.append(f'feature/{module.name}: resource translation keys differ: {sorted(default ^ chinese)}')
+                problems.append(f'{label}: resource translation keys differ: {sorted(default ^ chinese)}')
             formats = format_contracts(module/'src/main/res/values/strings.xml')
             translations = format_contracts(module/'src/main/res/values-zh-rCN/strings.xml')
             for key in formats.keys() & translations.keys():
                 if formats[key] != translations[key]:
-                    problems.append(f'feature/{module.name}: positional format contract differs: {key}')
+                    problems.append(f'{label}: positional format contract differs: {key}')
     return problems
 
 def main():

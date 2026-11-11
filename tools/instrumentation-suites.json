@@ -1,6 +1,27 @@
 {
   "SPDX-FileCopyrightText": "2026 mobileAgentRuntime contributors",
   "SPDX-License-Identifier": "AGPL-3.0-only",
+  "performance": [
+    "runtime.mobileagent.KnowledgeCapacityDeviceTest",
+    "runtime.mobileagent.RetrievalQualityDeviceTest",
+    "runtime.mobileagent.KnowledgeIndexScaleDeviceTest",
+    "runtime.mobileagent.KnowledgeRepositoryScaleDeviceTest",
+    "runtime.mobileagent.RetrievalComparisonDeviceTest",
+    "runtime.mobileagent.MixedKnowledgeCapacityDeviceTest",
+    "runtime.mobileagent.ChatFramePerformanceDeviceTest"
+  ],
+  "minimum_api": [
+    "runtime.mobileagent.PythonRuntimeDeviceTest",
+    "runtime.mobileagent.storage.BundledSqliteReliabilityTest",
+    "runtime.mobileagent.ReleaseGateUiDeviceTest"
+  ],
+  "recovery": [
+    "runtime.mobileagent.HostStartupUiDeviceTest",
+    "runtime.mobileagent.storage.BundledSqliteReliabilityTest",
+    "runtime.mobileagent.ChatRunOwnershipDeviceTest",
+    "runtime.mobileagent.RunToolsReplayDeviceTest",
+    "runtime.mobileagent.RootWorkspacePermissionsUiTest"
+  ],
   "suites": {
     "smoke": [
       "runtime.mobileagent.ReleaseGateUiDeviceTest",
@@ -55,7 +76,8 @@
       "runtime.mobileagent.TrpgStoryDialogUiTest",
       "runtime.mobileagent.TrpgCampaignFlowDeviceTest",
       "runtime.mobileagent.TrpgAtlasDialogUiTest",
-      "runtime.mobileagent.TrpgMediaDeviceTest"
+      "runtime.mobileagent.TrpgMediaDeviceTest",
+      "runtime.mobileagent.HostChatTextDeviceTest"
     ],
     "pipeline": [
       "runtime.mobileagent.DocumentUnitRenderDeviceTest",
@@ -105,6 +127,10 @@
       "runtime.mobileagent.KnowledgeGoldenCorpusDeviceTest",
       "runtime.mobileagent.KnowledgeImportLifecycleTest",
       "runtime.mobileagent.KnowledgeIndexScaleDeviceTest",
+      "runtime.mobileagent.KnowledgeCapacityDeviceTest",
+      "runtime.mobileagent.HostStartupUiDeviceTest",
+      "runtime.mobileagent.QuickStartUiDeviceTest",
+      "runtime.mobileagent.RetrievalQualityDeviceTest",
       "runtime.mobileagent.KnowledgeRepositoryScaleDeviceTest",
       "runtime.mobileagent.KnowledgeRuntimeDeviceTest",
       "runtime.mobileagent.KnowledgeStagingDeviceTest",
@@ -192,7 +218,12 @@
       "runtime.mobileagent.TrpgStoryDialogUiTest",
       "runtime.mobileagent.TrpgCampaignFlowDeviceTest",
       "runtime.mobileagent.TrpgAtlasDialogUiTest",
-      "runtime.mobileagent.TrpgMediaDeviceTest"
+      "runtime.mobileagent.TrpgMediaDeviceTest",
+      "runtime.mobileagent.RetrievalComparisonDeviceTest",
+      "runtime.mobileagent.MixedKnowledgeCapacityDeviceTest",
+      "runtime.mobileagent.ChatFramePerformanceDeviceTest",
+      "runtime.mobileagent.CrossPageTableDeviceTest",
+      "runtime.mobileagent.HostChatTextDeviceTest"
     ]
   },
   "manual_only": {
@@ -213,7 +244,9 @@
     "runtime.mobileagent.privileged.RootDirectTypedProductionAcceptanceTest": "Requires a real Magisk su policy and UID 0 exclusive /data/adb/root-typed-acceptance fixture on the dedicated Root AVD.",
     "runtime.mobileagent.privileged.RootEmulatorAcceptanceDeviceTest": "Needs explicit live Shizuku server, UID2000 and foreign 0700 fixture arguments.",
     "runtime.mobileagent.privileged.RootNextAgentAcceptanceTest": "Requires real UID0 Shizuku server, two-step permission dialog/revoke orchestration, and Magisk su helper on the dedicated Root AVD.",
-    "runtime.mobileagent.security.RootWorkspaceBindingCipherDeviceTest": "Device-only root workspace binding cipher fixture; run explicitly on the isolated AVD."
+    "runtime.mobileagent.security.RootWorkspaceBindingCipherDeviceTest": "Device-only root workspace binding cipher fixture; run explicitly on the isolated AVD.",
+    "runtime.mobileagent.RecoveryFaultMatrixDeviceTest": "Requires isolated emulator and explicit host checkpoint/force-stop orchestration via tools/run_recovery_fault_matrix.py; boundedSqliteFull is separately selectable without kill arguments.",
+    "runtime.mobileagent.StoragePublicationFaultDeviceTest": "Requires isolated emulator with explicit host checkpoint/force-stop orchestration; genuine ENOSPC additionally requires root-created size-limited tmpfs under an app-owned unique fixture path. Run tools/run_storage_publication_faults.py; never fill a device or host volume."
   },
   "fresh_host_first": [
     "runtime.mobileagent.ApiEmbeddingDeviceTest"

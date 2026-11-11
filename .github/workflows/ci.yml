@@ -68,6 +68,10 @@ jobs:
         run: |
           python tools/verify_test_selection.py
           python tools/test_verify_test_selection.py
+          python tools/test_device_suite_runner.py
+          python tools/test_measure_app_startup.py
+          python tools/test_measure_frame_times.py
+          python tools/test_compare_retrieval_metrics.py
           python tools/verify_module_boundaries.py
           python tools/test_verify_module_boundaries.py
           python tools/verify_complexity.py
@@ -109,11 +113,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        api-level: [31, 34, 35, 36]
+        api-level: [26, 31, 34, 35, 36]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Grant wrapper execute permission
         run: chmod +x gradlew
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.11"
+      - name: Install selector YAML dependency
+        run: python -m pip install "pyyaml==6.0.2"
       - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
         with:
           distribution: temurin
@@ -137,7 +146,16 @@ jobs:
           disable-animations: true
           script: |
             timeout 120 sh -c 'until adb -s "emulator-${EMULATOR_PORT:-5554}" shell service check package 2>/dev/null | grep -q "found"; do sleep 2; done'
-            ./gradlew :app-android:connectedDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=runtime.mobileagent.ReleaseGateUiDeviceTest,runtime.mobileagent.ChatReplyPresentationUiTest,runtime.mobileagent.AppLocalizedResourcesDeviceTest" --dependency-verification=strict --no-daemon
+            bash tools/run-device-suite smoke-api Debug '${{ matrix.api-level }}'
+      - name: Preserve smoke result and first failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: smoke-api-${{ matrix.api-level }}-${{ github.run_attempt }}
+          path: |
+            app-android/build/reports/device-evidence/
+            app-android/build/outputs/androidTest-results/connected/
+            app-android/build/reports/androidTests/connected/
 
   convergence-device:
     name: Convergence device tests (API 36)
@@ -147,6 +165,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Grant wrapper execute permission
         run: chmod +x gradlew
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.11"
+      - name: Install selector YAML dependency
+        run: python -m pip install "pyyaml==6.0.2"
       - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
         with:
           distribution: temurin
@@ -170,7 +193,16 @@ jobs:
           disable-animations: true
           script: |
             timeout 120 sh -c 'until adb -s "emulator-${EMULATOR_PORT:-5554}" shell service check package 2>/dev/null | grep -q "found"; do sleep 2; done'
-            ./gradlew :app-android:connectedDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=runtime.mobileagent.RunToolsReplayDeviceTest,runtime.mobileagent.RandomNumberDeviceTest,runtime.mobileagent.shizuku.ShizukuWorkspaceFileStoreTest,runtime.mobileagent.VectorIndexCacheDeviceTest,runtime.mobileagent.ChatContextCompactionDeviceTest,runtime.mobileagent.ContextCompactionUiTest,runtime.mobileagent.ChatInputBudgetDeviceTest,runtime.mobileagent.CharacterCardImportDeviceTest,runtime.mobileagent.CharacterCardRuntimeDeviceTest,runtime.mobileagent.WorldBookDeviceTest,runtime.mobileagent.storage.WorldBookStorageDeviceTest,runtime.mobileagent.storage.TrpgBackendDeviceTest,runtime.mobileagent.TrpgCompatibilityDeviceTest,runtime.mobileagent.TrpgFrontendUiDeviceTest,runtime.mobileagent.WorldBookRegexDeviceTest,runtime.mobileagent.WorldBooksUiDeviceTest,runtime.mobileagent.ChatVisualTransferDeviceTest,runtime.mobileagent.ChatImageComposerUiTest,runtime.mobileagent.ChatViewModelImageDraftTest,runtime.mobileagent.AgentsConversationRoutingDeviceTest,runtime.mobileagent.TransferArchiveDeviceTest,runtime.mobileagent.ThirdPartyNoticesDeviceTest,runtime.mobileagent.workspace.WorkspaceBackendTest,runtime.mobileagent.PythonModelInvokeBrokerTest,runtime.mobileagent.SkillGrantScopeUiTest,runtime.mobileagent.KnowledgeStorageUiDeviceTest,runtime.mobileagent.storage.BundledSqliteReliabilityTest,runtime.mobileagent.AgentsGrantUiTest,runtime.mobileagent.RootWorkspacePermissionsUiTest,runtime.mobileagent.ExecutionAuthoritiesTest,runtime.mobileagent.ExecutionAuthoritiesUiTest,runtime.mobileagent.WebSearchPermissionDeviceTest,runtime.mobileagent.diagnostics.DiagnosticsDeviceTest,runtime.mobileagent.DiagnosticsLogLevelUiTest,runtime.mobileagent.DisabledSkillBindingUiTest,runtime.mobileagent.tooling.EffectiveCapabilityResolverHotUpdateTest,runtime.mobileagent.tooling.ToolingOrchestrationTest,runtime.mobileagent.RuntimeSafToolExposureDeviceTest,runtime.mobileagent.security.AndroidSecretStoreDeviceTest,runtime.mobileagent.ChatStorageProjectionDeviceTest,runtime.mobileagent.ChatScrollFollowUiTest,runtime.mobileagent.TrpgJournalDeviceTest,runtime.mobileagent.TrpgCampaignDialogUiTest,runtime.mobileagent.TrpgPartyDialogUiTest,runtime.mobileagent.TrpgStoryDialogUiTest,runtime.mobileagent.TrpgCampaignFlowDeviceTest,runtime.mobileagent.TrpgAtlasDialogUiTest,runtime.mobileagent.TrpgMediaDeviceTest" --dependency-verification=strict --no-daemon
+            bash tools/run-device-suite convergence Debug
+      - name: Preserve convergence result and first failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: convergence-${{ github.run_attempt }}
+          path: |
+            app-android/build/reports/device-evidence/
+            app-android/build/outputs/androidTest-results/connected/
+            app-android/build/reports/androidTests/connected/
     # No continue-on-error: a red convergence job blocks the commit.
 
   knowledge-pipeline-device:
@@ -181,6 +213,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Grant wrapper execute permission
         run: chmod +x gradlew
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.11"
+      - name: Install selector YAML dependency
+        run: python -m pip install "pyyaml==6.0.2"
       - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
         with:
           distribution: temurin
@@ -202,13 +239,15 @@ jobs:
           disable-animations: true
           script: |
             timeout 120 sh -c 'until adb -s "emulator-${EMULATOR_PORT:-5554}" shell service check package 2>/dev/null | grep -q "found"; do sleep 2; done'
-            ./gradlew :app-android:connectedDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=runtime.mobileagent.DocumentUnitRenderDeviceTest,runtime.mobileagent.KnowledgeBatchUiDeviceTest,runtime.mobileagent.KnowledgeVisionStateDeviceTest,runtime.mobileagent.KnowledgeStagingDeviceTest,runtime.mobileagent.KnowledgeImportLifecycleTest" --dependency-verification=strict --no-daemon
+            bash tools/run-device-suite pipeline Debug
       - name: Upload pipeline device results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: knowledge-pipeline-device-results
-          path: app-android/build/outputs/androidTest-results/connected/
+          name: knowledge-pipeline-device-results-${{ github.run_attempt }}
+          path: |
+            app-android/build/reports/device-evidence/
+            app-android/build/outputs/androidTest-results/connected/
 
   release:
     name: Signed release gate (manual only)

@@ -131,4 +131,4 @@ internal fun AppContainer.chatRootSendGate(): ChatRootSendGate = RootRunAdmissio
 
 /** Resolve Root failure copy using the accepted app-language mirror, not the device locale. */
 internal fun android.content.Context.rootChatMessage(resource: Int): String =
-    runtime.mobileagent.ui.ActivityLocaleConfiguration().attach(this).getString(resource)
+    hostChatText(resource)

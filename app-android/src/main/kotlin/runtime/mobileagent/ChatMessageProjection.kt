@@ -4,11 +4,23 @@
 package runtime.mobileagent
 
 import kotlinx.serialization.json.*
+import runtime.mobileagent.agent.toolResultUserMessage
 import runtime.mobileagent.domain.*
 import runtime.mobileagent.feature.chat.ChatMessageUi
-import runtime.mobileagent.agent.toolResultUserMessage
 
-internal fun projectChatMessage(rawMessage: Message, streaming: Boolean): ChatMessageUi {
+internal class ChatMessageProjectionCopy(
+    val visualBatchAnalyzed: (Int) -> String = { "Sent and analyzed $it original image(s) with the model." },
+    val toolAttachedImages: (Int) -> String = { "Tool attached $it original image(s)." },
+    val turnIncomplete: (String) -> String = { "This turn did not finish ($it); output was kept and will not be resent automatically." },
+    val partialRetrievalCoverage: String = "Some knowledge bases did not participate in this retrieval; do not claim those unsearched sources were checked.",
+    val visualDegraded: (String) -> String? = { null },
+)
+
+internal fun projectChatMessage(
+    rawMessage: Message,
+    streaming: Boolean,
+    copy: ChatMessageProjectionCopy = ChatMessageProjectionCopy(),
+): ChatMessageUi {
     val message = trpgMessageForDisplay(rawMessage)
     val reasoningParts = message.parts.filterIsInstance<ReasoningPart>()
     val errorPart = message.parts.filterIsInstance<ErrorPart>().lastOrNull()
@@ -20,7 +32,7 @@ internal fun projectChatMessage(rawMessage: Message, streaming: Boolean): ChatMe
     // Reload-visible partial-coverage note, persisted in the assistant
     // message metadata next to the citations.
     val coverageNotice = message.takeIf { it.role == MessageRole.ASSISTANT }
-        ?.let { coverageNoticeOf(it.metadataJson) }
+        ?.let { coverageNoticeOf(it.metadataJson, copy.partialRetrievalCoverage) }
     val metadata = runCatching { Json.parseToJsonElement(message.metadataJson).jsonObject }.getOrNull()
     val visualReceipt = (metadata?.get("visualBatchAnalysis") as? JsonPrimitive)?.booleanOrNull == true
     val toolEvidence = message.role == MessageRole.USER &&
@@ -38,25 +50,25 @@ internal fun projectChatMessage(rawMessage: Message, streaming: Boolean): ChatMe
         reasoning = reasoningParts.joinToString("") { it.text },
         reasoningStreaming = reasoningParts.lastOrNull()?.streaming == true && streaming,
         eventSummary = when {
-            visualReceipt -> "已向模型传输并分析 " + message.parts.filterIsInstance<ImagePart>().size + " 张原图"
-            toolEvidence -> "工具附带 " + message.parts.filterIsInstance<ImagePart>().size + " 张原图"
+            visualReceipt -> copy.visualBatchAnalyzed(message.parts.filterIsInstance<ImagePart>().size)
+            toolEvidence -> copy.toolAttachedImages(message.parts.filterIsInstance<ImagePart>().size)
             errorPart != null -> errorPart.message
             diffPart != null -> diffPart.summary
             else -> listOfNotNull(toolFailureSummary, coverageNotice,
                 if (message.role == MessageRole.ASSISTANT && message.status != "COMPLETE" &&
                     (message.status != "STREAMING" || !streaming))
-                    "本轮未完成（${message.status}）；已保留输出，不会自动重发。" else null,
-                toolResultPart?.resultJson?.let(::toolVisualEvidenceSummary),
+                    copy.turnIncomplete(message.status) else null,
+                toolResultPart?.resultJson?.let { copy.visualDegraded(it) },
                 trpgCard?.let(::trpgToolEventSummary),
             ).joinToString(" ")
         },
     )
 }
 
-private fun coverageNoticeOf(metadataJson: String): String? {
+private fun coverageNoticeOf(metadataJson: String, fallbackNotice: String): String? {
     val root = runCatching { Json.parseToJsonElement(metadataJson).jsonObject }.getOrNull() ?: return null
     val coverage = root["retrievalCoverage"]?.jsonObject ?: return null
     if (coverage["partial"]?.jsonPrimitive?.booleanOrNull != true) return null
     return coverage["noticeUi"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
-        ?: "本次检索有知识库未参与；不要声称已检索这些未参与的来源。"
+        ?: fallbackNotice
 }

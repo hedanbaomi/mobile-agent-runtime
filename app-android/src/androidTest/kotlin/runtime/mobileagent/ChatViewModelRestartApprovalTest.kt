@@ -106,7 +106,7 @@ class ChatViewModelRestartApprovalTest {
         assertTrue(invocation.resultJson?.contains("\"status\":\"CANCELLED\"") == true)
         assertTrue(invocation.resultJson?.contains("\"errorCode\":\"APPROVAL_INVALIDATED\"") == true)
         assertFalse(viewModel.state.value.streaming)
-        assertTrue(viewModel.state.value.status.contains("不会自动批准或重放"))
+        assertEquals(app.hostChatText(R.string.chat_approval_invalidated_by_restart), viewModel.state.value.status)
 
         val approvedRunId = "$runId.approved"
         container.runs.save(RunRecord(

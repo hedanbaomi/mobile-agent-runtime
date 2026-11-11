@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Test
 import runtime.mobileagent.data.AgentRepository
 import runtime.mobileagent.data.ConversationRepository
@@ -147,6 +148,63 @@ class RunCoordinatorTest {
         }
     }
 
+    @Test fun finalizerPublishesKnownUncertaintyBeforeCheckpointFailure() = kotlinx.coroutines.runBlocking {
+        val (_, original, db) = fixture()
+        try {
+            val runs = RunRepository(db)
+            runs.create(original.copy(state = RunStatus.UNKNOWN_OUTCOME, stopReason = "durable child uncertainty"))
+            var projected = original.copy(state = RunStatus.COMPLETED)
+            try {
+                ChatRunFinalizer(runs, runtime.mobileagent.data.ContextCompactionRepository(db)).finish(
+                    projected, ChatRunSession(ChatRunOwner(original.runId, original.conversationId, 1)),
+                    RunCompactionUsage(), true, settleApproval = {}, checkpoint = { error("synthetic checkpoint failure") },
+                    onUnknown = {}, onRecord = { projected = it },
+                )
+                org.junit.jupiter.api.Assertions.fail<Unit>("checkpoint failure must propagate")
+            } catch (failure: IllegalStateException) {
+                assertEquals("synthetic checkpoint failure", failure.message)
+            }
+            assertEquals(RunStatus.UNKNOWN_OUTCOME, projected.state)
+            assertEquals("durable child uncertainty", projected.stopReason)
+            assertEquals(RunStatus.UNKNOWN_OUTCOME, runs.get(original.runId)?.state)
+        } finally { db.close() }
+    }
+
+    @Test fun cancellationDuringKnowledgeAuthorizationCannotStartRetrieval() {
+        val (_, _, db) = fixture()
+        try {
+            val agents = AgentRepository(db)
+            val snapshot = agents.createSnapshot("agent-coord", "knowledge-snapshot")
+            val job = kotlinx.coroutines.Job()
+            var cancellationObserved = false
+            var armed = false
+            val watched = object : SqlConnection by db {
+                override fun query(sql: String, args: List<Any?>): List<SqlRow> {
+                    check(!cancellationObserved) { "retrieval continued after authorization cancellation" }
+                    val rows = db.query(sql, args)
+                    if (armed && sql.startsWith("SELECT id, name FROM knowledge_bases")) {
+                        cancellationObserved = true
+                        job.cancel()
+                    }
+                    return rows
+                }
+            }
+            val knowledge = runtime.mobileagent.data.KnowledgeRepository(watched, runtime.mobileagent.knowledge.MemoryBlobSink())
+            try {
+                armed = true
+                assertThrows(kotlinx.coroutines.CancellationException::class.java) {
+                    kotlinx.coroutines.runBlocking {
+                        kotlinx.coroutines.withContext(job) {
+                            ChatKnowledgePreparation(agents, runtime.mobileagent.data.SkillRepository(db), knowledge)
+                                .prepare(snapshot, "cancelled", "must not retrieve", true)
+                        }
+                    }
+                }
+                assertTrue(cancellationObserved)
+            } finally { knowledge.closeVectorIndexes(); job.cancel() }
+        } finally { db.close() }
+    }
+
     @Test
     fun newRunAdmissionRunsOnceAndLaterManifestPreservesFrozenRootIdentity() {
         val (_, record, db) = fixture()
@@ -193,6 +251,68 @@ class RunCoordinatorTest {
         } finally {
             db.close()
         }
+    }
+
+    @Test
+    fun rejectedPrepareDoesNotChangeAnyDurableField() {
+        val (coordinator, record, db) = fixture()
+        try {
+            coordinator.prepare(record, "owner-a")
+            val runs = RunRepository(db)
+            val progressed = runs.save(record.copy(state = RunStatus.MODEL_STREAMING, inputTokens = 37,
+                outputTokens = 11, modelRounds = 2, toolCalls = 3, updatedAt = "2026-11-10T00:00:00Z"))
+            assertThrows(IllegalArgumentException::class.java) { coordinator.prepare(record, "owner-b") }
+            assertEquals(progressed, runs.get(record.runId))
+            assertEquals("owner-a", coordinator.ownerOf(record.runId))
+            assertEquals(progressed, coordinator.prepare(record, "owner-a"))
+            val terminal = runs.save(progressed.copy(state = RunStatus.COMPLETED))
+            assertEquals(terminal, coordinator.prepare(record, "owner-a"))
+            assertThrows(IllegalArgumentException::class.java) {
+                coordinator.prepare(record.copy(snapshotId = "other"), "owner-a")
+            }
+            assertEquals(terminal, runs.get(record.runId))
+        } finally { db.close() }
+    }
+
+    @Test
+    fun failedAdmissionDoesNotLeaveAnOwnerAndCanBeRetried() {
+        val (_, record, db) = fixture()
+        try {
+            var fail = true
+            val runs = RunRepository(db)
+            val coordinator = RunCoordinator(runs) {
+                if (fail) error("synthetic admission failure")
+                runs.create(it)
+            }
+            assertThrows(IllegalStateException::class.java) { coordinator.prepare(record, "owner-a") }
+            assertNull(coordinator.ownerOf(record.runId))
+            assertNull(runs.get(record.runId))
+            fail = false
+            assertEquals(record, coordinator.prepare(record, "owner-b"))
+        } finally { db.close() }
+    }
+
+    @Test
+    fun concurrentOwnersAdmitExactlyOneRun() {
+        val (_, record, db) = fixture()
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            val admissions = java.util.concurrent.atomic.AtomicInteger()
+            val runs = RunRepository(db)
+            val coordinator = RunCoordinator(runs) { admissions.incrementAndGet(); runs.create(it) }
+            val start = java.util.concurrent.CountDownLatch(1)
+            val attempts = listOf("owner-a", "owner-b").map { owner ->
+                pool.submit<Boolean> {
+                    check(start.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                    try { coordinator.prepare(record, owner); true }
+                    catch (_: IllegalArgumentException) { false }
+                }
+            }
+            start.countDown()
+            assertEquals(1, attempts.count { it.get(10, java.util.concurrent.TimeUnit.SECONDS) })
+            assertEquals(1, admissions.get())
+            assertEquals(record, runs.get(record.runId))
+        } finally { pool.shutdownNow(); db.close() }
     }
 
     @Test

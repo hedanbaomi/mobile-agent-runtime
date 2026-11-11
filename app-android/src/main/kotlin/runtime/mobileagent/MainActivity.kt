@@ -52,6 +52,24 @@ class MainActivity : ComponentActivity() {
     private var importRecovery: Job? = null
     private var recoveryBusy by mutableStateOf(false)
     private var recoveryMessage by mutableStateOf<String?>(null)
+    private var startupExportBusy by mutableStateOf(false)
+    private var startupExportMessage by mutableStateOf<String?>(null)
+    private val exportStartup = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        val failure = (application as MobileAgentApp).hostStartupFailure.value
+        if (uri != null && failure != null) lifecycleScope.launch {
+            startupExportBusy = true
+            try {
+                runInterruptible(Dispatchers.IO) {
+                    checkNotNull(contentResolver.openOutputStream(uri)).use {
+                        it.write(failure.diagnosticText().toByteArray(Charsets.UTF_8))
+                    }
+                }
+                startupExportMessage = getString(R.string.host_export_success)
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { startupExportMessage = getString(R.string.host_export_failure) }
+            finally { startupExportBusy = false }
+        }
+    }
     private val exportRecovery = registerForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
         if (uri != null) lifecycleScope.launch {
             recoveryBusy = true
@@ -97,12 +115,16 @@ class MainActivity : ComponentActivity() {
         configureSystemBars()
         setContent {
             val initialization by app.hostInitialization.collectAsState()
+            val startupFailure by app.hostStartupFailure.collectAsState()
             LaunchedEffect(initialization) {
                 if (initialization == HostInitialization.READY && lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) hostForeground()
             }
             when (initialization) {
                 HostInitialization.INITIALIZING -> HostInitializationScreen(false)
-                HostInitialization.FAILED -> HostInitializationScreen(true)
+                HostInitialization.FAILED -> HostInitializationScreen(true, startupFailure,
+                    startupExportBusy, startupExportMessage,
+                    onRetry = { startupExportMessage = null; app.initializeHostAsync() },
+                    onExport = { exportStartup.launch("mobile-agent-startup.txt") })
                 HostInitialization.READY -> MainApp(onMoveTaskToBack = { moveTaskToBack(true) })
                 HostInitialization.RECOVERY -> DatabaseRecoveryScreen(recoveryBusy, recoveryMessage,
                     onExport = { exportRecovery.launch("mobile-agent-database-recovery.zip") },

@@ -23,7 +23,7 @@ private var cachedHostChatLocale: CachedHostChatLocale? = null
  * UI state or durable error records; localization does not change that persistence boundary.
  */
 internal fun Context.hostChatText(resource: Int, vararg args: Any): String {
-    val root = applicationContext ?: return ActivityLocaleConfiguration().attach(this).getString(resource, *args)
+    val root = applicationContext ?: return ActivityLocaleConfiguration().attach(this).resources.chatString(resource, args)
     val identity = System.identityHashCode(root)
     val preference = root.getSharedPreferences(ActivityLocaleConfiguration.PREFERENCES, Context.MODE_PRIVATE)
         .getString(ActivityLocaleConfiguration.KEY, "system") ?: "system"
@@ -45,8 +45,13 @@ internal fun Context.hostChatText(resource: Int, vararg args: Any): String {
             cachedHostChatLocale = CachedHostChatLocale(identity, preference, systemLocales, it)
         }
     }
-    return localized.getString(resource, *args)
+    return localized.chatString(resource, args)
 }
+
+// An empty argument list requests a template, as with Resources.getString(id).
+// Formatting that template here would fail before the projection supplies its value.
+private fun Resources.chatString(resource: Int, args: Array<out Any>): String =
+    if (args.isEmpty()) getString(resource) else getString(resource, *args)
 
 /**
  * Stable ASCII budget marker. Recovery UI must not infer meaning from translated copy, so this

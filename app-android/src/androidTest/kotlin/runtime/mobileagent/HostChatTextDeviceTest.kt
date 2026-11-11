@@ -190,4 +190,35 @@ class HostChatTextDeviceTest {
             assertTrue("Test locale preference could not be restored", editor.commit())
         }
     }
+
+    @Test
+    fun unformattedTemplatesRemainAvailableToToolResultProjection() {
+        val preferences = context.getSharedPreferences(
+            runtime.mobileagent.ui.ActivityLocaleConfiguration.PREFERENCES, Context.MODE_PRIVATE)
+        val key = runtime.mobileagent.ui.ActivityLocaleConfiguration.KEY
+        val hadPreference = preferences.contains(key)
+        val previous = preferences.getString(key, null)
+        val withoutApplication = object : android.content.ContextWrapper(context) {
+            override fun getApplicationContext(): Context? = null
+        }
+        try {
+            for (language in listOf("en-US", "zh-CN")) {
+                assertTrue(preferences.edit().putString(key, language).commit())
+                val localized = inLanguage(language)
+                val template = localized.getString(R.string.chat_visual_degraded_prefix)
+                assertTrue("The projection requires an unformatted placeholder", template.contains('%'))
+                for (source in listOf(context, withoutApplication)) {
+                    assertEquals(template, source.hostChatText(R.string.chat_visual_degraded_prefix))
+                    assertEquals(
+                        localized.getString(R.string.chat_visual_degraded_prefix, "VISION_NOT_CONFIGURED"),
+                        source.hostChatText(R.string.chat_visual_degraded_prefix, "VISION_NOT_CONFIGURED"),
+                    )
+                }
+            }
+        } finally {
+            val editor = preferences.edit()
+            if (hadPreference) editor.putString(key, previous) else editor.remove(key)
+            assertTrue("Test locale preference could not be restored", editor.commit())
+        }
+    }
 }

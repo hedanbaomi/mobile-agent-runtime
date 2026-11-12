@@ -77,8 +77,10 @@ internal class DeterministicSessionRunner(
             attentionMask = Array(mask.size) { mask[it].copyOf() },
             tokenTypeIds = types?.let { arr -> Array(arr.size) { arr[it].copyOf() } },
         )
-        val runIndex = runs.size
-        runs += recorded
+        val runIndex = synchronized(runs) {
+            runs.add(recorded)
+            runs.lastIndex
+        }
         if (runOverride != null) {
             return runOverride.invoke(recorded, runIndex)
         }

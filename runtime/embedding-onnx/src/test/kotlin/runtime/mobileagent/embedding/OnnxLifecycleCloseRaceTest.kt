@@ -24,7 +24,8 @@ class OnnxLifecycleCloseRaceTest {
     @Test
     fun closeStopsAdmissionImmediatelyAndReleasesRunnerOnlyAfterLastInFlightExits() {
         TestOnnxFixtures.withModelPack(padId = 3, hiddenDimension = 6, dimension = 6) { pack ->
-            val enteredRun = CountDownLatch(2)
+            val firstEntered = CountDownLatch(1)
+            val secondEntered = CountDownLatch(1)
             val finishFirst = CountDownLatch(1)
             val finishSecond = CountDownLatch(1)
             lateinit var runner: DeterministicSessionRunner
@@ -32,7 +33,7 @@ class OnnxLifecycleCloseRaceTest {
                 hiddenDimension = 6,
                 expectedPadId = 3L,
                 runOverride = { recorded, runIndex ->
-                    enteredRun.countDown()
+                    if (runIndex == 0) firstEntered.countDown() else secondEntered.countDown()
                     val gate = if (runIndex == 0) finishFirst else finishSecond
                     check(gate.await(5, TimeUnit.SECONDS)) { "Timed out waiting for release gate $runIndex" }
                     runner.synthesizeContextualHiddenStates(recorded)
@@ -45,12 +46,13 @@ class OnnxLifecycleCloseRaceTest {
                 val firstInFlight = executor.submit<List<FloatArray>> {
                     embedder.embedBatch(listOf("alpha beta"))
                 }
+                assertTrue("First request must own release gate 0", firstEntered.await(5, TimeUnit.SECONDS))
                 val secondInFlight = executor.submit<List<FloatArray>> {
                     runBlocking(Dispatchers.IO) {
                         embedder.embedBatchCancellable(listOf("dog fox"))
                     }
                 }
-                assertTrue("Both requests must enter runner.run", enteredRun.await(5, TimeUnit.SECONDS))
+                assertTrue("Second request must enter while first is in flight", secondEntered.await(5, TimeUnit.SECONDS))
                 assertEquals(2, embedder.coordinator.activeInFlight)
                 assertEquals(0, runner.closeCalls.get())
 

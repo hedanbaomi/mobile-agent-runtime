@@ -5,7 +5,9 @@ package runtime.mobileagent.data
 
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -311,51 +313,40 @@ class SkillMemoryRepositoryTest {
             val url = "jdbc:sqlite:${dbFile.toAbsolutePath()}"
             JdbcSqlConnection(url).use { db ->
                 Migrations.apply(db)
-                val repo = SkillMemoryRepository(db, root)
-                val space = repo.ensureSpace("install-insert", "pkg-insert", quotaBytes = 10_000, maxEntries = 5)
-
-                val readyLatch = CountDownLatch(threadCount)
-                val startLatch = CountDownLatch(1)
-                val doneLatch = CountDownLatch(threadCount)
-
-                val successCount = AtomicInteger(0)
-                val conflictCount = AtomicInteger(0)
-                val otherErrorCount = AtomicInteger(0)
-
-                for (i in 0 until threadCount) {
-                    val index = i
-                    executor.submit {
-                        readyLatch.countDown()
-                        startLatch.await()
+                val space = SkillMemoryRepository(db, root)
+                    .ensureSpace("install-insert", "pkg-insert", quotaBytes = 10_000, maxEntries = 5)
+                // All writers must observe the missing row before any can commit an insert.
+                // A writer that starts after the first commit can legitimately replace that row.
+                val beforeTransaction = CyclicBarrier(threadCount)
+                val racingDb = object : SqlConnection by db {
+                    override fun <T> transaction(block: () -> T): T {
+                        beforeTransaction.await(30, TimeUnit.SECONDS)
+                        return db.transaction(block)
+                    }
+                }
+                val repo = SkillMemoryRepository(racingDb, root)
+                val writes = (0 until threadCount).map { index ->
+                    executor.submit<String?> {
+                        val content = "winner-$index"
                         try {
-                            repo.replace("install-insert", "pkg-insert", "MEMORY.md", "winner-$index")
-                            successCount.incrementAndGet()
+                            repo.replace("install-insert", "pkg-insert", "MEMORY.md", content)
+                            content
                         } catch (_: AuthorityPolicyConflictException) {
-                            conflictCount.incrementAndGet()
-                        } catch (_: Throwable) {
-                            otherErrorCount.incrementAndGet()
-                        } finally {
-                            doneLatch.countDown()
+                            null
                         }
                     }
                 }
-
-                readyLatch.await()
-                startLatch.countDown()
-                doneLatch.await()
-
-                assertEquals(0, otherErrorCount.get())
-                assertEquals(1, successCount.get())
-                assertEquals(threadCount - 1, conflictCount.get())
+                val winner = writes.mapNotNull { it.get(45, TimeUnit.SECONDS) }.single()
 
                 val entry = repo.read(space.spaceId, "MEMORY.md")!!
                 assertEquals(1L, entry.version)
-                assertTrue(entry.content.startsWith("winner-"))
+                assertEquals(winner, entry.content)
 
                 // Verify only the 1 successful sidecar exists
                 val sidecarDir = root.resolve(space.spaceId)
-                val sidecarFiles = Files.list(sidecarDir).filter { Files.isRegularFile(it) }.toList()
-                assertEquals(1, sidecarFiles.size)
+                Files.list(sidecarDir).use { files ->
+                    assertEquals(1L, files.filter { Files.isRegularFile(it) }.count())
+                }
             }
         } finally {
             executor.shutdownNow()

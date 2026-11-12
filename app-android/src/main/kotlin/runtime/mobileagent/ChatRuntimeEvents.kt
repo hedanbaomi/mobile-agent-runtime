@@ -12,6 +12,8 @@ import runtime.mobileagent.agent.RunState
 import runtime.mobileagent.agent.toDiffPartOrNull
 import runtime.mobileagent.agent.toMessagePartOrNull
 import runtime.mobileagent.agent.toSafeErrorPart
+import runtime.mobileagent.data.ConversationRepository
+import runtime.mobileagent.data.RunRepository
 import runtime.mobileagent.domain.*
 import runtime.mobileagent.diagnostics.DiagnosticApprovalState
 import runtime.mobileagent.diagnostics.DiagnosticAuthority
@@ -39,19 +41,15 @@ internal interface ChatRunEventState {
 }
 
 /** Serial runtime event checkpointing; UI projection remains owner-gated by the supplied port. */
-internal class ChatRuntimeEvents(
-    private val application: Application,
-    private val container: AppContainer,
+internal class ChatRuntimeEvents internal constructor(
+    private val conversations: ConversationRepository,
+    private val runs: RunRepository,
     private val ui: ChatExecutionUi,
     private val owner: ChatRunOwner,
-    private val resources: ChatRunSession,
-    private val run: AgentRun,
-    private val snapshot: AgentSnapshot,
-    private val toolExecutor: ToolExecutor,
-    private val runTools: RunTools,
+    private val runId: String,
+    private val modelRounds: () -> Int,
     private val runCitations: MutableMap<String, Pair<Citation, String>>,
     private val invocations: MutableMap<String, ToolInvocation>,
-    private val compactionUsage: RunCompactionUsage,
     private val secret: CharArray?,
     private val warning: String?,
     private val progress: ChatRunEventState,
@@ -60,16 +58,76 @@ internal class ChatRuntimeEvents(
     private val invocationId: (String, String) -> String?,
     private val captureRequestPreview: (String?, Iterable<String>) -> Unit,
     private val recordInvocation: (String, String, DiagnosticToolRunState, String, String?) -> Unit,
-    private val approvals: ChatRunApprovals,
     private val headerNames: Set<String>,
+    private val application: Application? = null,
+    private val container: AppContainer? = null,
+    private val resources: ChatRunSession? = null,
+    private val snapshot: AgentSnapshot? = null,
+    private val toolExecutor: ToolExecutor? = null,
+    private val runTools: RunTools? = null,
+    private val compactionUsage: RunCompactionUsage? = null,
+    private val approvals: ChatRunApprovals? = null,
+    private val elapsedRealtime: () -> Long = SystemClock::elapsedRealtime,
 ) : ChatExecutionUi by ui {
+    constructor(
+        application: Application,
+        container: AppContainer,
+        ui: ChatExecutionUi,
+        owner: ChatRunOwner,
+        resources: ChatRunSession,
+        run: AgentRun,
+        snapshot: AgentSnapshot,
+        toolExecutor: ToolExecutor,
+        runTools: RunTools,
+        runCitations: MutableMap<String, Pair<Citation, String>>,
+        invocations: MutableMap<String, ToolInvocation>,
+        compactionUsage: RunCompactionUsage,
+        secret: CharArray?,
+        warning: String?,
+        progress: ChatRunEventState,
+        response: ChatRunResponse,
+        lastProgressAt: AtomicLong,
+        invocationId: (String, String) -> String?,
+        captureRequestPreview: (String?, Iterable<String>) -> Unit,
+        recordInvocation: (String, String, DiagnosticToolRunState, String, String?) -> Unit,
+        approvals: ChatRunApprovals,
+        headerNames: Set<String>,
+    ) : this(
+        conversations = container.conversations,
+        runs = container.runs,
+        ui = ui,
+        owner = owner,
+        runId = run.runId,
+        modelRounds = { run.modelRounds },
+        runCitations = runCitations,
+        invocations = invocations,
+        secret = secret,
+        warning = warning,
+        progress = progress,
+        response = response,
+        lastProgressAt = lastProgressAt,
+        invocationId = invocationId,
+        captureRequestPreview = captureRequestPreview,
+        recordInvocation = recordInvocation,
+        headerNames = headerNames,
+        application = application,
+        container = container,
+        resources = resources,
+        snapshot = snapshot,
+        toolExecutor = toolExecutor,
+        runTools = runTools,
+        compactionUsage = compactionUsage,
+        approvals = approvals,
+    )
+
     private val conversationId get() = owner.conversationId
+    private fun runSecrets(): List<String> = if (secret == null) emptyList() else listOf(String(secret))
     private fun recordToolInvocation(callId: String, name: String, state: DiagnosticToolRunState,
         requestRef: String, errorCode: String? = null) = recordInvocation(callId, name, state, requestRef, errorCode)
     private fun citationMetadata(bound: List<Citation>, warning: String?, coverage: RetrievalCoverage? = null,
         source: Map<String, Pair<Citation, String>>) = chatCitationMetadata(bound, warning, coverage, source)
     suspend fun accept(event: RuntimeEvent) = with(response) { with(progress) {
-                        lastProgressAt.set(SystemClock.elapsedRealtime())
+                        lastProgressAt.set(elapsedRealtime())
                         var persistRun = false
                         when (event) {
                             is RuntimeEvent.RunStarted -> {
@@ -77,9 +135,10 @@ internal class ChatRuntimeEvents(
                                 persistRun = true
                             }
                             is RuntimeEvent.ContextCompactionChanged -> {
-                                record = compactionUsage.reconcile(record, listOf(event.record))
+                                val app = application!!
+                                record = compactionUsage!!.reconcile(record, listOf(event.record))
                                 runCatching {
-                                    (application as MobileAgentApp).diagnostics.recordContextCompactionState(
+                                    (app as MobileAgentApp).diagnostics.recordContextCompactionState(
                                         ContextCompactionStateRecord(
                                             state = DiagnosticCompactionState.entries.firstOrNull {
                                                 it.name == event.record.state.name
@@ -96,22 +155,21 @@ internal class ChatRuntimeEvents(
                                 if (event.record.state == ContextCompactionState.PREPARED) {
                                     // Finish the prior assistant checkpoint before releasing its id. A
                                     // summary failure must get its own error row, never rewrite it.
-                                    if (assistantId != null) checkpoint("COMPLETE")
-                                    assistantId = null; answer = ""; reasoning = ""; observed.clear(); terminalError = null
+                                    completeRoundForTransition()
                                 }
                                 modelInFlight = event.record.state == ContextCompactionState.DISPATCHED
                                 record = record.copy(
                                     state = if (modelInFlight) RunStatus.MODEL_STREAMING else RunStatus.ASSEMBLING,
-                                    modelRounds = run.modelRounds,
+                                    modelRounds = modelRounds(),
                                 )
                                 publishRunState(owner, state.value.copy(
-                                    compactions = withContext(Dispatchers.IO) { container.contextCompactions.list(conversationId) }.map(::compactionUi),
+                                    compactions = withContext(Dispatchers.IO) { container!!.contextCompactions.list(conversationId) }.map(::compactionUi),
                                     status = when (event.record.state) {
                                         ContextCompactionState.PREPARED, ContextCompactionState.DISPATCHED ->
-                                            application.hostChatText(R.string.chat_context_compaction_in_progress)
-                                        ContextCompactionState.SUCCEEDED -> application.hostChatText(R.string.chat_context_compaction_succeeded)
-                                        ContextCompactionState.UNKNOWN_OUTCOME -> application.hostChatText(R.string.chat_context_compaction_unknown)
-                                        else -> application.hostChatText(R.string.chat_context_compaction_incomplete)
+                                            app.hostChatText(R.string.chat_context_compaction_in_progress)
+                                        ContextCompactionState.SUCCEEDED -> app.hostChatText(R.string.chat_context_compaction_succeeded)
+                                        ContextCompactionState.UNKNOWN_OUTCOME -> app.hostChatText(R.string.chat_context_compaction_unknown)
+                                        else -> app.hostChatText(R.string.chat_context_compaction_incomplete)
                                     },
                                 ))
                                 persistRun = true
@@ -119,13 +177,9 @@ internal class ChatRuntimeEvents(
                             is RuntimeEvent.RequestPrepared -> {
                                 preparationStage = null
                                 modelInFlight = true
-                                if (assistantId != null) checkpoint("COMPLETE")
-                                observed.clear(); reasoning = ""; terminalError = null
-                                answer = if (round++ == 0 && warning != null) "$warning\n\n" else ""
-                                assistantId = withContext(Dispatchers.IO) { container.conversations.append(conversationId, MessageRole.ASSISTANT,
-                                    answer, status = "STREAMING", metadataJson = metadata,
-                                    messageId = event.assistantMessageId ?: EntityId.random().value).id }
-                                record = record.copy(state = RunStatus.MODEL_STREAMING, modelRounds = run.modelRounds)
+                                val initialAnswer = if (round++ == 0 && warning != null) "$warning\n\n" else ""
+                                beginModelResponse(initialAnswer, event.assistantMessageId ?: EntityId.random().value)
+                                record = record.copy(state = RunStatus.MODEL_STREAMING, modelRounds = modelRounds())
                                 captureRequestPreview(event.requestPreview, event.headerNames)
                                 refreshMessages(owner)
                                 persistRun = true
@@ -133,30 +187,24 @@ internal class ChatRuntimeEvents(
                             is RuntimeEvent.ModelEvent -> when (val e = event.event) {
                                 is ModelEvent.Completed -> {
                                     modelInFlight = false
-                                    flushStreamingAnswer(assistantId, answer, force = true)
+                                    finish()
                                     persistRun = true
                                 }
                                 is ModelEvent.TextDelta -> {
-                                    appendText(e.text, listOf(String(secret!!)))
+                                    appendText(e.text, runSecrets())
                                 }
                                 is ModelEvent.ReasoningDelta -> {
-                                    appendReasoning(e.text, listOf(String(secret!!)))
+                                    appendReasoning(e.text, runSecrets())
                                 }
                                 // A refusal is readable assistant output: it joins the
-                                // answer stream like ordinary text, never reasoning.
+                                // answer stream on its dedicated redactor channel, never reasoning.
                                 is ModelEvent.RefusalDelta -> {
-                                    val projected = e.toMessagePartOrNull() as? RefusalPart
-                                    if (projected != null) {
-                                        appendText(projected.text, listOf(String(secret!!)))
-                                    }
+                                    appendRefusal(e.text, runSecrets())
                                 }
                                 is ModelEvent.Failed -> {
+                                    modelInFlight = false
                                     val projected = e.toMessagePartOrNull() as? ErrorPart ?: toSafeErrorPart(e.sanitizedMessage)
-                                    val safeMessage = projected.message
-                                    answer = if (answer.isBlank()) safeMessage else answer.trimEnd() + "\n" + safeMessage
-                                    terminalError = projected
-                                    flushStreamingAnswer(assistantId, answer, force = true)
-                                    if (assistantId == null) persistTerminalError(projected) else checkpoint("ERROR")
+                                    val safeMessage = failModelResponse(projected)
                                     record = record.copy(errorCode = projected.code.name)
                                     publishRunState(owner, state.value.copy(status = safeMessage, statusKind = "error"))
                                     persistRun = true
@@ -169,25 +217,26 @@ internal class ChatRuntimeEvents(
                             }
                             is RuntimeEvent.ToolCallObserved -> {
                                 toolCallInFlight = true
-                                recordToolInvocation(event.callId, event.name, DiagnosticToolRunState.DISPATCHED, run.runId)
+                                recordToolInvocation(event.callId, event.name, DiagnosticToolRunState.DISPATCHED, runId)
                                 if (runCatching { Json.parseToJsonElement(event.argumentsJson) is JsonObject }.getOrDefault(false))
                                     observed[event.callId] = ToolCallPart(event.callId, event.name, event.argumentsJson)
                             }
                             is RuntimeEvent.ToolApprovalRequested -> {
+                                val runApprovals = approvals!!
                                 toolWaitingApproval = true
-                                approvals.rememberPendingApproval(
+                                runApprovals.rememberPendingApproval(
                                     ChatRunApprovals.PendingApprovalAudit(
-                                        runId = run.runId,
+                                        runId = runId,
                                         callId = event.callId,
                                         invocationId = invocationId(event.callId, event.name),
-                                        agentId = snapshot.agentId,
+                                        agentId = snapshot!!.agentId,
                                         sessionRef = conversationId,
-                                        capability = approvals.diagnosticToolCapability(event.name, toolExecutor.specs),
+                                        capability = runApprovals.diagnosticToolCapability(event.name, toolExecutor!!.specs),
                                         authority = DiagnosticAuthority.NONE,
                                     ),
                                 )
                                 recordToolInvocation(
-                                    event.callId, event.name, DiagnosticToolRunState.WAITING_APPROVAL, run.runId,
+                                    event.callId, event.name, DiagnosticToolRunState.WAITING_APPROVAL, runId,
                                 )
                                 record = record.copy(state = RunStatus.WAITING_TOOL_APPROVAL)
                                 // Arguments here are presentation-only. The trusted onApprove
@@ -195,6 +244,8 @@ internal class ChatRuntimeEvents(
                                 persistRun = true
                             }
                             is RuntimeEvent.ToolResultProduced -> {
+                                val runApprovals = approvals!!
+                                val activeTools = runTools!!
                                 recordToolInvocation(
                                     event.callId,
                                     event.name,
@@ -206,47 +257,47 @@ internal class ChatRuntimeEvents(
                                         "UNKNOWN_OUTCOME" -> DiagnosticToolRunState.UNKNOWN_OUTCOME
                                         else -> DiagnosticToolRunState.FAILED
                                     },
-                                    run.runId,
+                                    runId,
                                     errorCode = runCatching {
                                         Json.parseToJsonElement(event.resultJson).jsonObject["errorCode"]
                                             ?.jsonPrimitive?.contentOrNull
                                     }.getOrNull(),
                                 )
-                                val approvalAudit = approvals.pendingApprovalFor(run.runId)?.takeIf { it.callId == event.callId }
+                                val approvalAudit = runApprovals.pendingApprovalFor(runId)?.takeIf { it.callId == event.callId }
                                 when (event.status) {
                                     "DENIED" -> approvalAudit?.let {
-                                        approvals.recordToolApprovalState(it, DiagnosticApprovalState.INVALIDATED, "permission")
+                                        runApprovals.recordToolApprovalState(it, DiagnosticApprovalState.INVALIDATED, "permission")
                                     }
                                     "INVALID" -> approvalAudit?.let {
-                                        approvals.recordToolApprovalState(it, DiagnosticApprovalState.INVALIDATED, "validation")
+                                        runApprovals.recordToolApprovalState(it, DiagnosticApprovalState.INVALIDATED, "validation")
                                     }
                                     "UNKNOWN_OUTCOME" -> approvalAudit?.let {
-                                        approvals.recordToolApprovalState(it, DiagnosticApprovalState.UNKNOWN, "unknown")
+                                        runApprovals.recordToolApprovalState(it, DiagnosticApprovalState.UNKNOWN, "unknown")
                                     }
                                 }
                                 toolCallInFlight = false
                                 toolWaitingApproval = false
                                 approvedToolInFlight = false
                                 approvedToolCallId = null
-                                runTools.evidence().forEach { (citation, excerpt) -> runCitations[citation.citationId] = citation to excerpt }
-                                metadata = citationMetadata(runCitations.values.filter { it.first.runId == run.runId }.map { it.first },
-                                    (listOfNotNull(warning) + runTools.warnings()).joinToString("\n").ifBlank { null }, source = runCitations)
+                                activeTools.evidence().forEach { (citation, excerpt) -> runCitations[citation.citationId] = citation to excerpt }
+                                metadata = citationMetadata(runCitations.values.filter { it.first.runId == runId }.map { it.first },
+                                    (listOfNotNull(warning) + activeTools.warnings()).joinToString("\n").ifBlank { null }, source = runCitations)
                                 checkpoint()
                                 val runtimeInvocationId = invocationId(event.callId, event.name) ?: InternalRequestIds.new()
                                 val persistedDecision = withContext(Dispatchers.IO) {
-                                    container.runs.invocations(run.runId)
+                                    runs.invocations(runId)
                                         .firstOrNull { it.invocationId == runtimeInvocationId }?.permissionDecision
                                 }
-                                val invocation = (invocations[runtimeInvocationId] ?: ToolInvocation(runtimeInvocationId, run.runId,
+                                val invocation = (invocations[runtimeInvocationId] ?: ToolInvocation(runtimeInvocationId, runId,
                                     event.callId, event.name, observed[event.callId]?.argumentsJson ?: "{}", createdAt = Utc.nowIso()))
                                     .copy(state = when (event.status) { "VALUE" -> "SUCCEEDED"; "COMPLETED_WITHHELD" -> "COMPLETED_WITHHELD"; "UNKNOWN_OUTCOME" -> "UNKNOWN_OUTCOME"; else -> "FAILED" },
                                         resultJson = event.resultJson,
                                         permissionDecision = persistedDecision ?: "NOT_REQUESTED",
                                         updatedAt = Utc.nowIso())
                                 withContext(Dispatchers.IO) {
-                                    container.runs.observeRuntimeInvocation(invocation)
+                                    runs.observeRuntimeInvocation(invocation)
                                     val diffPart = event.toDiffPartOrNull()
-                                    container.conversations.append(conversationId, MessageRole.TOOL, event.resultJson,
+                                    conversations.append(conversationId, MessageRole.TOOL, event.resultJson,
                                         messageId = event.messageId ?: EntityId.random().value,
                                         metadataJson = buildJsonObject { put("toolName", event.name) }.toString(),
                                         parts = buildList {
@@ -258,24 +309,22 @@ internal class ChatRuntimeEvents(
                                         })
                                 }
                                 invocations[runtimeInvocationId] = invocation
-                                approvals.forgetPendingApproval(run.runId, event.callId)
+                                runApprovals.forgetPendingApproval(runId, event.callId)
                                 publishRunCitations(owner, runCitations)
                                 publishRunState(owner, state.value.copy(pendingTool = null, citations = citationUis(runCitations)))
                                 persistRun = true
                             }
                             is RuntimeEvent.VisualBatchStarted -> {
-                                if (assistantId != null) checkpoint("COMPLETE")
-                                assistantId = null
-                                observed.clear(); reasoning = ""
+                                completeRoundForTransition()
                                 modelInFlight = true
-                                record = record.copy(state = RunStatus.MODEL_STREAMING, modelRounds = run.modelRounds)
+                                record = record.copy(state = RunStatus.MODEL_STREAMING, modelRounds = modelRounds())
                                 event.requestPreview?.let { captureRequestPreview(it, headerNames) }
-                                publishRunState(owner, state.value.copy(status = application.hostChatText(R.string.chat_reading_images, event.imageCount)))
+                                publishRunState(owner, state.value.copy(status = application!!.hostChatText(R.string.chat_reading_images, event.imageCount)))
                                 persistRun = true
                             }
                             is RuntimeEvent.VisualBatchRejected -> {
                                 modelInFlight = false
-                                publishRunState(owner, state.value.copy(status = application.hostChatText(R.string.chat_reducing_image_evidence)))
+                                publishRunState(owner, state.value.copy(status = application!!.hostChatText(R.string.chat_reducing_image_evidence)))
                                 persistRun = true
                             }
                             is RuntimeEvent.VisualBatchAnalyzed -> {
@@ -297,7 +346,7 @@ internal class ChatRuntimeEvents(
                                         put("sourceIds", JsonArray(event.assets.map { JsonPrimitive(it.assetId) }))
                                         put("analysis", event.analysis)
                                     }.toString()
-                                    container.conversations.append(conversationId, MessageRole.USER,
+                                    conversations.append(conversationId, MessageRole.USER,
                                         "<untrusted-visual-evidence-analysis>\n" + receipt + "\n</untrusted-visual-evidence-analysis>",
                                         parts = event.assets.map { ImagePart(it.assetId, it.mediaType) },
                                         metadataJson = batchMetadata)
@@ -306,7 +355,7 @@ internal class ChatRuntimeEvents(
                                 persistRun = true
                             }
                             is RuntimeEvent.ToolImagesAttached -> withContext(Dispatchers.IO) {
-                                container.conversations.append(conversationId, MessageRole.USER, "Tool visual evidence: ${event.callId}",
+                                conversations.append(conversationId, MessageRole.USER, "Tool visual evidence: ${event.callId}",
                                     parts = event.assets.map { ImagePart(it.assetId, it.mediaType) }, metadataJson = buildJsonObject {
                                         val ids = event.assets.map { it.assetId }.toSet()
                                         val provenance = runCitations.values.map { it.first }.filter { it.assetId in ids }
@@ -327,7 +376,7 @@ internal class ChatRuntimeEvents(
                                                 "UNKNOWN_OUTCOME" -> DiagnosticTerminalState.UNKNOWN
                                                 else -> DiagnosticTerminalState.FAILED
                                             },
-                                            requestRef = run.runId,
+                                            requestRef = runId,
                                             sessionRef = conversationId,
                                             reasonCode = event.state.name.lowercase(),
                                             // Typed classification set by the terminal
@@ -341,23 +390,25 @@ internal class ChatRuntimeEvents(
                                         ),
                                     )
                                 }
-                                approvals.pendingApprovalFor(run.runId)?.let { pending ->
-                                    val outcome = when (event.state) {
-                                        RunState.BUDGET_EXHAUSTED -> ChatApprovalOutcome.EXPIRED
-                                        RunState.CANCELLED -> ChatApprovalOutcome.INVALIDATED
-                                        // Rejection finishes the run without producing a tool result.
-                                        RunState.FAILED -> ChatApprovalOutcome.DENIED
-                                        else -> null
-                                    }
-                                    if (outcome != null) {
-                                        approvals.settleActiveApproval(resources, pending, outcome)
-                                        approvals.recordToolApprovalState(pending, outcome.auditState, outcome.reasonCode)
-                                        approvals.terminalizePendingApproval(pending.runId, outcome, pending)?.let {
-                                            invocations[it.invocationId] = it
+                                if (approvals != null) {
+                                    approvals.pendingApprovalFor(runId)?.let { pending ->
+                                        val outcome = when (event.state) {
+                                            RunState.BUDGET_EXHAUSTED -> ChatApprovalOutcome.EXPIRED
+                                            RunState.CANCELLED -> ChatApprovalOutcome.INVALIDATED
+                                            // Rejection finishes the run without producing a tool result.
+                                            RunState.FAILED -> ChatApprovalOutcome.DENIED
+                                            else -> null
+                                        }
+                                        if (outcome != null) {
+                                            approvals.settleActiveApproval(resources!!, pending, outcome)
+                                            approvals.recordToolApprovalState(pending, outcome.auditState, outcome.reasonCode)
+                                            approvals.terminalizePendingApproval(pending.runId, outcome, pending)?.let {
+                                                invocations[it.invocationId] = it
+                                            }
                                         }
                                     }
                                 }
-                                flushStreamingAnswer(assistantId, answer, force = true)
+                                finishRun(event.state == RunState.COMPLETED)
                                 record = record.copy(state = RunStatus.valueOf(event.state.name), modelRounds = event.modelRounds,
                                     toolCalls = event.toolCalls, stopReason = event.stopReason)
                                 persistRun = true
@@ -365,7 +416,7 @@ internal class ChatRuntimeEvents(
                         }
                         if (persistRun) {
                             record = record.copy(updatedAt = Utc.nowIso())
-                            withContext(Dispatchers.IO) { container.runs.save(record) }
+                            withContext(Dispatchers.IO) { runs.save(record) }
                         }
     } }
 }

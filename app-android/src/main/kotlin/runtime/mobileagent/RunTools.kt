@@ -214,7 +214,7 @@ class RunTools(
     private val screenActions: ToolExecutor? = containerOrNull?.let { c ->
         ScreenActionToolExecutor(
             ScreenObservationRegistry.get(checkNotNull(context)),
-            authority = c.runtimeIntegration::screenActionAuthority,
+            authority = c.toolApprovalAuthorityPort::screenActionAuthority,
             liveContext = { c.agents.isLiveBinding(snapshot) },
         )
     }

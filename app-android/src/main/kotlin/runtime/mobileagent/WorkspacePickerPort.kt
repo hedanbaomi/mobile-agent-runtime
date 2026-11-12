@@ -221,3 +221,7 @@ object UnavailableWorkspacePickerPort : WorkspacePickerPort {
 internal data class WorkspacePickerHandleRef(
     val handle: WorkspaceDirectoryHandle,
 )
+
+fun interface WorkspacePickerPortProvider {
+    fun workspacePickerPort(): WorkspacePickerPort
+}

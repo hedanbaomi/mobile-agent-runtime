@@ -690,51 +690,14 @@ class ShizukuWorkspaceBackendAdapter(
         }
     }
 
-    private fun malformedResponseCode(operation: String): ToolErrorCode = when (operation) {
-        "apply_patch",
-        "write",
-        "mkdir",
-        "delete",
-        "move",
-        -> ToolErrorCode.UNKNOWN_OUTCOME
-        else -> ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH
-    }
+    private fun malformedResponseCode(operation: String): ToolErrorCode =
+        shizukuMalformedResponseCode(operation)
 
     private fun mapWorkspaceError(
         code: String,
         operation: String,
         fallback: ToolErrorCode = ToolErrorCode.IO_ERROR,
-    ): ToolErrorCode = when (code) {
-        ShizukuWorkspaceFileStore.INVALID_PATH,
-        ShizukuWorkspaceFileStore.OUTSIDE_ROOT,
-            -> ToolErrorCode.PATH_OUT_OF_SCOPE
-        ShizukuWorkspaceFileStore.SYMLINK_REJECTED -> ToolErrorCode.SYMLINK_FORBIDDEN
-        ShizukuWorkspaceFileStore.NOT_FOUND -> ToolErrorCode.WORKSPACE_NOT_FOUND
-        ShizukuWorkspaceFileStore.PERMISSION_DENIED -> ToolErrorCode.PERMISSION_DENIED
-        ShizukuWorkspaceFileStore.FILE_TOO_LARGE -> ToolErrorCode.FILE_TOO_LARGE
-        ShizukuWorkspaceFileStore.LIMIT,
-        ShizukuWorkspaceFileStore.OUTPUT_LIMIT,
-            -> if (operation == "read" || operation == "stat") ToolErrorCode.FILE_TOO_LARGE else ToolErrorCode.QUOTA_EXCEEDED
-        ShizukuWorkspaceFileStore.UNKNOWN_OUTCOME -> ToolErrorCode.UNKNOWN_OUTCOME
-        ShizukuWorkspaceFileStore.CONFLICT -> ToolErrorCode.CONFLICT
-        ShizukuWorkspaceFileStore.INVALID_CURSOR -> ToolErrorCode.INVALID_CURSOR
-        ShizukuWorkspaceFileStore.INVALID_VERSION,
-        ShizukuWorkspaceFileStore.OFFSET_OUT_OF_RANGE,
-        ShizukuWorkspaceFileStore.INVALID_PATCH,
-        ShizukuWorkspaceFileStore.TARGET_EXISTS,
-        ShizukuWorkspaceFileStore.NON_EMPTY_DIRECTORY,
-        ShizukuWorkspaceFileStore.MOVE_INTO_SELF,
-        ShizukuWorkspaceFileStore.INVALID_CONTENT,
-            -> ToolErrorCode.INVALID_REQUEST
-        ShizukuWorkspaceFileStore.UNSUPPORTED_ENTRY -> ToolErrorCode.UNSUPPORTED_ENTRY
-        ShizukuWorkspaceFileStore.UNSUPPORTED,
-        ShizukuWorkspaceFileStore.OPERATION_UNAVAILABLE,
-        ShizukuWorkspaceFileStore.ATOMIC_REPLACE_UNAVAILABLE,
-            -> ToolErrorCode.OPERATION_UNAVAILABLE
-        ShizukuWorkspaceFileStore.WRITE_UNVERIFIED,
-            -> ToolErrorCode.INTERNAL_ERROR
-        else -> fallback
-    }
+    ): ToolErrorCode = mapShizukuWorkspaceError(code, operation, fallback)
 
     private fun failure(code: ToolErrorCode): WorkspaceResult.Failure =
         WorkspaceResult.Failure(ToolError(code))
@@ -815,4 +778,51 @@ object ShizukuBackendFactory {
         workspaceId: String = ShizukuWorkspaceBackendAdapter.DEFAULT_WORKSPACE_ID,
         displayName: String = ShizukuWorkspaceBackendAdapter.DEFAULT_DISPLAY_NAME,
     ): WorkspaceBackend = ShizukuWorkspaceBackendAdapter(bridge, workspaceId, displayName)
+}
+
+internal fun shizukuMalformedResponseCode(operation: String): ToolErrorCode = when (operation) {
+    "apply_patch",
+    "write",
+    "mkdir",
+    "delete",
+    "move",
+    -> ToolErrorCode.UNKNOWN_OUTCOME
+    else -> ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH
+}
+
+internal fun mapShizukuWorkspaceError(
+    code: String,
+    operation: String,
+    fallback: ToolErrorCode = ToolErrorCode.IO_ERROR,
+): ToolErrorCode = when (code) {
+    ShizukuWorkspaceFileStore.INVALID_PATH,
+    ShizukuWorkspaceFileStore.OUTSIDE_ROOT,
+        -> ToolErrorCode.PATH_OUT_OF_SCOPE
+    ShizukuWorkspaceFileStore.PROVIDER_ALIAS_AMBIGUOUS -> ToolErrorCode.IO_ERROR
+    ShizukuWorkspaceFileStore.SYMLINK_REJECTED -> ToolErrorCode.SYMLINK_FORBIDDEN
+    ShizukuWorkspaceFileStore.NOT_FOUND -> ToolErrorCode.WORKSPACE_NOT_FOUND
+    ShizukuWorkspaceFileStore.PERMISSION_DENIED -> ToolErrorCode.PERMISSION_DENIED
+    ShizukuWorkspaceFileStore.FILE_TOO_LARGE -> ToolErrorCode.FILE_TOO_LARGE
+    ShizukuWorkspaceFileStore.LIMIT,
+    ShizukuWorkspaceFileStore.OUTPUT_LIMIT,
+        -> if (operation == "read" || operation == "stat") ToolErrorCode.FILE_TOO_LARGE else ToolErrorCode.QUOTA_EXCEEDED
+    ShizukuWorkspaceFileStore.UNKNOWN_OUTCOME -> ToolErrorCode.UNKNOWN_OUTCOME
+    ShizukuWorkspaceFileStore.CONFLICT -> ToolErrorCode.CONFLICT
+    ShizukuWorkspaceFileStore.INVALID_CURSOR -> ToolErrorCode.INVALID_CURSOR
+    ShizukuWorkspaceFileStore.INVALID_VERSION,
+    ShizukuWorkspaceFileStore.OFFSET_OUT_OF_RANGE,
+    ShizukuWorkspaceFileStore.INVALID_PATCH,
+    ShizukuWorkspaceFileStore.TARGET_EXISTS,
+    ShizukuWorkspaceFileStore.NON_EMPTY_DIRECTORY,
+    ShizukuWorkspaceFileStore.MOVE_INTO_SELF,
+    ShizukuWorkspaceFileStore.INVALID_CONTENT,
+        -> ToolErrorCode.INVALID_REQUEST
+    ShizukuWorkspaceFileStore.UNSUPPORTED_ENTRY -> ToolErrorCode.UNSUPPORTED_ENTRY
+    ShizukuWorkspaceFileStore.UNSUPPORTED,
+    ShizukuWorkspaceFileStore.OPERATION_UNAVAILABLE,
+    ShizukuWorkspaceFileStore.ATOMIC_REPLACE_UNAVAILABLE,
+        -> ToolErrorCode.OPERATION_UNAVAILABLE
+    ShizukuWorkspaceFileStore.WRITE_UNVERIFIED,
+        -> ToolErrorCode.INTERNAL_ERROR
+    else -> fallback
 }

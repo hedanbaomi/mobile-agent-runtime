@@ -90,7 +90,7 @@ internal suspend fun assembleChatRunTools(
     ) {
         val context = toolingContext ?: return
         runCatching {
-            val exposureInputs = container.runtimeIntegration.toolExposureDiagnostics(context)
+            val exposureInputs = container.toolAssemblyPort.toolExposureDiagnostics(context)
             (application as MobileAgentApp).diagnostics.recordRuntimeToolExposure(
                 RuntimeToolExposureRecord(
                     agentId = context.agentId,
@@ -153,7 +153,7 @@ internal suspend fun assembleChatRunTools(
         runExecutorFactory = { python ->
             toolingContext?.let { frozenContext ->
                 try {
-                    val factory = container.runtimeIntegration
+                    val factory = container.toolAssemblyPort
                         .createToolExecutorFactory(frozenContext, webExecutor, mcpExecutor, python)
                     val catalogToolCount = factory.exposureSummary.totalTools
                     val exposedToolCount = if (modelToolTransportEnabled) catalogToolCount else 0
@@ -190,7 +190,7 @@ internal suspend fun assembleChatRunTools(
         liveContext = { withContext(Dispatchers.IO) { container.agents.isLiveBinding(snapshot) } },
         reserveCalls = runTools::reserveAdditionalToolCalls,
         rootWorkspaceIds = withContext(Dispatchers.IO) {
-            toolingContext?.let(container.runtimeIntegration::frozenRootWorkspaceIds).orEmpty()
+            toolingContext?.let(container.toolAssemblyPort::frozenRootWorkspaceIds).orEmpty()
         },
     )
     resources.productivity = productivity

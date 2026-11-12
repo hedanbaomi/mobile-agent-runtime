@@ -12,6 +12,7 @@ import io.ktor.http.headersOf
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import runtime.mobileagent.domain.ErrorCode
@@ -207,5 +208,237 @@ class IncidentRegressionTest {
         val reasoning = redactor.accept("Synthetic provider reasoning and", StreamingSecretRedactor.Channel.REASONING)
         assertEquals(listOf(StreamingSecretRedactor.Channel.REASONING to "and"), redactor.finish())
         assertEquals("Synthetic provider reasoning ", reasoning)
+    }
+
+    /** Multi-delta stream with secret split across chunk boundary (e.g. "sk-" in chunk 1, rest in chunk 2). */
+    @Test
+    fun secretSplitAcrossChunkBoundaryIsRedacted() {
+        val secret = "sk-proj-abc123456789xyz"
+        val redactor = StreamingSecretRedactor(listOf(secret))
+        val chunk1 = redactor.accept("Key prefix: sk-", StreamingSecretRedactor.Channel.TEXT)
+        assertEquals("Key prefix: ", chunk1)
+        val chunk2 = redactor.accept("proj-abc123456789xyz is active", StreamingSecretRedactor.Channel.TEXT)
+        assertEquals("*** is active", chunk2)
+        val remaining = redactor.finish()
+        assertTrue(remaining.isEmpty())
+    }
+
+    /** Pattern-based credential split across chunk boundary without pre-declared secret. */
+    @Test
+    fun patternSecretSplitAcrossChunksIsRedacted() {
+        val redactor = StreamingSecretRedactor()
+        val c1 = redactor.accept("OpenAI key is sk-", StreamingSecretRedactor.Channel.TEXT)
+        assertEquals("OpenAI key is ", c1)
+        val c2 = redactor.accept("1234567890abcdef and then proceed", StreamingSecretRedactor.Channel.TEXT)
+        assertEquals("*** and then proceed", c2)
+        assertTrue(redactor.finish().isEmpty())
+    }
+
+    /** Cancellation or error drops unconfirmed prefix safely without leaking to output. */
+    @Test
+    fun cancellationOrErrorDropsUnconfirmedPrefix() {
+        val secret = "sk-secret-confidential-999"
+        val redactor = StreamingSecretRedactor(listOf(secret))
+        val output = redactor.accept("Confirmed payload. Leaking: sk-", StreamingSecretRedactor.Channel.TEXT)
+        assertEquals("Confirmed payload. Leaking: ", output)
+        assertEquals(StreamingSecretRedactor.Channel.TEXT, redactor.pendingChannel())
+        redactor.discard()
+        assertTrue(redactor.finish().isEmpty())
+    }
+
+    /** Mixed interleaved channels isolate withheld prefixes independently. */
+    @Test
+    fun mixedInterleavedChannelsIsolateWithheldPrefixes() {
+        val textSecret = "sk-text-secret-1111"
+        val reasoningSecret = "sk-reason-secret-2222"
+        val refusalSecret = "sk-refusal-secret-3333"
+        val redactor = StreamingSecretRedactor(listOf(textSecret, reasoningSecret, refusalSecret))
+
+        // Interleave chunk 1 across all 3 channels
+        val t1 = redactor.accept("text prefix: sk-", StreamingSecretRedactor.Channel.TEXT)
+        val r1 = redactor.accept("reasoning prefix: sk-", StreamingSecretRedactor.Channel.REASONING)
+        val f1 = redactor.accept("refusal prefix: sk-", StreamingSecretRedactor.Channel.REFUSAL)
+        assertEquals("text prefix: ", t1)
+        assertEquals("reasoning prefix: ", r1)
+        assertEquals("refusal prefix: ", f1)
+
+        // Interleave chunk 2 completing secrets
+        val t2 = redactor.accept("text-secret-1111 done", StreamingSecretRedactor.Channel.TEXT)
+        val r2 = redactor.accept("reason-secret-2222 done", StreamingSecretRedactor.Channel.REASONING)
+        val f2 = redactor.accept("refusal-secret-3333 done", StreamingSecretRedactor.Channel.REFUSAL)
+        assertEquals("*** done", t2)
+        assertEquals("*** done", r2)
+        assertEquals("*** done", f2)
+
+        assertTrue(redactor.finish().isEmpty())
+    }
+
+    /** 1000-chunk streaming stress test asserting linear O(N) execution time. */
+    @Test
+    fun streamingBenchmarkStressTestOOfNPerformance() {
+        val secret = "sk-benchmark-secret-424242"
+        val redactor = StreamingSecretRedactor(listOf(secret))
+        val deltas = 1000
+        val startNs = System.nanoTime()
+        val accumulated = StringBuilder()
+        for (i in 0 until deltas) {
+            val chunk = when {
+                i == 500 -> "sk-"
+                i == 501 -> "benchmark-secret-424242"
+                else -> "chunk-$i-payload "
+            }
+            accumulated.append(redactor.accept(chunk, StreamingSecretRedactor.Channel.TEXT))
+        }
+        redactor.finish().forEach { (_, tail) -> accumulated.append(tail) }
+        val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
+
+        assertTrue(elapsedMs < 200, "1000-delta stream took $elapsedMs ms; expected < 200ms for linear O(N)")
+        val result = accumulated.toString()
+        assertTrue(result.contains("***"), "Secret must be redacted")
+        assertFalse(result.contains(secret), "Raw secret must never appear")
+    }
+
+    /** Delimiter split before '=': undeclared api-key split across delta boundary must be redacted. */
+    @Test
+    fun testPatternApiKeySplitBeforeDelimiter() {
+        val redactor = StreamingSecretRedactor()
+        val c1 = redactor.accept("Use api-key", StreamingSecretRedactor.Channel.TEXT)
+        val c2 = redactor.accept("=my-secret-key-7777 for access", StreamingSecretRedactor.Channel.TEXT)
+        val streamingOut = c1 + c2
+        assertFalse(streamingOut.contains("my-secret-key-7777"), "Secret must not leak when split at delimiter")
+        assertTrue(streamingOut.contains("***"), "Secret must be redacted to ***")
+        val out = streamingOut + redactor.finish().joinToString("") { it.second }
+        assertEquals("Use api-key=*** for access", out)
+        assertTrue(redactor.finish().isEmpty())
+    }
+
+    /** Delimiter split before ':': undeclared api_key split across delta boundary must be redacted. */
+    @Test
+    fun testPatternApiKeySplitBeforeColon() {
+        val redactor = StreamingSecretRedactor()
+        val c1 = redactor.accept("Header api_key", StreamingSecretRedactor.Channel.TEXT)
+        val c2 = redactor.accept(": my-secret-key-6666\n", StreamingSecretRedactor.Channel.TEXT)
+        val out = c1 + c2
+        assertFalse(out.contains("my-secret-key-6666"), "Secret must not leak when split at colon")
+        assertTrue(out.contains("***"), "Secret must be redacted to ***")
+        assertEquals("Header api_key=***\n", out)
+        assertTrue(redactor.finish().isEmpty())
+    }
+
+    @Test
+    fun testChallengerR2AdversarialSuite() {
+        val testSecrets = listOf("secret123456789", "my-secret-key-7777", "topSecret987")
+
+        // 1. Delimiter split before '=' across variations
+        val equalsPrefixes = listOf("api-key", "api_key", "apikey", "x-api-key", "API-KEY", "\"api-key\"", "'api-key'")
+        for (prefix in equalsPrefixes) {
+            val redactor = StreamingSecretRedactor()
+            val c1 = redactor.accept("Key: $prefix", StreamingSecretRedactor.Channel.TEXT)
+            val c2 = redactor.accept("=secret123456789 for user", StreamingSecretRedactor.Channel.TEXT)
+            val out = c1 + c2
+            assertFalse(out.contains("secret123456789"), "Undeclared secret must not leak for prefix '$prefix' split before '='")
+            assertTrue(out.contains("***"), "Must contain *** redaction for prefix '$prefix'")
+            assertTrue(redactor.finish().isEmpty())
+        }
+
+        // 2. Delimiter split before ':' across variations
+        val colonPrefixes = listOf("api-key", "api_key", "apikey", "x-api-key", "API_KEY", "\"api_key\"", "'api_key'")
+        for (prefix in colonPrefixes) {
+            val redactor = StreamingSecretRedactor()
+            val c1 = redactor.accept("Auth $prefix", StreamingSecretRedactor.Channel.TEXT)
+            val c2 = redactor.accept(": secret123456789\n", StreamingSecretRedactor.Channel.TEXT)
+            val out = c1 + c2
+            assertFalse(out.contains("secret123456789"), "Undeclared secret must not leak for prefix '$prefix' split before ':'")
+            assertTrue(out.contains("***"), "Must contain *** redaction for prefix '$prefix'")
+            assertTrue(redactor.finish().isEmpty())
+        }
+
+        // 3. Multi-chunk delimiter splits (prefix + delimiter + secret)
+        run {
+            val redactor = StreamingSecretRedactor()
+            val c1 = redactor.accept("Prefix api-key", StreamingSecretRedactor.Channel.TEXT)
+            val c2 = redactor.accept("=", StreamingSecretRedactor.Channel.TEXT)
+            val c3 = redactor.accept("secret123456789 rest", StreamingSecretRedactor.Channel.TEXT)
+            val out = c1 + c2 + c3
+            assertFalse(out.contains("secret123456789"), "Secret must not leak when split across 3 chunks (before and after =)")
+            assertTrue(out.contains("***"), "Secret must be redacted")
+        }
+        run {
+            val redactor = StreamingSecretRedactor()
+            val c1 = redactor.accept("Prefix api-key", StreamingSecretRedactor.Channel.TEXT)
+            val c2 = redactor.accept(" = ", StreamingSecretRedactor.Channel.TEXT)
+            val c3 = redactor.accept("secret123456789 rest", StreamingSecretRedactor.Channel.TEXT)
+            val out = c1 + c2 + c3
+            assertFalse(out.contains("secret123456789"), "Secret must not leak when split across 3 chunks with whitespace delimiter")
+            assertTrue(out.contains("***"), "Secret must be redacted")
+        }
+        run {
+            val redactor = StreamingSecretRedactor()
+            val c1 = redactor.accept("Header api_key", StreamingSecretRedactor.Channel.TEXT)
+            val c2 = redactor.accept(":", StreamingSecretRedactor.Channel.TEXT)
+            val c3 = redactor.accept(" secret123456789 rest", StreamingSecretRedactor.Channel.TEXT)
+            val out = c1 + c2 + c3
+            assertFalse(out.contains("secret123456789"), "Secret must not leak when split across 3 chunks (before and after :)")
+            assertTrue(out.contains("***"), "Secret must be redacted")
+        }
+        run {
+            val redactor = StreamingSecretRedactor()
+            val c1 = redactor.accept("Header api_key", StreamingSecretRedactor.Channel.TEXT)
+            val c2 = redactor.accept(": ", StreamingSecretRedactor.Channel.TEXT)
+            val c3 = redactor.accept("secret123456789 rest", StreamingSecretRedactor.Channel.TEXT)
+            val out = c1 + c2 + c3
+            assertFalse(out.contains("secret123456789"), "Secret must not leak when split across 3 chunks (: with space)")
+            assertTrue(out.contains("***"), "Secret must be redacted")
+        }
+
+        // 4. Verify NO false positives on regular words (single chunk)
+        val regularTexts = listOf(
+            "This is an api-key discussion.",
+            "What is an api_key in computer science?",
+            "We should use apikey here.",
+            "apiKey is very important.",
+            "We need an x-api-key header.",
+            "monkey donkey keyboard rapid therapy",
+            "This API key is great."
+        )
+        for (text in regularTexts) {
+            val redactor = StreamingSecretRedactor()
+            val out = redactor.accept(text, StreamingSecretRedactor.Channel.TEXT)
+            val finished = redactor.finish().joinToString("") { it.second }
+            val full = out + finished
+            assertEquals(text, full, "Regular text must not be redacted or corrupted: '$text'")
+            assertFalse(full.contains("***"), "Regular text must not contain '***': '$text'")
+        }
+
+        // 5. Verify NO false positives on regular words split across chunk boundaries
+        val regularChunkSplits = listOf(
+            Pair("This is an api-key", " discussion."),
+            Pair("What is an api_key", " in computer science?"),
+            Pair("We should use apikey", " here."),
+            Pair("apiKey", " is very important."),
+            Pair("We need an x-api-key", " header."),
+            Pair("Use an api-key", " to access the service.")
+        )
+        for ((chunk1, chunk2) in regularChunkSplits) {
+            val redactor = StreamingSecretRedactor()
+            val out1 = redactor.accept(chunk1, StreamingSecretRedactor.Channel.TEXT)
+            val out2 = redactor.accept(chunk2, StreamingSecretRedactor.Channel.TEXT)
+            val finished = redactor.finish().joinToString("") { it.second }
+            val full = out1 + out2 + finished
+            val expected = chunk1 + chunk2
+            assertEquals(expected, full, "Split regular text must reassemble verbatim: '$expected'")
+            assertFalse(full.contains("***"), "Split regular text must not contain '***': '$expected'")
+        }
+
+        // 6. Verify stream ending immediately with candidate keyword (finish() flush)
+        val endingKeywords = listOf("api-key", "api_key", "apikey", "x-api-key", "API-KEY", "\"api-key\"")
+        for (kw in endingKeywords) {
+            val redactor = StreamingSecretRedactor()
+            val out = redactor.accept("Keyword: $kw", StreamingSecretRedactor.Channel.TEXT)
+            val finished = redactor.finish().joinToString("") { it.second }
+            val full = out + finished
+            assertEquals("Keyword: $kw", full, "Keyword ending stream must flush verbatim without redaction")
+            assertFalse(full.contains("***"), "Unmatched keyword must not be redacted on finish()")
+        }
     }
 }

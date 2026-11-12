@@ -4,65 +4,114 @@ package runtime.mobileagent.ui
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import runtime.mobileagent.AppContainer
 import runtime.mobileagent.QuickStartStep
-import runtime.mobileagent.quickStartStep
 import runtime.mobileagent.R
 
-/** Reads local readiness only; never probes a provider, creates an agent or grants a capability. */
-@Composable
-internal fun QuickStartCard(container: AppContainer, route: String, detailOpen: Boolean, streaming: Boolean, onChooseAgent: () -> Unit, onNavigate: (String) -> Unit) {
-    if (detailOpen || route != AppRoutes.CHAT || streaming) return
-    var step by remember { mutableStateOf<QuickStartStep?>(null) }
-    var collapsed by remember { mutableStateOf(container.uiPreferences.getBoolean("quick-start-collapsed", false)) }
-    LaunchedEffect(route, collapsed) {
-        step = withContext(Dispatchers.IO) {
-            runCatching {
-                quickStartStep(
-                    container.profiles.listModels().any { it.role == runtime.mobileagent.domain.ModelRole.CHAT },
-                    container.agents.listOverviews().isNotEmpty(),
-                    container.db.query("SELECT run_id FROM runs WHERE state='COMPLETED' LIMIT 1").isNotEmpty(),
-                )
-            }.getOrNull()
-        }
-    }
-    val current = step ?: return
-    QuickStartContent(current, collapsed, onCollapsed = { value ->
-        collapsed = value
-        container.uiPreferences.edit().putBoolean("quick-start-collapsed", value).apply()
-    }, onChooseAgent, onNavigate)
+/**
+ * Immutable UI state representing the onboarding quick-start card.
+ */
+@Immutable
+internal data class QuickStartUiState(
+    val step: QuickStartStep? = null,
+    val collapsed: Boolean = false,
+    val visible: Boolean = false,
+) {
+    val stepId: String? get() = step?.name
 }
 
+/**
+ * Decoupled presentation card for quick-start onboarding.
+ * Pure stateless Composable taking immutable state and callbacks.
+ */
 @Composable
-internal fun QuickStartContent(current: QuickStartStep, collapsed: Boolean, onCollapsed: (Boolean) -> Unit,
-    onChooseAgent: () -> Unit, onNavigate: (String) -> Unit) {
+internal fun QuickStartCard(
+    state: QuickStartUiState,
+    onStepClick: (stepId: String) -> Unit,
+    onDismiss: () -> Unit,
+    onResume: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (!state.visible) return
+    val current = state.step ?: return
     if (current == QuickStartStep.COMPLETE) return
-    if (collapsed) {
-        TextButton(onClick = { onCollapsed(false) }) { Text(stringResource(R.string.quick_start_resume)) }
+
+    if (state.collapsed) {
+        TextButton(
+            onClick = onResume,
+            modifier = modifier,
+        ) {
+            Text(stringResource(R.string.quick_start_resume))
+        }
         return
     }
-    Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)) {
+
+    Card(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+    ) {
         Column(Modifier.padding(12.dp)) {
-            Text(stringResource(R.string.quick_start_title), style = MaterialTheme.typography.titleSmall)
-            Text(stringResource(when (current) {
-                QuickStartStep.MODEL -> R.string.quick_start_model
-                QuickStartStep.AGENT -> R.string.quick_start_agent
-                else -> R.string.quick_start_message
-            }), style = MaterialTheme.typography.bodySmall)
+            Text(
+                stringResource(R.string.quick_start_title),
+                style = MaterialTheme.typography.titleSmall,
+            )
+            Text(
+                stringResource(
+                    when (current) {
+                        QuickStartStep.MODEL -> R.string.quick_start_model
+                        QuickStartStep.AGENT -> R.string.quick_start_agent
+                        else -> R.string.quick_start_message
+                    },
+                ),
+                style = MaterialTheme.typography.bodySmall,
+            )
             Row {
-                TextButton(onClick = { if (current == QuickStartStep.MESSAGE) onChooseAgent() else onNavigate(when (current) {
-                    QuickStartStep.MODEL -> AppRoutes.PROVIDERS
-                    QuickStartStep.AGENT -> AppRoutes.AGENTS
-                    else -> AppRoutes.CHAT
-                }) }) { Text(stringResource(R.string.quick_start_continue)) }
-                TextButton(onClick = { onCollapsed(true) }) { Text(stringResource(R.string.quick_start_later)) }
+                TextButton(
+                    onClick = { onStepClick(current.name) },
+                ) {
+                    Text(stringResource(R.string.quick_start_continue))
+                }
+                TextButton(
+                    onClick = onDismiss,
+                ) {
+                    Text(stringResource(R.string.quick_start_later))
+                }
             }
         }
     }
+}
+
+/**
+ * Backwards-compatible content adapter preserving existing device test signatures.
+ */
+@Composable
+internal fun QuickStartContent(
+    current: QuickStartStep,
+    collapsed: Boolean,
+    onCollapsed: (Boolean) -> Unit,
+    onChooseAgent: () -> Unit,
+    onNavigate: (String) -> Unit,
+) {
+    QuickStartCard(
+        state = QuickStartUiState(
+            step = current,
+            collapsed = collapsed,
+            visible = current != QuickStartStep.COMPLETE,
+        ),
+        onStepClick = { stepId ->
+            when (stepId) {
+                QuickStartStep.MESSAGE.name -> onChooseAgent()
+                QuickStartStep.MODEL.name -> onNavigate(AppRoutes.PROVIDERS)
+                QuickStartStep.AGENT.name -> onNavigate(AppRoutes.AGENTS)
+                else -> onNavigate(AppRoutes.CHAT)
+            }
+        },
+        onDismiss = { onCollapsed(true) },
+        onResume = { onCollapsed(false) },
+    )
 }

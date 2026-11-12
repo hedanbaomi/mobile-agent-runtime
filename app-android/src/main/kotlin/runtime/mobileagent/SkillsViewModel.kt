@@ -241,7 +241,7 @@ class SkillsViewModel(
         if (agentId.isBlank()) return SkillMemoryUi(availability = SkillMemoryAvailability.UNAVAILABLE)
         val snapshot = app.container.agents.snapshot(agentId)
             ?: return SkillMemoryUi(availability = SkillMemoryAvailability.UNAVAILABLE)
-        return app.container.runtimeIntegration
+        return app.container.skillMemoryAvailabilityPort
             .skillMemoryAvailability(snapshot.agentId, snapshot.id, installId)
             .toUi()
     }

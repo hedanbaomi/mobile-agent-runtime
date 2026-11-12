@@ -66,7 +66,7 @@ internal suspend fun readChatHistory(
         previous.hasMoreMessages else page?.nextBeforeMessageId != null
     val labels = chatSessionWorkspaceLabels(conversations.map { it.id },
         bindingWorkspaceId = { container.threadWorkspacePort.conversationWorkspaceBinding(it)?.workspaceId },
-        title = { container.runtimeIntegration.workspaceUiPresentation(it)?.title })
+        title = { container.workspacePresentationPort.workspaceUiPresentation(it)?.title })
     fun session(conversation: runtime.mobileagent.domain.Conversation): ChatSessionUi {
         val owner = snapshotAgents[conversation.snapshotId]
         return ChatSessionUi(conversation.id, conversation.title, timeLabel = conversation.updatedAt.take(16),

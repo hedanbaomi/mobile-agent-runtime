@@ -23,7 +23,6 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.ButtonDefaults
@@ -260,7 +259,7 @@ fun AgentStatusBanner(
             val foreground = if (dark) Color(0xFFFEF08A) else Color(0xFF723B13)
             Triple(Icons.Filled.Warning, background, foreground)
         }
-        AgentStatusTone.ERROR -> Triple(Icons.Filled.Error, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer)
+        AgentStatusTone.ERROR -> Triple(AppIcons.Error, MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer)
     }
     val tokens = LocalAgentDesignTokens.current
     Surface(

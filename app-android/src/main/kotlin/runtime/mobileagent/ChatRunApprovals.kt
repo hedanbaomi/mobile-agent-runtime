@@ -233,10 +233,10 @@ internal class ChatRunApprovals(private val application: Application, private va
         val capability = diagnosticToolCapability(name, specs)
         return when (capability) {
             DiagnosticToolCapability.SHELL_EXECUTE -> runCatching {
-                chatDiagnosticAuthority(capability, selectedAuthority ?: container.runtimeIntegration.snapshot().selectedAuthority.name)
+                chatDiagnosticAuthority(capability, selectedAuthority ?: container.authorityQueryPort.snapshot().selectedAuthority.name)
             }.getOrDefault(DiagnosticAuthority.NONE)
             DiagnosticToolCapability.WORKSPACE_READ, DiagnosticToolCapability.WORKSPACE_WRITE ->
-                runCatching { chatDiagnosticAuthority(capability, "NONE", container.runtimeIntegration.diagnosticWorkspaceAuthority(workspaceId)) }
+                runCatching { chatDiagnosticAuthority(capability, "NONE", container.toolApprovalAuthorityPort.diagnosticWorkspaceAuthority(workspaceId)) }
                     .getOrDefault(DiagnosticAuthority.NONE)
             else -> DiagnosticAuthority.NONE
         }

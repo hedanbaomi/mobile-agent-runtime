@@ -85,4 +85,21 @@
     <string name="chat_retrieval_partial_coverage_fallback">Some knowledge bases did not participate in this retrieval; do not claim those unsearched sources were checked.</string>
     <string name="chat_user_message_saved_unconfirmed">Message saved on this device; turn completion is unconfirmed, delivery and processing are uncertain, and it will not be resent automatically.</string>
     <string name="chat_configuration_snapshot_label">Configuration snapshot %1$s</string>
+    <string name="shell_current_agent">Current Agent</string>
+    <string name="workspace_browser_title">Choose device directory</string>
+    <string name="workspace_browser_current">Current: %1$s</string>
+    <string name="workspace_browser_privacy_hint">Directory names stay in the local UI; the model receives only the attached workspace and relative paths.</string>
+    <string name="workspace_browser_empty">No child directories are available here.</string>
+    <string name="workspace_browser_load_more">Load more directories</string>
+    <string name="workspace_browser_incomplete">Directory listing is incomplete; reopen it.</string>
+    <string name="workspace_browser_up">Up one level</string>
+    <string name="workspace_browser_attach">Use this directory</string>
+    <string name="workspace_dialog_cancel">Cancel</string>
+    <string name="workspace_wired_title">Enter an ADB device directory</string>
+    <string name="workspace_wired_hint">Enter an absolute directory you verified, such as /sdcard/Download. It is consumed only for this foreground binding and is not exposed to the model or logs.</string>
+    <string name="workspace_wired_label">Absolute device directory</string>
+    <string name="workspace_wired_attach">Attach</string>
+    <string name="workspace_full_device_title">Enable full-device file access?</string>
+    <string name="workspace_full_device_body">This lets the Agent access files outside its current workspace that the selected ADB-level authority can see. It is not Root and survives temporary disconnects. An existing default workspace is renewed only with its unrevoked capabilities; revoked write access stays revoked.</string>
+    <string name="workspace_full_device_confirm">Enable</string>
 </resources>

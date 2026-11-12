@@ -4,15 +4,7 @@
 package runtime.mobileagent.ui
 
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Campaign
-import androidx.compose.material.icons.outlined.Chat
-import androidx.compose.material.icons.outlined.Extension
-import androidx.compose.material.icons.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Settings
-import androidx.compose.material.icons.outlined.SmartToy
-import androidx.compose.material.icons.outlined.BugReport
-import androidx.compose.material.icons.outlined.Cloud
-import androidx.compose.material.icons.outlined.Tune
 
 object AppRoutes {
     const val CHAT = "chat"
@@ -103,16 +95,16 @@ fun appShellTitle(
 
 /** The nine drawer destinations in design order. About is reached from Settings. */
 fun defaultAppDestinations(chinese: Boolean = true): List<AppNavigationDestination> = listOf(
-    AppNavigationDestination(AppRoutes.CHAT, if (chinese) "对话" else "Chat", Icons.Outlined.Chat),
-    AppNavigationDestination(AppRoutes.AGENTS, if (chinese) "智能体" else "Agents", Icons.Outlined.SmartToy),
-    AppNavigationDestination(AppRoutes.PROVIDERS, if (chinese) "服务商" else "Providers", Icons.Outlined.Tune),
-    AppNavigationDestination(AppRoutes.KNOWLEDGE, if (chinese) "知识" else "Knowledge", Icons.Outlined.MenuBook),
-    AppNavigationDestination(AppRoutes.WORLD_BOOKS, if (chinese) "世界书" else "World books", Icons.Outlined.MenuBook),
-    AppNavigationDestination(AppRoutes.SKILLS, if (chinese) "技能" else "Skills", Icons.Outlined.Extension),
-    AppNavigationDestination(AppRoutes.NEWS, if (chinese) "公告" else "News", Icons.Outlined.Campaign),
+    AppNavigationDestination(AppRoutes.CHAT, if (chinese) "对话" else "Chat", AppIcons.Chat),
+    AppNavigationDestination(AppRoutes.AGENTS, if (chinese) "智能体" else "Agents", AppIcons.SmartToy),
+    AppNavigationDestination(AppRoutes.PROVIDERS, if (chinese) "服务商" else "Providers", AppIcons.Tune),
+    AppNavigationDestination(AppRoutes.KNOWLEDGE, if (chinese) "知识" else "Knowledge", AppIcons.MenuBook),
+    AppNavigationDestination(AppRoutes.WORLD_BOOKS, if (chinese) "世界书" else "World books", AppIcons.MenuBook),
+    AppNavigationDestination(AppRoutes.SKILLS, if (chinese) "技能" else "Skills", AppIcons.Extension),
+    AppNavigationDestination(AppRoutes.NEWS, if (chinese) "公告" else "News", AppIcons.Campaign),
     AppNavigationDestination(AppRoutes.SETTINGS, if (chinese) "设置" else "Settings", Icons.Outlined.Settings),
-    AppNavigationDestination(AppRoutes.MCP, "MCP", Icons.Outlined.Cloud),
-    AppNavigationDestination(AppRoutes.INSPECTOR, if (chinese) "请求检查器" else "Request inspector", Icons.Outlined.BugReport),
+    AppNavigationDestination(AppRoutes.MCP, "MCP", AppIcons.Cloud),
+    AppNavigationDestination(AppRoutes.INSPECTOR, if (chinese) "请求检查器" else "Request inspector", AppIcons.BugReport),
 )
 
 /**

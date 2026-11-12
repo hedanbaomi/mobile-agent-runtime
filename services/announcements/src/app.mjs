@@ -19,6 +19,118 @@ const SIGNED_SNAPSHOT_VALIDITY_MS = 24 * 60 * 60 * 1000;
 const LOCAL_ORIGIN = /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/;
 const ADMIN_BLOCKED_HTML = `<!doctype html><meta charset="utf-8"><title>Announcements admin unavailable</title><meta name="viewport" content="width=device-width,initial-scale=1"><main><h1>Announcements administration is unavailable</h1><p>Production administration is protected by Cloudflare Access. Ask an operator to configure the Access application and audience before using this page.</p></main>`;
 
+export const MAX_SNAPSHOT_CACHE_ENTRIES = 200;
+export const MAX_SNAPSHOT_CACHE_BYTES = 8 * 1024 * 1024;
+
+function measureSnapshotEntryBytes(key, value) {
+  return Buffer.byteLength(String(key), "utf8") + Buffer.byteLength(JSON.stringify(value) ?? "", "utf8");
+}
+
+export class BoundedSnapshotCache {
+  constructor(maxEntries = MAX_SNAPSHOT_CACHE_ENTRIES, maxBytes = MAX_SNAPSHOT_CACHE_BYTES) {
+    this.maxEntries = maxEntries;
+    this.maxBytes = maxBytes;
+    this.map = new Map();
+    this.sizes = new Map();
+    this.totalBytes = 0;
+  }
+
+  _removeKey(key) {
+    if (!this.map.has(key)) return false;
+    this.map.delete(key);
+    const removedBytes = this.sizes.get(key) || 0;
+    this.sizes.delete(key);
+    this.totalBytes = Math.max(0, this.totalBytes - removedBytes);
+    return true;
+  }
+
+  get(key, nowMs) {
+    const item = this.map.get(key);
+    if (!item) return undefined;
+    if (item.expiresAt && nowMs !== undefined && Date.parse(item.expiresAt) <= nowMs) {
+      this._removeKey(key);
+      return undefined;
+    }
+    this.map.delete(key);
+    this.map.set(key, item);
+    return item;
+  }
+
+  set(key, value, nowMs) {
+    const entryBytes = measureSnapshotEntryBytes(key, value);
+    if (this.maxEntries <= 0 || this.maxBytes <= 0 || entryBytes > this.maxBytes) {
+      if (this.map.has(key)) {
+        this._removeKey(key);
+      }
+      return this;
+    }
+    if (this.map.has(key)) {
+      this._removeKey(key);
+    }
+    if ((this.map.size >= this.maxEntries || this.totalBytes + entryBytes > this.maxBytes) && nowMs !== undefined) {
+      this.evictExpired(nowMs);
+    }
+    while (this.map.size > 0 && (this.map.size >= this.maxEntries || this.totalBytes + entryBytes > this.maxBytes)) {
+      const oldestKey = this.map.keys().next().value;
+      if (oldestKey === undefined) break;
+      this._removeKey(oldestKey);
+    }
+    this.map.set(key, value);
+    this.sizes.set(key, entryBytes);
+    this.totalBytes += entryBytes;
+    return this;
+  }
+
+  has(key) {
+    return this.map.has(key);
+  }
+
+  delete(key) {
+    return this._removeKey(key);
+  }
+
+  clear() {
+    this.map.clear();
+    this.sizes.clear();
+    this.totalBytes = 0;
+  }
+
+  get size() {
+    return this.map.size;
+  }
+
+  get byteLength() {
+    return this.totalBytes;
+  }
+
+  keys() {
+    return this.map.keys();
+  }
+
+  values() {
+    return this.map.values();
+  }
+
+  entries() {
+    return this.map.entries();
+  }
+
+  [Symbol.iterator]() {
+    return this.map[Symbol.iterator]();
+  }
+
+  evictExpired(nowMs = Date.now()) {
+    let count = 0;
+    for (const [key, item] of this.map.entries()) {
+      if (item.expiresAt && Date.parse(item.expiresAt) <= nowMs) {
+        this._removeKey(key);
+        count += 1;
+      }
+    }
+    return count;
+  }
+}
+
 export function createWorker(options = {}) {
   const store = options.store || new MemoryStore();
   const keys = options.keys;
@@ -30,7 +142,23 @@ export function createWorker(options = {}) {
   const accessAuthenticator = options.accessAuthenticator || null;
   const adminOrigins = new Set(options.adminOrigins || (environment === "local" ? [] : []));
   if (store.feedState) store.feedState.keyId = keys.keyId;
-  if (!store.signedSnapshots) store.signedSnapshots = new Map();
+  const snapshotCacheLimit = options.snapshotCacheLimit ?? MAX_SNAPSHOT_CACHE_ENTRIES;
+  const snapshotCacheMaxBytes = options.snapshotCacheMaxBytes ?? MAX_SNAPSHOT_CACHE_BYTES;
+  if (
+    !store.signedSnapshots ||
+    !(store.signedSnapshots instanceof BoundedSnapshotCache) ||
+    (options.snapshotCacheLimit !== undefined && store.signedSnapshots.maxEntries !== snapshotCacheLimit) ||
+    (options.snapshotCacheMaxBytes !== undefined && store.signedSnapshots.maxBytes !== snapshotCacheMaxBytes)
+  ) {
+    const existing = store.signedSnapshots;
+    const cache = new BoundedSnapshotCache(snapshotCacheLimit, snapshotCacheMaxBytes);
+    if (existing && typeof existing.entries === "function") {
+      for (const [k, v] of existing.entries()) {
+        cache.set(k, v);
+      }
+    }
+    store.signedSnapshots = cache;
+  }
 
   const context = {
     store,
@@ -188,9 +316,10 @@ async function publicFeed(request, url, ctx) {
   const rotationStart = Math.floor(now.getTime() / SIGNED_SNAPSHOT_ROTATION_MS) * SIGNED_SNAPSHOT_ROTATION_MS;
   const etag = `"${sha256Hex(`${contentHash}:${rotationStart}`).slice(0, 32)}"`;
   const cacheKey = [client.platform, client.channel, String(client.versionCode), client.locale, client.installId, String(contentObject.feedVersion), contentHash, String(rotationStart)].join("|");
-  const cached = ctx.store.signedSnapshots.get(cacheKey);
+  const nowMs = now.getTime();
+  const cached = ctx.store.signedSnapshots.get(cacheKey, nowMs);
   const inm = request.headers.get("If-None-Match");
-  if (cached && Date.parse(cached.expiresAt) - now.getTime() > 60 * 60 * 1000) {
+  if (cached && Date.parse(cached.expiresAt) - nowMs > 60 * 60 * 1000) {
     if (ifNoneMatchMatches(inm, cached.etag)) {
       return new Response(null, { status: 304, headers: { ETag: cached.etag, "Cache-Control": "private, no-store" } });
     }
@@ -215,7 +344,7 @@ async function publicFeed(request, url, ctx) {
     payloadBase64,
     signatureBase64: signPayload(ctx.keys.privateKey, payloadBase64),
   };
-  ctx.store.signedSnapshots.set(cacheKey, { etag, envelope, expiresAt: payloadObject.expiresAt });
+  ctx.store.signedSnapshots.set(cacheKey, { etag, envelope, expiresAt: payloadObject.expiresAt }, nowMs);
   return Response.json(envelope, { headers: { ETag: etag, "Cache-Control": "private, no-store" } });
 }
 

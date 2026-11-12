@@ -17,6 +17,7 @@ import runtime.mobileagent.domain.ModelProfile
 import runtime.mobileagent.domain.ModelRole
 import runtime.mobileagent.domain.ProviderProfile
 import runtime.mobileagent.domain.ReasoningPart
+import runtime.mobileagent.domain.TextPart
 
 class ConversationMessagePartsRepositoryTest {
     @Test
@@ -258,6 +259,118 @@ class ConversationMessagePartsRepositoryTest {
                 ),
             )
             assertThrows(AppException::class.java) { conversations.message("message.persisted-invalid") }
+        }
+    }
+
+    @Test
+    fun checkpointDifferentialUpdateGrowsTailInPlaceAndAppendsParts() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val snapshotId = createSnapshot(db)
+            val repo = ConversationRepository(db)
+            val conv = repo.create(snapshotId, "Diff", "conversation.diff")
+
+            // 1. Initial streaming assistant message with 1 reasoning part
+            val initialPart = ReasoningPart("Think", streaming = true)
+            val msg = repo.append(
+                conv.id,
+                MessageRole.ASSISTANT,
+                text = "Think",
+                status = "STREAMING",
+                parts = listOf(initialPart),
+            )
+            var partsCount = db.query("SELECT COUNT(*) AS c FROM message_parts WHERE message_id=?", listOf(msg.id)).single().long("c")
+            assertEquals(1L, partsCount)
+
+            // 2. Checkpoint 1: update reasoning part text in-place (ordinal 0 unchanged, payload updated)
+            val updatedPart1 = ReasoningPart("Thinking deeper...", streaming = true)
+            repo.checkpointAssistant(msg.id, "Thinking deeper...", listOf(updatedPart1), status = "STREAMING")
+            partsCount = db.query("SELECT COUNT(*) AS c FROM message_parts WHERE message_id=?", listOf(msg.id)).single().long("c")
+            assertEquals(1L, partsCount)
+            val row0 = db.query("SELECT ordinal, payload_json FROM message_parts WHERE message_id=?", listOf(msg.id)).single()
+            assertEquals(0L, row0.long("ordinal"))
+            assertEquals(true, row0.string("payload_json").contains("Thinking deeper..."))
+
+            // 3. Checkpoint 2: append second part (ReasoningPart done + TextPart streaming)
+            val finalizedReasoning = ReasoningPart("Done", streaming = false)
+            val streamingText = TextPart("Answer")
+            repo.checkpointAssistant(msg.id, "Answer", listOf(finalizedReasoning, streamingText), status = "STREAMING")
+            partsCount = db.query("SELECT COUNT(*) AS c FROM message_parts WHERE message_id=?", listOf(msg.id)).single().long("c")
+            assertEquals(2L, partsCount)
+            val rows = db.query("SELECT ordinal, payload_json FROM message_parts WHERE message_id=? ORDER BY ordinal ASC", listOf(msg.id))
+            assertEquals(0L, rows[0].long("ordinal"))
+            assertEquals(true, rows[0].string("payload_json").contains("Done"))
+            assertEquals(1L, rows[1].long("ordinal"))
+            assertEquals(true, rows[1].string("payload_json").contains("Answer"))
+
+            // 4. Checkpoint 3: grow second part text in-place (first part unchanged)
+            val grownText = TextPart("Answer continued...")
+            repo.checkpointAssistant(msg.id, "Answer continued...", listOf(finalizedReasoning, grownText), status = "STREAMING")
+            partsCount = db.query("SELECT COUNT(*) AS c FROM message_parts WHERE message_id=?", listOf(msg.id)).single().long("c")
+            assertEquals(2L, partsCount)
+            val rowsAfterGrowth = db.query("SELECT ordinal, payload_json FROM message_parts WHERE message_id=? ORDER BY ordinal ASC", listOf(msg.id))
+            assertEquals(true, rowsAfterGrowth[1].string("payload_json").contains("Answer continued..."))
+
+            // 5. Checkpoint 4 (prune): list shrunk to 1 part -> ordinal >= 1 must be deleted
+            val singleFinalPart = TextPart("Final Answer")
+            repo.checkpointAssistant(msg.id, "Final Answer", listOf(singleFinalPart), status = "STREAMING")
+            partsCount = db.query("SELECT COUNT(*) AS c FROM message_parts WHERE message_id=?", listOf(msg.id)).single().long("c")
+            assertEquals(1L, partsCount)
+            val finalRow = db.query("SELECT ordinal, payload_json FROM message_parts WHERE message_id=?", listOf(msg.id)).single()
+            assertEquals(0L, finalRow.long("ordinal"))
+            assertEquals(true, finalRow.string("payload_json").contains("Final Answer"))
+        }
+    }
+
+    @Test
+    fun checkpointTerminalStatusRejectsSubsequentCheckpoints() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val snapshotId = createSnapshot(db)
+            val repo = ConversationRepository(db)
+            val conv = repo.create(snapshotId, "Terminal", "conversation.terminal")
+
+            val initial = repo.append(
+                conv.id,
+                MessageRole.ASSISTANT,
+                text = "Done",
+                status = "COMPLETE",
+                parts = listOf(TextPart("Done")),
+            )
+
+            // Calling checkpoint on COMPLETE message returns stored row unaltered
+            val afterAttempt = repo.checkpointAssistant(
+                initial.id,
+                text = "Should not apply",
+                parts = listOf(TextPart("Should not apply")),
+                status = "STREAMING",
+            )
+            assertEquals("Done", afterAttempt.text)
+            assertEquals("COMPLETE", afterAttempt.status)
+
+            val partRow = db.query("SELECT payload_json FROM message_parts WHERE message_id=?", listOf(initial.id)).single()
+            assertEquals(true, partRow.string("payload_json").contains("Done"))
+        }
+    }
+
+    @Test
+    fun checkpointNonAssistantAndNonexistentThrowsInvalidConfig() {
+        JdbcSqlConnection().use { db ->
+            Migrations.apply(db)
+            val snapshotId = createSnapshot(db)
+            val repo = ConversationRepository(db)
+            val conv = repo.create(snapshotId, "Validation", "conversation.val")
+
+            val userMsg = repo.append(conv.id, MessageRole.USER, text = "User message")
+            val err1 = assertThrows(AppException::class.java) {
+                repo.checkpointAssistant(userMsg.id, "Attempt", listOf(TextPart("Attempt")))
+            }
+            assertEquals(runtime.mobileagent.domain.ErrorCode.INVALID_CONFIG, err1.error.code)
+
+            val err2 = assertThrows(AppException::class.java) {
+                repo.checkpointAssistant("nonexistent-msg", "Attempt", listOf(TextPart("Attempt")))
+            }
+            assertEquals(runtime.mobileagent.domain.ErrorCode.INVALID_CONFIG, err2.error.code)
         }
     }
 

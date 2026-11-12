@@ -153,9 +153,9 @@ private const val WIRED_PAIRING_TOKEN_HEX = "0123456789abcdefABCDEF"
  * [SettingsAuthorityPortProvider]. This keeps UI code from creating a second
  * persistence/database truth while those adapters are assembled.
  */
-interface SettingsAuthorityPort {
-    fun snapshot(): SettingsAuthoritySnapshot
-    fun refresh(): SettingsAuthoritySnapshot
+interface SettingsAuthorityPort : runtime.mobileagent.integration.AuthorityQueryPort {
+    override fun snapshot(): SettingsAuthoritySnapshot
+    override fun refresh(): SettingsAuthoritySnapshot
 
     fun selectAuthority(authority: Authority): SettingsAuthoritySnapshot
     fun setUserIntent(authority: Authority, enabled: Boolean): SettingsAuthoritySnapshot

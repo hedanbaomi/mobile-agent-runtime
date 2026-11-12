@@ -7,7 +7,11 @@ import java.io.File
 import runtime.mobileagent.domain.AppError
 import runtime.mobileagent.domain.ErrorCode
 import runtime.mobileagent.domain.RetryClass
+import runtime.mobileagent.knowledge.BatchTextEmbedder
+import runtime.mobileagent.knowledge.CancellableBatchTextEmbedder
 import runtime.mobileagent.knowledge.TextEmbedder
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.text.Normalizer
 import java.util.Locale
 import kotlinx.serialization.Serializable
@@ -94,7 +98,7 @@ internal class BertWordPieceTokenizer(
     private val maxInputCharsPerWord: Int
     private val clsId: Int
     private val sepId: Int
-    private val padId: Int
+    internal val padId: Int
     private val unknownId: Int
     private val lowercase: Boolean
     private val stripAccents: Boolean
@@ -127,7 +131,17 @@ internal class BertWordPieceTokenizer(
         val inputIds: LongArray,
         val attentionMask: LongArray,
         val tokenTypeIds: LongArray,
-    )
+    ) {
+        override fun equals(other: Any?): Boolean =
+            this === other || (other is Encoded &&
+                inputIds.contentEquals(other.inputIds) &&
+                attentionMask.contentEquals(other.attentionMask) &&
+                tokenTypeIds.contentEquals(other.tokenTypeIds))
+
+        override fun hashCode(): Int =
+            (inputIds.contentHashCode() * 31 + attentionMask.contentHashCode()) * 31 +
+                tokenTypeIds.contentHashCode()
+    }
 
     fun encode(text: String): Encoded {
         val windows = encodeWindows(text)
@@ -275,104 +289,147 @@ internal class BertWordPieceTokenizer(
  * loading the pack through [AndroidModelPackLoader], which verifies both
  * hashes before this class opens the model file.
  */
-class OnnxTextEmbedder(
+class OnnxTextEmbedder internal constructor(
     private val pack: OnnxModelPack,
-) : TextEmbedder, EmbeddingPort, AutoCloseable {
+    private val runner: OnnxSessionRunner,
+) : TextEmbedder, BatchTextEmbedder, CancellableBatchTextEmbedder, EmbeddingPort, AutoCloseable {
+    companion object {
+        const val CHUNK_SIZE = 16
+        const val MAX_BATCH_SIZE = CHUNK_SIZE
+    }
+
+    constructor(pack: OnnxModelPack) : this(
+        pack = pack.also(::validateModelPackManifest),
+        runner = OrtSessionRunner(pack.modelFile),
+    )
+
     override val spaceId: String = pack.manifest.spaceId.ifBlank {
         "onnx:${pack.manifest.id}@${pack.manifest.revision}:d${pack.manifest.dimension}:${pack.manifest.distance}"
     }
     override val dimension: Int = pack.manifest.dimension
 
-    private val tokenizer = BertWordPieceTokenizer(
-        pack.tokenizerFile.readText(Charsets.UTF_8),
-        pack.manifest.maxSequenceLength,
-    )
-    private val environment = ai.onnxruntime.OrtEnvironment.getEnvironment()
-    private val projection = pack.projectionFile?.let {
-        DenseProjection(it.readBytes(), pack.manifest.hiddenDimension, dimension)
-    }
-    private val session = ai.onnxruntime.OrtSession.SessionOptions().use { options ->
-        options.setIntraOpNumThreads(2)
-        options.setInterOpNumThreads(1)
-        environment.createSession(pack.modelFile.absolutePath, options)
-    }
-    private val windowCache = EmbeddingWindowCache()
+    internal val tokenizer: BertWordPieceTokenizer
+    private val projection: DenseProjection?
+    internal val coordinator = OnnxRuntimeCoordinator(runner)
 
     init {
-        require(pack.manifest.pooling.equals("mean", ignoreCase = true)) {
-            "Only mean pooling is supported by the Android local embedder"
-        }
-        require(pack.manifest.distance.equals("cosine", ignoreCase = true)) {
-            "Only cosine distance is supported by the Android local embedder"
-        }
-        require(dimension > 0) { "Model pack dimension must be positive" }
-        require(pack.manifest.windowStrategy == "sentence-bounded-coverage-mean-v3")
-        require(projection != null || pack.manifest.hiddenDimension == dimension)
-    }
-
-    override fun embed(text: String): FloatArray {
-        val windows = tokenizer.encodeWindows(text)
-        val pooled = FloatArray(dimension)
-        windows.forEach { window ->
-            val vector = embedWindow(window)
-            for (i in pooled.indices) pooled[i] += vector[i] / windows.size
-        }
-        return normalize(pooled)
-    }
-
-    private fun embedWindow(encoded: BertWordPieceTokenizer.Encoded): FloatArray = windowCache.vector(encoded) {
-        val inputs = linkedMapOf<String, ai.onnxruntime.OnnxTensor>()
         try {
-            inputs["input_ids"] = ai.onnxruntime.OnnxTensor.createTensor(environment, arrayOf(encoded.inputIds))
-            inputs["attention_mask"] = ai.onnxruntime.OnnxTensor.createTensor(environment, arrayOf(encoded.attentionMask))
-            if ("token_type_ids" in session.inputNames) {
-                inputs["token_type_ids"] = ai.onnxruntime.OnnxTensor.createTensor(environment, arrayOf(encoded.tokenTypeIds))
+            validateModelPackManifest(pack)
+            tokenizer = BertWordPieceTokenizer(
+                pack.tokenizerFile.readText(Charsets.UTF_8),
+                pack.manifest.maxSequenceLength,
+            )
+            projection = pack.projectionFile?.let {
+                DenseProjection(it.readBytes(), pack.manifest.hiddenDimension, dimension)
             }
-            synchronized(session) {
-                session.run(inputs).use { result ->
-                    val output = result[pack.manifest.outputName].orElseThrow {
-                        IllegalStateException("ONNX output ${pack.manifest.outputName} is missing")
-                    }.value
-                    val pooled = meanPool(output, encoded.attentionMask)
-                    normalize(projection?.apply(pooled) ?: pooled)
+        } catch (failure: Throwable) {
+            runCatching { coordinator.close() }
+            throw failure
+        }
+    }
+
+    override fun embed(text: String): FloatArray = embedBatch(listOf(text)).single()
+
+    override fun embedBatch(texts: List<String>): List<FloatArray> =
+        coordinator.withLease {
+            embedBatchWithCoordinator(
+                texts = texts,
+                checkCancellation = {
+                    if (Thread.currentThread().isInterrupted) {
+                        throw InterruptedException("Local embedding interrupted")
+                    }
+                },
+                awaitSlot = { slot -> slot.awaitBlocking() },
+            )
+        }
+
+    override suspend fun embedBatchCancellable(texts: List<String>): List<FloatArray> {
+        val context = currentCoroutineContext()
+        return coordinator.withLease {
+            embedBatchWithCoordinator(
+                texts = texts,
+                checkCancellation = {
+                    context.ensureActive()
+                    if (Thread.currentThread().isInterrupted) {
+                        throw InterruptedException("Local embedding interrupted")
+                    }
+                },
+                awaitSlot = { slot -> slot.awaitSuspend() },
+            )
+        }
+    }
+
+    override suspend fun embed(texts: List<String>): List<FloatArray> = embedBatchCancellable(texts)
+
+    private inline fun embedBatchWithCoordinator(
+        texts: List<String>,
+        noinline checkCancellation: () -> Unit,
+        awaitSlot: (InFlightWindow) -> FloatArray?,
+    ): List<FloatArray> {
+        checkCancellation()
+        if (texts.isEmpty()) return emptyList()
+        val docWindows = texts.map { tokenizer.encodeWindows(it) }
+        val uniqueWindows = LinkedHashSet<BertWordPieceTokenizer.Encoded>()
+        for (windows in docWindows) {
+            uniqueWindows.addAll(windows)
+        }
+        val windowVectors = coordinator.resolveWindows(
+            uniqueWindows = uniqueWindows,
+            chunkSize = CHUNK_SIZE,
+            checkCancellation = checkCancellation,
+            inferBatch = ::inferBatchWindows,
+            awaitSlot = awaitSlot,
+        )
+        checkCancellation()
+
+        return docWindows.map { windows ->
+            val pooled = FloatArray(dimension)
+            for (window in windows) {
+                val vec = windowVectors.getValue(window)
+                for (i in pooled.indices) {
+                    pooled[i] += vec[i] / windows.size
                 }
             }
-        } finally {
-            inputs.values.forEach { it.close() }
+            l2Normalize(pooled, pack.manifest.normalize)
         }
     }
 
-    override suspend fun embed(texts: List<String>): List<FloatArray> = texts.map(::embed)
+    private fun inferBatchWindows(
+        batch: List<BertWordPieceTokenizer.Encoded>,
+        checkCancellation: () -> Unit,
+    ): List<FloatArray> {
+        val padded = buildPaddedBatchInputs(
+            batch = batch,
+            padTokenId = tokenizer.padId.toLong(),
+            includeTokenTypeIds = "token_type_ids" in runner.inputNames,
+        )
+        val inputs = linkedMapOf<String, OnnxBatchTensor>()
+        var primaryFailure: Throwable? = null
+        try {
+            inputs["input_ids"] = runner.createLongBatchTensor(padded.inputIds)
+            inputs["attention_mask"] = runner.createLongBatchTensor(padded.attentionMask)
+            if (padded.tokenTypeIds != null) {
+                inputs["token_type_ids"] = runner.createLongBatchTensor(padded.tokenTypeIds)
+            }
+            checkCancellation()
+            val rawOutput = runner.run(inputs, pack.manifest.outputName)
+            return meanPoolAndNormalizeBatch(
+                output = rawOutput,
+                windows = batch,
+                maxSeqLen = padded.maxSequenceLength,
+                hiddenDimension = pack.manifest.hiddenDimension,
+                normalizeOutput = pack.manifest.normalize,
+                projection = projection,
+            )
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
+        } finally {
+            closeBatchTensors(inputs.values, primaryFailure)
+        }
+    }
 
     override fun close() {
-        windowCache.close { session.close() }
-    }
-
-    private fun meanPool(output: Any, mask: LongArray): FloatArray {
-        val batch = output as? Array<*> ?: error("ONNX output is not a tensor batch")
-        val rows = batch.firstOrNull() as? Array<*> ?: error("ONNX output has no sequence rows")
-        require(rows.size == mask.size) { "ONNX output sequence length differs from tokenizer" }
-        val pooled = FloatArray(pack.manifest.hiddenDimension)
-        var count = 0L
-        rows.forEachIndexed { index, rowValue ->
-            if (mask[index] == 0L) return@forEachIndexed
-            val row = rowValue as? FloatArray ?: error("ONNX output row is not float32")
-            require(row.size == pooled.size) { "ONNX output dimension differs from manifest" }
-            for (i in row.indices) pooled[i] += row[i]
-            count++
-        }
-        require(count > 0) { "ONNX tokenizer produced an empty attention mask" }
-        for (i in pooled.indices) pooled[i] /= count.toFloat()
-        return pooled
-    }
-
-    private fun normalize(vector: FloatArray): FloatArray {
-        if (!pack.manifest.normalize) return vector
-        var norm = 0.0
-        vector.forEach { norm += it * it }
-        val scale = kotlin.math.sqrt(norm).toFloat()
-        require(scale.isFinite() && scale > 1e-12f) { "ONNX embedding has zero norm" }
-        for (i in vector.indices) vector[i] /= scale
-        return vector
+        coordinator.close()
     }
 }

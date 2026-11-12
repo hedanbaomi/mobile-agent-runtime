@@ -2,14 +2,82 @@
 # SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
 # SPDX-License-Identifier: AGPL-3.0-only
 set -euo pipefail
-suite=${1:?suite required}
-variant=${2:-Debug}
+
+prebuilt_apk_dir="${PREBUILT_APK_DIR:-}"
+filter_package=""
+declare -a extra_runner_args=()
+declare -a positional=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --prebuilt-apk-dir)
+      [[ $# -ge 2 && -n $2 ]] || { echo "run-device-suite: --prebuilt-apk-dir requires a directory path" >&2; exit 2; }
+      prebuilt_apk_dir=$2
+      shift 2
+      ;;
+    --prebuilt-apk-dir=*)
+      prebuilt_apk_dir=${1#*=}
+      [[ -n $prebuilt_apk_dir ]] || { echo "run-device-suite: --prebuilt-apk-dir requires a directory path" >&2; exit 2; }
+      shift
+      ;;
+    --package)
+      [[ $# -ge 2 && -n $2 ]] || { echo "run-device-suite: --package requires a package name" >&2; exit 2; }
+      filter_package=$2
+      shift 2
+      ;;
+    --package=*)
+      filter_package=${1#*=}
+      [[ -n $filter_package ]] || { echo "run-device-suite: --package requires a package name" >&2; exit 2; }
+      shift
+      ;;
+    --runner-arg)
+      [[ $# -ge 2 && $2 == *=* ]] || { echo "run-device-suite: --runner-arg requires KEY=VALUE" >&2; exit 2; }
+      extra_runner_args+=("$2")
+      shift 2
+      ;;
+    --runner-arg=*)
+      val=${1#*=}
+      [[ $val == *=* ]] || { echo "run-device-suite: --runner-arg requires KEY=VALUE" >&2; exit 2; }
+      extra_runner_args+=("$val")
+      shift
+      ;;
+    --)
+      shift
+      while [[ $# -gt 0 ]]; do positional+=("$1"); shift; done
+      ;;
+    -*)
+      echo "run-device-suite: unknown option: $1" >&2
+      exit 2
+      ;;
+    *)
+      positional+=("$1")
+      shift
+      ;;
+  esac
+done
+
+[[ ${#positional[@]} -ge 1 ]] || { echo "run-device-suite: suite required" >&2; exit 2; }
+suite=${positional[0]}
+variant=${positional[1]:-Debug}
+api_arg=${positional[2]:-}
+
 case "$variant" in Debug) build_type=debug ;; Review) build_type=review ;; *) exit 2 ;; esac
 if [[ $suite == smoke-api ]]; then
-  if [[ ${3:-} == 26 ]]; then suite=minimum; else suite=smoke; fi
+  if [[ $api_arg == 26 ]]; then suite=minimum; else suite=smoke; fi
 fi
+
+if [[ -n $prebuilt_apk_dir ]]; then
+  if [[ ! -d $prebuilt_apk_dir ]]; then
+    echo "run-device-suite: prebuilt APK directory does not exist: $prebuilt_apk_dir" >&2
+    exit 2
+  fi
+  prebuilt_apk_dir=$(cd -- "$prebuilt_apk_dir" && (pwd -W 2>/dev/null || pwd))
+fi
+
 cd -- "$(dirname -- "$0")/.."
-groups=$(python3 tools/verify_test_selection.py --suite "$suite" --groups)
+groups_py=python3
+command -v python3 >/dev/null 2>&1 || groups_py=python
+groups=$("$groups_py" tools/verify_test_selection.py --suite "$suite" --groups | tr -d '\r')
 evidence_root=app-android/build/reports/device-evidence
 if [[ -d $evidence_root ]]; then
   previous=$(mktemp -d app-android/build/reports/previous-device-evidence.XXXXXX)
@@ -17,18 +85,525 @@ if [[ -d $evidence_root ]]; then
 fi
 mkdir -p "$evidence_root"
 evidence=$(mktemp -d "$evidence_root/invocation.XXXXXX")
+serial="${ANDROID_SERIAL:-emulator-${EMULATOR_PORT:-5554}}"
 capture_failure() {
   status=$?
   if [[ $status != 0 ]]; then
     # Fresh CI AVD with synthetic fixtures only; never attach this runner to a personal device.
-    adb -s "${ANDROID_SERIAL:-emulator-${EMULATOR_PORT:-5554}}" logcat -d -t 2000 > "$evidence/first-failure.log" 2>/dev/null || true
-    adb -s "${ANDROID_SERIAL:-emulator-${EMULATOR_PORT:-5554}}" exec-out screencap -p > "$evidence/first-failure.png" 2>/dev/null || true
+    adb -s "$serial" logcat -d -t 2000 > "$evidence/first-failure.log" 2>/dev/null || true
+    adb -s "$serial" exec-out screencap -p > "$evidence/first-failure.png" 2>/dev/null || true
   fi
   exit "$status"
 }
 trap capture_failure EXIT
+
+py_bin=""
+runner_component="runtime.mobileagent.test/runtime.mobileagent.PythonRuntimeDeviceTestRunner"
+if [[ -n $prebuilt_apk_dir ]]; then
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 && [[ $("$candidate" -c "import sys; print('MAR_PY3_OK')" 2>/dev/null | tr -d '\r' || true) == "MAR_PY3_OK" ]]; then
+      py_bin=$candidate
+      break
+    fi
+  done
+  [[ -n $py_bin ]] || { echo "run-device-suite: Python 3 interpreter required for prebuilt APK mode" >&2; exit 2; }
+
+  resolved_apks=$("$py_bin" - "$prebuilt_apk_dir" "$build_type" <<'PY'
+# MAR_APK_CONTRACT_VALIDATOR_BEGIN
+import os
+import pathlib
+import re
+import struct
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+import zipfile
+
+apk_dir = pathlib.Path(sys.argv[1])
+build_type = sys.argv[2]
+expected_app_id = "runtime.mobileagent"
+expected_test_id = "runtime.mobileagent.test"
+expected_runner = "runtime.mobileagent.PythonRuntimeDeviceTestRunner"
+expected_debuggable = "true" if build_type == "debug" else "false"
+other_types = {"debug", "review", "release"} - {build_type}
+
+all_apks = sorted(p for p in apk_dir.rglob("*.apk") if p.is_file())
+raw_test = [p for p in all_apks if p.name.endswith("-androidTest.apk")]
+raw_main = [p for p in all_apks if not p.name.endswith("-androidTest.apk")]
+
+typed_test = [p for p in raw_test if p.name.endswith(f"-{build_type}-androidTest.apk")]
+test_candidates = typed_test or [
+    p for p in raw_test if not any(p.name.endswith(f"-{other}-androidTest.apk") for other in other_types)
+]
+typed_main = [p for p in raw_main if p.name.endswith(f"-{build_type}.apk")]
+main_candidates = typed_main or [
+    p for p in raw_main if not any(p.name.endswith(f"-{other}.apk") for other in other_types)
+]
+
+if len(main_candidates) != 1 or len(test_candidates) != 1:
+    sys.stderr.write(
+        f"run-device-suite: expected exactly 1 {build_type} target APK and 1 androidTest APK in {apk_dir}, "
+        f"found main={[str(p) for p in main_candidates]} test={[str(p) for p in test_candidates]}\n"
+    )
+    sys.exit(2)
+
+main_apk, test_apk = main_candidates[0], test_candidates[0]
+for label, apk in (("target", main_apk), ("androidTest", test_apk)):
+    if apk.stat().st_size <= 0 or not zipfile.is_zipfile(apk):
+        sys.stderr.write(f"run-device-suite: invalid or empty {label} APK: {apk}\n")
+        sys.exit(2)
+    with zipfile.ZipFile(apk) as zf:
+        names = set(zf.namelist())
+        if "AndroidManifest.xml" not in names or not any(n.endswith(".dex") for n in names):
+            sys.stderr.write(f"run-device-suite: {label} APK missing AndroidManifest.xml or dex payload: {apk}\n")
+            sys.exit(2)
+
+
+def normalize_bool_attr(raw: str) -> str:
+    lowered = raw.strip().lower()
+    if lowered in ("true", "1", "-1", "0xffffffff"):
+        return "true"
+    if lowered in ("false", "0", "0x0", "0x00000000", ""):
+        return "false"
+    return lowered
+
+
+def parse_aapt_boolean(token: str) -> str | None:
+    """Decode a boolean `(type 0x12)` attribute payload by its numeric value.
+
+    classic aapt prints the payload with no separating space (`(type 0x12)0x0`
+    and `(type 0x12)0xffffffff`), while aapt2 may print `(type 0x12) 0x0`.
+    Both spellings must decode to the same boolean.
+    """
+    match = re.match(r"^\(type 0x12\)\s*(0x[0-9a-fA-F]+|-?\d+)\s*$", token.strip())
+    if match is None:
+        return None
+    payload = match.group(1)
+    value = int(payload, 16) if payload.lower().startswith("0x") else int(payload, 10)
+    # TYPE_INT_BOOLEAN: any non-zero payload is true, zero is false.
+    return "true" if value != 0 else "false"
+
+
+def expand_component(pkg: str, raw_name: str) -> str:
+    name = raw_name.strip()
+    if not name:
+        return ""
+    if name.startswith("."):
+        return f"{pkg}{name}"
+    if "." not in name and pkg:
+        return f"{pkg}.{name}"
+    return name
+
+
+def discover_sdk_roots() -> list[pathlib.Path]:
+    roots: list[pathlib.Path] = []
+    for env_name in ("ANDROID_SDK_ROOT", "ANDROID_HOME"):
+        val = os.environ.get(env_name, "").strip()
+        if val:
+            roots.append(pathlib.Path(val))
+    if os.environ.get("MAR_DISABLE_DEFAULT_SDK_PROBE", "") != "1":
+        local_props = pathlib.Path("local.properties")
+        if local_props.is_file():
+            for line in local_props.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.startswith("sdk.dir="):
+                    raw = line.split("=", 1)[1].replace("\\\\", "\\").replace("\\:", ":").strip()
+                    if raw:
+                        roots.append(pathlib.Path(raw))
+        home = pathlib.Path.home()
+        local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_app_data:
+            roots.append(pathlib.Path(local_app_data) / "Android" / "Sdk")
+        roots.extend([
+            home / "Android" / "Sdk",
+            home / "Library" / "Android" / "sdk",
+            pathlib.Path("/usr/local/lib/android/sdk"),
+        ])
+    deduped: list[pathlib.Path] = []
+    seen: set[str] = set()
+    for candidate in roots:
+        key = str(candidate)
+        if key not in seen and candidate.is_dir():
+            seen.add(key)
+            deduped.append(candidate)
+    return deduped
+
+
+def find_tool(sdk_roots: list[pathlib.Path], sdk_globs: list[str], binary_names: tuple[str, ...]) -> pathlib.Path | None:
+    for sdk in sdk_roots:
+        for pattern in sdk_globs:
+            matched_dirs = sorted(sdk.glob(pattern), reverse=True)
+            for directory in matched_dirs:
+                for name in binary_names:
+                    cand = directory / name
+                    if cand.is_file():
+                        return cand
+    for path_dir in os.environ.get("PATH", "").split(os.pathsep):
+        if not path_dir:
+            continue
+        for name in binary_names:
+            cand = pathlib.Path(path_dir) / name
+            if cand.is_file():
+                return cand
+    return None
+
+
+def run_tool(tool_path: pathlib.Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+    cmd = (
+        [os.environ.get("ComSpec", "cmd.exe"), "/d", "/c", str(tool_path)] + args
+        if tool_path.suffix.lower() in (".bat", ".cmd")
+        else [str(tool_path)] + args
+    )
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
+def parse_manifest_xml_text(manifest_xml: str) -> tuple[str, str, list[tuple[str, str]]]:
+    root = ET.fromstring(manifest_xml)
+    if root.tag != "manifest":
+        raise ValueError(f"unexpected root tag {root.tag!r}")
+    pkg = root.attrib.get("package", "").strip()
+    if not pkg:
+        raise ValueError("manifest missing package attribute")
+    android_ns = "{http://schemas.android.com/apk/res/android}"
+    app_node = root.find("application")
+    dbg_raw = app_node.attrib.get(f"{android_ns}debuggable", "false") if app_node is not None else "false"
+    dbg = normalize_bool_attr(dbg_raw)
+    insts: list[tuple[str, str]] = []
+    for node in root.findall("instrumentation"):
+        rname = expand_component(pkg, node.attrib.get(f"{android_ns}name", ""))
+        tpkg = node.attrib.get(f"{android_ns}targetPackage", "").strip()
+        insts.append((rname, tpkg))
+    return pkg, dbg, insts
+
+
+def parse_aapt_xmltree(xmltree_text: str) -> tuple[str, str, list[tuple[str, str]]]:
+    pkg = ""
+    dbg = "false"
+    insts: list[tuple[str, str]] = []
+    elem_stack: list[tuple[int, str, dict[str, str]]] = []
+
+    def flush_popped(tag: str, attrs: dict[str, str]) -> None:
+        nonlocal pkg, dbg
+        if tag == "manifest" and not pkg:
+            pkg = attrs.get("package", "").strip()
+        elif tag == "application":
+            dbg = normalize_bool_attr(attrs.get("android:debuggable", attrs.get("debuggable", "false")))
+        elif tag == "instrumentation":
+            insts.append((
+                attrs.get("android:name", attrs.get("name", "")).strip(),
+                attrs.get("android:targetPackage", attrs.get("targetPackage", "")).strip(),
+            ))
+
+    for raw_line in xmltree_text.splitlines():
+        stripped = raw_line.lstrip(" ")
+        indent = len(raw_line) - len(stripped)
+        if stripped.startswith("E: "):
+            while elem_stack and elem_stack[-1][0] >= indent:
+                _, old_tag, old_attrs = elem_stack.pop()
+                flush_popped(old_tag, old_attrs)
+            tag = stripped[3:].split()[0].strip()
+            elem_stack.append((indent, tag, {}))
+        elif stripped.startswith("A: ") and elem_stack and "=" in stripped:
+            key_part, val_part = stripped[3:].split("=", 1)
+            key_clean = re.sub(r"\(0x[0-9a-fA-F]+\)$", "", key_part.strip())
+            if ":" in key_clean:
+                ns_prefix, local_attr = key_clean.rsplit(":", 1)
+                if ns_prefix == "android" or ns_prefix.endswith("schemas.android.com/apk/res/android"):
+                    key_clean = f"android:{local_attr}"
+            val_clean = val_part.strip()
+            qmatch = re.match(r'^"([^"]*)"', val_clean)
+            if qmatch is not None:
+                parsed_val = qmatch.group(1)
+            else:
+                bool_val = parse_aapt_boolean(val_clean)
+                if bool_val is not None:
+                    parsed_val = bool_val
+                else:
+                    parsed_val = val_clean.split()[0] if val_clean else ""
+            elem_stack[-1][2][key_clean] = parsed_val
+
+    while elem_stack:
+        _, old_tag, old_attrs = elem_stack.pop()
+        flush_popped(old_tag, old_attrs)
+
+    if not pkg:
+        raise ValueError("aapt xmltree missing manifest package")
+    expanded = [(expand_component(pkg, r), t) for r, t in insts]
+    return pkg, dbg, expanded
+
+
+def parse_binary_axml(data: bytes) -> tuple[str, str, list[tuple[str, str]]]:
+    if len(data) < 8:
+        raise ValueError("AXML buffer shorter than 8-byte ResChunk_header")
+    top_type, top_header, top_size = struct.unpack_from("<HHI", data, 0)
+    if top_type != 0x0003 or top_header < 8 or top_size > len(data) or top_size < top_header:
+        raise ValueError(f"invalid AXML header: type=0x{top_type:04x} header={top_header} size={top_size} len={len(data)}")
+
+    strings: list[str] = []
+    res_ids: list[int] = []
+    pkg = ""
+    dbg = "false"
+    saw_manifest = False
+    raw_insts: list[tuple[str, str]] = []
+
+    ATTR_RES_MAP = {
+        0x01010003: "android:name",
+        0x0101000F: "android:debuggable",
+        0x01010021: "android:targetPackage",
+    }
+
+    offset = top_header
+    while offset + 8 <= top_size:
+        ctype, cheader, csize = struct.unpack_from("<HHI", data, offset)
+        if cheader < 8 or csize < cheader or offset + csize > top_size:
+            raise ValueError(f"corrupt AXML chunk at {offset}: type=0x{ctype:04x} header={cheader} size={csize}")
+
+        if ctype == 0x0001:
+            if cheader < 28:
+                raise ValueError(f"short AXML string pool header: {cheader}")
+            scount, _style_count, flags, strings_start, _styles_start = struct.unpack_from("<IIIII", data, offset + 8)
+            offsets_pos = offset + cheader
+            if offsets_pos + scount * 4 > offset + csize:
+                raise ValueError("AXML string pool offsets exceed chunk bounds")
+            str_offsets = struct.unpack_from(f"<{scount}I", data, offsets_pos) if scount else ()
+            pool_base = offset + strings_start
+            is_utf8 = bool(flags & 0x0100)
+            strings = []
+            for rel_off in str_offsets:
+                pos = pool_base + rel_off
+                if pos >= offset + csize:
+                    raise ValueError("AXML string offset out of bounds")
+                if is_utf8:
+                    b0 = data[pos]
+                    pos += 2 if (b0 & 0x80) else 1
+                    if pos >= offset + csize:
+                        raise ValueError("AXML UTF-8 length truncated")
+                    b1 = data[pos]
+                    if b1 & 0x80:
+                        if pos + 1 >= offset + csize:
+                            raise ValueError("AXML UTF-8 2-byte length truncated")
+                        blen = ((b1 & 0x7F) << 8) | data[pos + 1]
+                        pos += 2
+                    else:
+                        blen = b1
+                        pos += 1
+                    if pos + blen > offset + csize:
+                        raise ValueError("AXML UTF-8 string data out of bounds")
+                    strings.append(data[pos : pos + blen].decode("utf-8", errors="replace"))
+                else:
+                    if pos + 2 > offset + csize:
+                        raise ValueError("AXML UTF-16 length truncated")
+                    u0 = struct.unpack_from("<H", data, pos)[0]
+                    if u0 & 0x8000:
+                        if pos + 4 > offset + csize:
+                            raise ValueError("AXML UTF-16 4-byte length truncated")
+                        ulen = ((u0 & 0x7FFF) << 16) | struct.unpack_from("<H", data, pos + 2)[0]
+                        pos += 4
+                    else:
+                        ulen = u0
+                        pos += 2
+                    byte_end = pos + ulen * 2
+                    if byte_end > offset + csize:
+                        raise ValueError("AXML UTF-16 string data out of bounds")
+                    strings.append(data[pos:byte_end].decode("utf-16-le", errors="replace"))
+        elif ctype == 0x0180:
+            body_bytes = csize - cheader
+            if body_bytes % 4 != 0:
+                raise ValueError("AXML resource map size not multiple of 4")
+            rcount = body_bytes // 4
+            res_ids = list(struct.unpack_from(f"<{rcount}I", data, offset + cheader)) if rcount else []
+        elif ctype == 0x0102:
+            ext = offset + cheader
+            if ext + 20 > offset + csize:
+                raise ValueError("AXML start element header truncated")
+            _ns_idx, name_idx, attr_start, attr_size, attr_count = struct.unpack_from("<IIHHH", data, ext)
+            if name_idx >= len(strings) or (attr_count > 0 and attr_size < 20):
+                raise ValueError("AXML start element references invalid string or attr_size")
+            tag = strings[name_idx]
+            attr_base = ext + attr_start
+            if attr_base + attr_count * attr_size > offset + csize:
+                raise ValueError("AXML attributes exceed element chunk bounds")
+            attrs: dict[str, str] = {}
+            for idx in range(attr_count):
+                apos = attr_base + idx * attr_size
+                a_ns, a_name_idx, a_raw_val, _tsize, _zero, a_dtype, a_dval = struct.unpack_from("<IIIHBBI", data, apos)
+                res_id = res_ids[a_name_idx] if a_name_idx < len(res_ids) else 0
+                if res_id in ATTR_RES_MAP:
+                    attr_key = ATTR_RES_MAP[res_id]
+                elif a_name_idx < len(strings):
+                    raw_attr = strings[a_name_idx]
+                    if a_ns != 0xFFFFFFFF and a_ns < len(strings) and "schemas.android.com/apk/res/android" in strings[a_ns]:
+                        attr_key = f"android:{raw_attr}"
+                    else:
+                        attr_key = raw_attr
+                else:
+                    continue
+
+                if a_dtype == 0x03 and a_dval < len(strings):
+                    attr_val = strings[a_dval]
+                elif a_raw_val != 0xFFFFFFFF and a_raw_val < len(strings):
+                    attr_val = strings[a_raw_val]
+                elif a_dtype == 0x12:
+                    attr_val = "true" if a_dval != 0 else "false"
+                elif a_dtype in (0x10, 0x11):
+                    attr_val = str(a_dval)
+                else:
+                    attr_val = f"0x{a_dval:08x}"
+                attrs[attr_key] = attr_val
+
+            if tag == "manifest" and not saw_manifest:
+                saw_manifest = True
+                pkg = attrs.get("package", "").strip()
+            elif tag == "application":
+                dbg = normalize_bool_attr(attrs.get("android:debuggable", attrs.get("debuggable", "false")))
+            elif tag == "instrumentation":
+                raw_insts.append((
+                    attrs.get("android:name", attrs.get("name", "")).strip(),
+                    attrs.get("android:targetPackage", attrs.get("targetPackage", "")).strip(),
+                ))
+
+        offset += csize
+
+    if not saw_manifest or not pkg:
+        raise ValueError("AXML manifest missing <manifest package=...>")
+    expanded = [(expand_component(pkg, r), t) for r, t in raw_insts]
+    return pkg, dbg, expanded
+
+
+sdk_roots = discover_sdk_roots()
+backend_pref = os.environ.get("MAR_MANIFEST_BACKEND", "auto").strip().lower()
+analyzer_names = ("apkanalyzer.bat", "apkanalyzer") if os.name == "nt" else ("apkanalyzer",)
+aapt2_names = ("aapt2.exe", "aapt2") if os.name == "nt" else ("aapt2",)
+aapt_names = ("aapt.exe", "aapt") if os.name == "nt" else ("aapt",)
+
+analyzer_bin = (
+    find_tool(sdk_roots, ["cmdline-tools/latest/bin", "cmdline-tools/*/bin", "tools/bin"], analyzer_names)
+    if backend_pref in ("auto", "apkanalyzer")
+    else None
+)
+aapt2_bin = (
+    find_tool(sdk_roots, ["build-tools/*"], aapt2_names)
+    if backend_pref in ("auto", "aapt")
+    else None
+)
+aapt_bin = (
+    find_tool(sdk_roots, ["build-tools/*"], aapt_names)
+    if backend_pref in ("auto", "aapt") and aapt2_bin is None
+    else None
+)
+
+
+def extract_manifest_contract(apk_path: pathlib.Path, label: str) -> tuple[str, str, list[tuple[str, str]]]:
+    with zipfile.ZipFile(apk_path) as zf:
+        raw_manifest = zf.read("AndroidManifest.xml")
+
+    try:
+        axml_contract = parse_binary_axml(raw_manifest)
+    except Exception as exc:
+        sys.stderr.write(f"run-device-suite: failed to parse binary AndroidManifest.xml in {label} APK {apk_path}: {exc}\n")
+        sys.exit(2)
+
+    if backend_pref == "axml":
+        return axml_contract
+
+    if analyzer_bin is not None and backend_pref in ("auto", "apkanalyzer"):
+        proc = run_tool(analyzer_bin, ["manifest", "print", str(apk_path)])
+        if proc.returncode == 0 and proc.stdout.strip():
+            try:
+                ext_contract = parse_manifest_xml_text(proc.stdout)
+                if ext_contract[:2] != axml_contract[:2]:
+                    sys.stderr.write(
+                        f"run-device-suite: manifest mismatch between apkanalyzer {ext_contract[:2]} and AXML {axml_contract[:2]} for {apk_path}\n"
+                    )
+                    sys.exit(2)
+                return ext_contract
+            except Exception as exc:
+                if backend_pref == "apkanalyzer":
+                    sys.stderr.write(f"run-device-suite: apkanalyzer manifest parse failed for {apk_path}: {exc}\n")
+                    sys.exit(2)
+        elif backend_pref == "apkanalyzer":
+            sys.stderr.write(f"run-device-suite: apkanalyzer failed for {apk_path}: {proc.stdout}{proc.stderr}\n")
+            sys.exit(2)
+    elif backend_pref == "apkanalyzer":
+        sys.stderr.write("run-device-suite: MAR_MANIFEST_BACKEND=apkanalyzer requested but apkanalyzer not found\n")
+        sys.exit(2)
+
+    aapt_tool = aapt2_bin or aapt_bin
+    if aapt_tool is not None and backend_pref in ("auto", "aapt"):
+        args = (
+            ["dump", "xmltree", str(apk_path), "--file", "AndroidManifest.xml"]
+            if aapt2_bin is not None
+            else ["dump", "xmltree", str(apk_path), "AndroidManifest.xml"]
+        )
+        proc = run_tool(aapt_tool, args)
+        if proc.returncode == 0 and proc.stdout.strip():
+            try:
+                ext_contract = parse_aapt_xmltree(proc.stdout)
+                if ext_contract[:2] != axml_contract[:2]:
+                    sys.stderr.write(
+                        f"run-device-suite: manifest mismatch between aapt {ext_contract[:2]} and AXML {axml_contract[:2]} for {apk_path}\n"
+                    )
+                    sys.exit(2)
+                return ext_contract
+            except Exception as exc:
+                if backend_pref == "aapt":
+                    sys.stderr.write(f"run-device-suite: aapt xmltree parse failed for {apk_path}: {exc}\n")
+                    sys.exit(2)
+        elif backend_pref == "aapt":
+            sys.stderr.write(f"run-device-suite: aapt failed for {apk_path}: {proc.stdout}{proc.stderr}\n")
+            sys.exit(2)
+    elif backend_pref == "aapt":
+        sys.stderr.write("run-device-suite: MAR_MANIFEST_BACKEND=aapt requested but aapt2/aapt not found\n")
+        sys.exit(2)
+
+    return axml_contract
+
+
+actual_app_id, actual_dbg, _ = extract_manifest_contract(main_apk, "target")
+if actual_app_id != expected_app_id:
+    sys.stderr.write(f"run-device-suite: target APK applicationId={actual_app_id!r}, expected {expected_app_id!r}\n")
+    sys.exit(2)
+if actual_dbg != expected_debuggable:
+    sys.stderr.write(f"run-device-suite: target APK debuggable={actual_dbg!r}, expected {expected_debuggable!r}\n")
+    sys.exit(2)
+
+actual_test_id, _test_dbg, inst_entries = extract_manifest_contract(test_apk, "androidTest")
+if actual_test_id != expected_test_id:
+    sys.stderr.write(f"run-device-suite: androidTest APK applicationId={actual_test_id!r}, expected {expected_test_id!r}\n")
+    sys.exit(2)
+if not any(r == expected_runner and t == expected_app_id for r, t in inst_entries):
+    sys.stderr.write(
+        f"run-device-suite: androidTest manifest missing instrumentation {expected_runner} targeting {expected_app_id} (found {inst_entries})\n"
+    )
+    sys.exit(2)
+
+print(main_apk)
+print(test_apk)
+print(f"{expected_test_id}/{expected_runner}")
+# MAR_APK_CONTRACT_VALIDATOR_END
+PY
+  )
+  resolved_apks=$(tr -d '\r' <<< "$resolved_apks")
+  main_apk=$(sed -n '1p' <<< "$resolved_apks")
+  test_apk=$(sed -n '2p' <<< "$resolved_apks")
+  runner_component=$(sed -n '3p' <<< "$resolved_apks")
+
+  for apk_path in "$main_apk" "$test_apk"; do
+    install_out=$(MSYS2_ARG_CONV_EXCL="*" adb -s "$serial" install -r "$apk_path" 2>&1) || {
+      printf '%s\n' "$install_out" >&2
+      echo "run-device-suite: adb install failed for $apk_path" >&2
+      exit 1
+    }
+    printf '%s\n' "$install_out"
+    if ! grep -Eq '(^|[[:space:]])Success([[:space:]]|$)' <<< "$install_out"; then
+      echo "run-device-suite: adb install did not report Success for $apk_path" >&2
+      exit 1
+    fi
+  done
+fi
+
 group=0
 while IFS= read -r classes; do
+  [[ -n $classes ]] || continue
   group=$((group + 1))
   destination="$evidence/$suite-$variant-$group"
   mkdir -p "$destination"
@@ -38,8 +613,323 @@ while IFS= read -r classes; do
     mv "$results" "$previous/"
   fi
   status=0
-  ./gradlew ":app-android:connected${variant}AndroidTest" "-PmarTestBuildType=$build_type" \
-    "-Pandroid.testInstrumentationRunnerArguments.class=$classes" --dependency-verification=strict --no-daemon || status=$?
+  if [[ -n $prebuilt_apk_dir ]]; then
+    if [[ ! $classes =~ ^[A-Za-z0-9_.,#\$]+$ ]]; then
+      echo "run-device-suite: invalid class filter: $classes" >&2
+      exit 2
+    fi
+    if [[ $group -gt 1 ]]; then
+      MSYS2_ARG_CONV_EXCL="*" adb -s "$serial" shell pm clear runtime.mobileagent >/dev/null 2>&1 || true
+    fi
+    am_args=(shell am instrument -w -r -e class "$classes")
+    if [[ -n $filter_package ]]; then
+      am_args+=(-e package "$filter_package")
+    fi
+    if [[ ${#extra_runner_args[@]} -gt 0 ]]; then
+      for kv in "${extra_runner_args[@]}"; do
+        am_args+=(-e "${kv%%=*}" "${kv#*=}")
+      done
+    fi
+    am_args+=("$runner_component")
+    MSYS2_ARG_CONV_EXCL="*" adb -s "$serial" "${am_args[@]}" > "$destination/instrumentation.txt" 2>&1 || status=$?
+    tail -n 30 "$destination/instrumentation.txt" || true
+    "$py_bin" - "$destination/instrumentation.txt" "$status" "$results/TEST-${suite}-${variant}-${group}.xml" "${suite}-${variant}-${group}" <<'PY' || status=$?
+# MAR_INSTRUMENTATION_PARSER_BEGIN
+import pathlib
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+inst_path = pathlib.Path(sys.argv[1])
+adb_exit = int(sys.argv[2])
+xml_path = pathlib.Path(sys.argv[3])
+suite_name = sys.argv[4]
+
+raw_text = inst_path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+lines = raw_text.split("\n")
+
+PREFIXES = (
+    "INSTRUMENTATION_STATUS: ",
+    "INSTRUMENTATION_STATUS_CODE: ",
+    "INSTRUMENTATION_RESULT: ",
+    "INSTRUMENTATION_CODE: ",
+    "INSTRUMENTATION_FAILED:",
+    "INSTRUMENTATION_ABORTED:",
+)
+STD_STATUS_KEYS = {"id", "numtests", "current", "class", "test", "stream", "stack", "Error"}
+
+status_bundle: dict[str, str] = {}
+result_bundle: dict[str, str] = {}
+active_section: str | None = None
+current_key: str | None = None
+declared_numtests: int | None = None
+in_flight: dict[tuple[str, str], int] = {}
+test_cases: list[tuple[str, str, str, str]] = []
+passed_tests = 0
+ignored_tests = 0
+assumption_skipped_tests = 0
+failed_tests = 0
+inst_codes: list[int] = []
+protocol_errors: list[str] = []
+for line in lines:
+    if line.startswith("INSTRUMENTATION_STATUS: "):
+        active_section = "status"
+        rest = line[len("INSTRUMENTATION_STATUS: "):]
+        if "=" in rest:
+            k, v = rest.split("=", 1)
+            current_key = k.strip()
+            status_bundle[current_key] = v
+        else:
+            current_key = None
+    elif line.startswith("INSTRUMENTATION_STATUS_CODE: "):
+        active_section = None
+        current_key = None
+        m = re.match(r"^INSTRUMENTATION_STATUS_CODE:\s*(-?\d+)\s*$", line)
+        if m is None:
+            protocol_errors.append(f"malformed INSTRUMENTATION_STATUS_CODE line: {line!r}")
+            status_bundle.clear()
+            continue
+        code = int(m.group(1))
+        if "numtests" in status_bundle:
+            raw_nt = status_bundle["numtests"].strip()
+            try:
+                nt = int(raw_nt)
+            except ValueError:
+                protocol_errors.append(f"non-integer numtests={raw_nt!r}")
+            else:
+                if nt < 1:
+                    protocol_errors.append(f"invalid numtests={nt} (must be >= 1)")
+                elif declared_numtests is None:
+                    declared_numtests = nt
+                elif declared_numtests != nt:
+                    protocol_errors.append(f"inconsistent numtests across stream: {declared_numtests} vs {nt}")
+
+        test_name = status_bundle.get("test", "").strip()
+        class_name = status_bundle.get("class", "").strip()
+        extra_keys = set(status_bundle.keys()) - STD_STATUS_KEYS
+        has_lifecycle_header = any(k in status_bundle for k in ("id", "numtests", "current"))
+
+        if code >= 2:
+            # Intermediate custom Instrumentation.sendStatus(>=2, metricsBundle) event.
+            status_bundle.clear()
+            continue
+        if code == 0 and (not test_name or not class_name or (not has_lifecycle_header and bool(extra_keys))):
+            # Intermediate custom Instrumentation.sendStatus(0, metricsBundle) event.
+            status_bundle.clear()
+            continue
+
+        if test_name:
+            cls = class_name or "unknown"
+            key = (cls, test_name)
+            if code == 1:
+                in_flight[key] = in_flight.get(key, 0) + 1
+            elif code == 0:
+                if in_flight.get(key, 0) <= 0:
+                    protocol_errors.append(f"orphan pass status (code 0 without start code 1) for {cls}#{test_name}")
+                else:
+                    in_flight[key] -= 1
+                    if in_flight[key] == 0:
+                        del in_flight[key]
+                    passed_tests += 1
+                    test_cases.append(("pass", cls, test_name, ""))
+            elif code == -3:
+                if in_flight.get(key, 0) > 0:
+                    in_flight[key] -= 1
+                    if in_flight[key] == 0:
+                        del in_flight[key]
+                ignored_tests += 1
+                msg = status_bundle.get("stack", "").strip() or "ignored"
+                test_cases.append(("skip", cls, test_name, msg))
+            elif code == -4:
+                if in_flight.get(key, 0) > 0:
+                    in_flight[key] -= 1
+                    if in_flight[key] == 0:
+                        del in_flight[key]
+                assumption_skipped_tests += 1
+                msg = status_bundle.get("stack", "").strip() or "assumption failure"
+                test_cases.append(("skip", cls, test_name, msg))
+            else:
+                if in_flight.get(key, 0) > 0:
+                    in_flight[key] -= 1
+                    if in_flight[key] == 0:
+                        del in_flight[key]
+                failed_tests += 1
+                msg = status_bundle.get("stack", "").strip() or f"INSTRUMENTATION_STATUS_CODE: {code}"
+                kind = "error" if code == -1 else "failure"
+                test_cases.append((kind, cls, test_name, msg))
+        elif code != 1:
+            failed_tests += 1
+            msg = (
+                status_bundle.get("stack", "").strip()
+                or status_bundle.get("Error", "").strip()
+                or f"INSTRUMENTATION_STATUS_CODE: {code}"
+            )
+            test_cases.append(("error", class_name or "instrumentation.runner", "initializationError", msg))
+        status_bundle.clear()
+    elif line.startswith("INSTRUMENTATION_RESULT: "):
+        active_section = "result"
+        rest = line[len("INSTRUMENTATION_RESULT: "):]
+        if "=" in rest:
+            k, v = rest.split("=", 1)
+            current_key = k.strip()
+            result_bundle[current_key] = v
+        else:
+            current_key = None
+    elif line.startswith("INSTRUMENTATION_CODE: "):
+        active_section = None
+        current_key = None
+        m = re.match(r"^INSTRUMENTATION_CODE:\s*(-?\d+)\s*$", line)
+        if m is None:
+            protocol_errors.append(f"malformed INSTRUMENTATION_CODE line: {line!r}")
+            inst_codes.append(0)
+        else:
+            inst_codes.append(int(m.group(1)))
+    elif any(line.startswith(p) for p in PREFIXES):
+        active_section = None
+        current_key = None
+        if line.startswith(("INSTRUMENTATION_FAILED:", "INSTRUMENTATION_ABORTED:")):
+            protocol_errors.append(line.strip())
+    elif current_key is not None:
+        if active_section == "status":
+            status_bundle[current_key] = status_bundle[current_key] + "\n" + line
+        elif active_section == "result":
+            result_bundle[current_key] = result_bundle[current_key] + "\n" + line
+    elif line.strip().startswith(("Process crashed", "Native crash", "Unable to find instrumentation info")):
+        protocol_errors.append(line.strip())
+
+runner_reasons: list[str] = []
+if adb_exit != 0:
+    runner_reasons.append(f"adb exited with {adb_exit}")
+
+short_msg = result_bundle.get("shortMsg", "").strip()
+long_msg = result_bundle.get("longMsg", "").strip()
+if short_msg or long_msg:
+    runner_reasons.append(f"INSTRUMENTATION_RESULT error: shortMsg={short_msg!r} longMsg={long_msg!r}")
+
+# Only the stream field carries the verdict; other final metrics may follow it.
+stream_lines = [line.strip() for line in result_bundle.get("stream", "").splitlines() if line.strip()]
+if "FAILURES!!!" in stream_lines:
+    runner_reasons.append("JUnit reported FAILURES!!!")
+
+runner_reasons.extend(protocol_errors)
+
+for (cls, name), remaining in sorted(in_flight.items()):
+    runner_reasons.append(f"unfinished test {cls}#{name} (started {remaining}x without terminal status)")
+    for _ in range(remaining):
+        test_cases.append((
+            "error",
+            cls,
+            name,
+            "Test started (INSTRUMENTATION_STATUS_CODE: 1) without terminal status before instrumentation ended",
+        ))
+
+if inst_codes != [-1]:
+    runner_reasons.append(f"expected terminal INSTRUMENTATION_CODE [-1], got {inst_codes}")
+
+non_empty = [ln.strip() for ln in lines if ln.strip()]
+has_terminal_code_line = bool(non_empty and re.fullmatch(r"INSTRUMENTATION_CODE:\s*-1", non_empty[-1]))
+if not has_terminal_code_line:
+    tail_line = non_empty[-1] if non_empty else "<empty output>"
+    runner_reasons.append(f"stream did not end with 'INSTRUMENTATION_CODE: -1' (tail={tail_line!r})")
+
+# The OK summary is the last non-empty standalone line of that stream. Anything else
+# must not be searched for `OK (...)`: a test name or a metric mentioning it is not a
+# summary.
+summary_line = stream_lines[-1] if stream_lines else ""
+ok_match = re.fullmatch(r"OK \(([1-9]\d*) tests?\)", summary_line)
+if ok_match is None:
+    runner_reasons.append(
+        f"final INSTRUMENTATION_RESULT: stream did not end with 'OK (<N> test[s])' summary (got {summary_line or '<empty>'!r})"
+    )
+
+completed_tests = passed_tests + ignored_tests + assumption_skipped_tests + failed_tests
+if declared_numtests is None:
+    runner_reasons.append("missing INSTRUMENTATION_STATUS: numtests")
+elif completed_tests != declared_numtests:
+    runner_reasons.append(f"completed test count {completed_tests} != declared numtests {declared_numtests}")
+
+if completed_tests <= 0 or (passed_tests + assumption_skipped_tests) <= 0:
+    runner_reasons.append(
+        f"zero executed tests completed cleanly (passed={passed_tests}, assumption_skipped={assumption_skipped_tests}, ignored={ignored_tests})"
+    )
+
+if ok_match is not None:
+    ok_count = int(ok_match.group(1))
+    expected_ok_counts = {passed_tests + assumption_skipped_tests, completed_tests}
+    if ok_count not in expected_ok_counts:
+        runner_reasons.append(
+            f"OK summary count {ok_count} != completed count "
+            f"(passed={passed_tests}, assumption_skipped={assumption_skipped_tests}, ignored={ignored_tests}, completed={completed_tests})"
+        )
+
+reasons: list[str] = []
+if failed_tests > 0:
+    reasons.append(f"{failed_tests} failing/errored test status code(s)")
+reasons.extend(runner_reasons)
+
+if runner_reasons:
+    detail_lines = list(runner_reasons)
+    if short_msg:
+        detail_lines.append(f"shortMsg: {short_msg}")
+    if long_msg:
+        detail_lines.append(f"longMsg: {long_msg}")
+    test_cases.append((
+        "error",
+        "instrumentation.runner",
+        "suiteExecutionError",
+        "\n".join(detail_lines),
+    ))
+
+failures_n = sum(1 for kind, *_ in test_cases if kind == "failure")
+errors_n = sum(1 for kind, *_ in test_cases if kind == "error")
+skipped_n = sum(1 for kind, *_ in test_cases if kind == "skip")
+if reasons and (failures_n + errors_n) == 0:
+    test_cases.append(("error", "instrumentation.runner", "suiteExecutionError", "; ".join(reasons)))
+    errors_n += 1
+
+suite_el = ET.Element(
+    "testsuite",
+    {
+        "name": suite_name,
+        "tests": str(len(test_cases)),
+        "failures": str(failures_n),
+        "errors": str(errors_n),
+        "skipped": str(skipped_n),
+    },
+)
+for kind, cls, name, detail in test_cases:
+    case_el = ET.SubElement(suite_el, "testcase", {"classname": cls, "name": name})
+    if kind == "skip":
+        skip_el = ET.SubElement(case_el, "skipped", {"message": detail.splitlines()[0] if detail else "skipped"})
+        skip_el.text = detail
+    elif kind in ("failure", "error"):
+        err_el = ET.SubElement(case_el, kind, {"message": detail.splitlines()[0] if detail else kind})
+        err_el.text = detail
+xml_path.parent.mkdir(parents=True, exist_ok=True)
+ET.ElementTree(suite_el).write(xml_path, encoding="utf-8", xml_declaration=True)
+
+if reasons:
+    sys.stderr.write("run-device-suite: instrumentation validation FAILED: " + "; ".join(reasons) + "\n")
+    sys.exit(adb_exit if adb_exit != 0 else 1)
+# MAR_INSTRUMENTATION_PARSER_END
+PY
+  else
+    declare -a gradle_args=(
+      ":app-android:connected${variant}AndroidTest"
+      "-PmarTestBuildType=$build_type"
+      "-Pandroid.testInstrumentationRunnerArguments.class=$classes"
+    )
+    if [[ -n $filter_package ]]; then
+      gradle_args+=("-Pandroid.testInstrumentationRunnerArguments.package=$filter_package")
+    fi
+    if [[ ${#extra_runner_args[@]} -gt 0 ]]; then
+      for kv in "${extra_runner_args[@]}"; do
+        gradle_args+=("-Pandroid.testInstrumentationRunnerArguments.${kv%%=*}=${kv#*=}")
+      done
+    fi
+    gradle_args+=(--dependency-verification=strict --no-daemon)
+    ./gradlew "${gradle_args[@]}" || status=$?
+  fi
   produced=false
   if [[ -d $results ]]; then
     mv "$results" "$destination/"

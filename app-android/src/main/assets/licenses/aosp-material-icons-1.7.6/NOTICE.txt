@@ -1,0 +1,24 @@
+Android Open Source Project — Jetpack Compose Material Icons
+Copyright 2020 The Android Open Source Project
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use these files except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Upstream artifact: androidx.compose.material:material-icons-extended:1.7.6
+Upstream repository: https://cs.android.com/androidx/platform/frameworks/support
+Upstream POM: https://dl.google.com/dl/android/maven2/androidx/compose/material/material-icons-extended/1.7.6/material-icons-extended-1.7.6.pom
+
+Vendored vector path definitions in
+vendor/material-icons/src/main/kotlin/runtime/mobileagent/ui/vendored/VendoredMaterialIcons.kt:
+- Outlined.Chat
+- Outlined.SmartToy
+- Outlined.Tune
+- Outlined.MenuBook
+- Outlined.Extension
+- Outlined.Campaign
+- Outlined.Cloud
+- Outlined.BugReport
+- Filled.Error

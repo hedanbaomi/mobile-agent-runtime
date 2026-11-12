@@ -43,6 +43,8 @@ import runtime.mobileagent.background.ConsentFailureHandler
 import runtime.mobileagent.background.ImportWorkScheduler
 import runtime.mobileagent.embedding.AndroidModelPackLoader
 import runtime.mobileagent.embedding.OnnxTextEmbedder
+import runtime.mobileagent.knowledge.BatchTextEmbedder
+import runtime.mobileagent.knowledge.CancellableBatchTextEmbedder
 import runtime.mobileagent.knowledge.TextEmbedder
 import runtime.mobileagent.knowledge.ImportStage
 import runtime.mobileagent.storage.AndroidPdfRendererAdapter
@@ -50,6 +52,20 @@ import runtime.mobileagent.vector.UsearchVectorIndexFactory
 import runtime.mobileagent.diagnostics.AndroidDiagnosticLogger
 import runtime.mobileagent.integration.createWiredAdbDiagnosticSink
 import runtime.mobileagent.integration.RuntimeIntegration
+import runtime.mobileagent.integration.WorkspacePresentationPort
+import runtime.mobileagent.integration.WorkspacePresentationPortProvider
+import runtime.mobileagent.integration.ToolAssemblyPort
+import runtime.mobileagent.integration.ToolAssemblyPortProvider
+import runtime.mobileagent.integration.ToolApprovalAuthorityPort
+import runtime.mobileagent.integration.ToolApprovalAuthorityPortProvider
+import runtime.mobileagent.integration.AuthorityQueryPort
+import runtime.mobileagent.integration.AuthorityQueryPortProvider
+import runtime.mobileagent.integration.RootExecutionPort
+import runtime.mobileagent.integration.RootExecutionPortProvider
+import runtime.mobileagent.integration.SkillMemoryAvailabilityPort
+import runtime.mobileagent.integration.SkillMemoryAvailabilityPortProvider
+import runtime.mobileagent.integration.RootWorkspaceUiPort
+import runtime.mobileagent.integration.RootWorkspaceUiPortProvider
 import runtime.mobileagent.shizuku.ShizukuAuthorityBridge
 import runtime.mobileagent.wired.WiredAdbAuthorityBridgeFactory
 import java.util.Locale
@@ -177,9 +193,17 @@ class MobileAgentApp : Application() {
 class AppContainer internal constructor(app: MobileAgentApp, private val resources: HostResources = HostResources()) :
     AgentGrantPortProvider,
     SettingsAuthorityPortProvider,
+    AuthorityQueryPortProvider,
     ThreadWorkspacePortProvider,
     ThreadWorkspaceRuntimePortProvider,
     runtime.mobileagent.workspace.CanonicalWorkspaceSinkProvider,
+    WorkspacePresentationPortProvider,
+    ToolAssemblyPortProvider,
+    ToolApprovalAuthorityPortProvider,
+    RootExecutionPortProvider,
+    SkillMemoryAvailabilityPortProvider,
+    WorkspacePickerPortProvider,
+    RootWorkspaceUiPortProvider,
     AutoCloseable {
     private val closed = AtomicBoolean(false)
     private val runtimeIntegrationRef = AtomicReference<RuntimeIntegration?>()
@@ -214,7 +238,7 @@ class AppContainer internal constructor(app: MobileAgentApp, private val resourc
      * page switch never changes a run's owner or its frozen manifest.
      */
     val runCoordinator = RunCoordinator(runs) { record ->
-        requireNotNull(runtimeIntegrationRef.get()) { "Runtime not initialized" }.rootCoordinator.admitNewRun(record)
+        requireNotNull(runtimeIntegrationRef.get()) { "Runtime not initialized" }.admitNewRun(record)
     }
     val audits = AuditRepository(db)
     val transfer = TransferRepository(db, blobSink = CasBlobSink(File(app.filesDir, "cas")),
@@ -226,13 +250,17 @@ class AppContainer internal constructor(app: MobileAgentApp, private val resourc
     val knowledge = KnowledgeRepository(
         db,
         CasBlobSink(File(app.filesDir, "cas")),
-        embedder = object : TextEmbedder {
+        embedder = object : TextEmbedder, BatchTextEmbedder, CancellableBatchTextEmbedder {
             override val spaceId = AndroidModelPackLoader.DEFAULT_SPACE_ID
             override val dimension = AndroidModelPackLoader.DEFAULT_DIMENSION
             private val implementation by lazy {
                 resources.own(OnnxTextEmbedder(AndroidModelPackLoader(app).load())) { it.close() }
             }
             override fun embed(text: String) = implementation.embed(text)
+            override fun embedBatch(texts: List<String>): List<FloatArray> =
+                implementation.embedBatch(texts)
+            override suspend fun embedBatchCancellable(texts: List<String>): List<FloatArray> =
+                implementation.embedBatchCancellable(texts)
         },
         pdfRasterizer = AndroidPdfRendererAdapter(app),
         vectorIndexFactory = UsearchVectorIndexFactory(),
@@ -331,6 +359,24 @@ class AppContainer internal constructor(app: MobileAgentApp, private val resourc
 
     override val canonicalWorkspaceSink: runtime.mobileagent.workspace.CanonicalWorkspaceSink?
         get() = runtimeIntegration
+
+    val workspacePresentationPort: WorkspacePresentationPort get() = runtimeIntegration
+    val toolAssemblyPort: ToolAssemblyPort get() = runtimeIntegration
+    val toolApprovalAuthorityPort: ToolApprovalAuthorityPort get() = runtimeIntegration
+    val authorityQueryPort: AuthorityQueryPort get() = runtimeIntegration
+    val rootExecutionPort: RootExecutionPort get() = runtimeIntegration
+    val skillMemoryAvailabilityPort: SkillMemoryAvailabilityPort get() = runtimeIntegration
+    val workspacePickerPort: WorkspacePickerPort get() = runtimeIntegration
+    val rootWorkspaceUiPort: RootWorkspaceUiPort get() = runtimeIntegration
+
+    override fun workspacePresentationPort(): WorkspacePresentationPort = runtimeIntegration
+    override fun toolAssemblyPort(): ToolAssemblyPort = runtimeIntegration
+    override fun toolApprovalAuthorityPort(): ToolApprovalAuthorityPort = runtimeIntegration
+    override fun authorityQueryPort(): AuthorityQueryPort = runtimeIntegration
+    override fun rootExecutionPort(): RootExecutionPort = runtimeIntegration
+    override fun skillMemoryAvailabilityPort(): SkillMemoryAvailabilityPort = runtimeIntegration
+    override fun workspacePickerPort(): WorkspacePickerPort = runtimeIntegration
+    override fun rootWorkspaceUiPort(): RootWorkspaceUiPort = runtimeIntegration
 
     val announcements = AnnouncementRepository(db).apply {
         if (baseUrl().isBlank()) {

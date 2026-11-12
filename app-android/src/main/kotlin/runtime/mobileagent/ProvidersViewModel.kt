@@ -47,6 +47,7 @@ import runtime.mobileagent.provider.CapabilityReport
 import runtime.mobileagent.provider.HeaderSecretResolver
 import runtime.mobileagent.provider.ModelAdapter
 import runtime.mobileagent.provider.ContextWindowProducer
+import runtime.mobileagent.provider.catalog.SiliconFlowContextCatalog
 import runtime.mobileagent.provider.openai.OpenAiAdapterFactory
 import runtime.mobileagent.provider.ProviderConnectionErrorCode
 import runtime.mobileagent.provider.ProviderConnectionResult

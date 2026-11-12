@@ -269,6 +269,11 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    sourceSets {
+        getByName("main") {
+            kotlin.srcDir(rootProject.file("vendor/material-icons/src/main/kotlin"))
+        }
+    }
     // App language can change independently of the device language. Ship both resources.
     bundle { language { enableSplit = false } }
     packaging {
@@ -376,7 +381,6 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
-    implementation(libs.androidx.compose.material.icons)
     implementation(libs.ktor.client.okhttp)
     implementation(libs.ktor.client.core)
     implementation(libs.kotlinx.coroutines.core)

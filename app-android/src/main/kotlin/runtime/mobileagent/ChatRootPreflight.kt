@@ -126,7 +126,7 @@ internal fun ChatRootSendRefusal.asException(operationId: String): AppException 
 internal fun AppContainer.chatRootSendGate(): ChatRootSendGate = RootRunAdmissionChatGate(
     admission = RootRunAdmission(db),
     selectedAuthority = { AuthorityPolicyRepository(db).getPolicy().selectedAuthority },
-    executionStamp = { authority -> runtimeIntegration.rootCoordinator.currentExecutionStamp(authority) },
+    executionStamp = { authority -> rootExecutionPort.currentExecutionStamp(authority) },
 )
 
 /** Resolve Root failure copy using the accepted app-language mirror, not the device locale. */

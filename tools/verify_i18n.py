@@ -20,6 +20,9 @@ FORMAT = re.compile(r'%%|%([1-9]\d*)\$([a-zA-Z])')
 HOST_FILES = (
     'app-android/src/main/kotlin/runtime/mobileagent/ui/HostInitializationScreen.kt',
     'app-android/src/main/kotlin/runtime/mobileagent/ui/QuickStartCard.kt',
+    'app-android/src/main/kotlin/runtime/mobileagent/ui/ShellStateHolders.kt',
+    'app-android/src/main/kotlin/runtime/mobileagent/ui/WorkspaceDialogs.kt',
+    'app-android/src/main/kotlin/runtime/mobileagent/ui/WorkspacePresentationFormatters.kt',
     'app-android/src/main/kotlin/runtime/mobileagent/HostStartupAttempt.kt',
     'app-android/src/main/kotlin/runtime/mobileagent/ChatViewModel.kt',
     'app-android/src/main/kotlin/runtime/mobileagent/ChatExecutionController.kt',

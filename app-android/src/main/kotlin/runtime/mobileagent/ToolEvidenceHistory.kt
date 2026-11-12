@@ -5,6 +5,7 @@ package runtime.mobileagent
 
 import kotlinx.serialization.json.*
 import runtime.mobileagent.domain.*
+import runtime.mobileagent.provider.openai.StreamingSecretRedactor
 
 /** Repairs only complete legacy exchanges in the request projection. Durable records keep
  * their original identities/order; genuine user input and incomplete exchanges never move. */
@@ -53,5 +54,42 @@ internal fun replayableReasoning(message: Message, enabled: Boolean = true): Str
     return text.takeIf { it.isNotEmpty() }
 }
 
-internal fun appendDeclaredReasoning(current: String, delta: String, secrets: List<String>): String =
-    runtime.mobileagent.provider.SecretRedactor.redact(current + delta, secrets).take(MessagePartLimits.MAX_REASONING_CHARS)
+internal fun appendBoundedReasoning(target: StringBuilder, clean: CharSequence) {
+    if (clean.isEmpty()) return
+    val remaining = MessagePartLimits.MAX_REASONING_CHARS - target.length
+    if (remaining > 0) {
+        target.append(clean, 0, minOf(clean.length, remaining))
+    }
+}
+
+internal fun appendDeclaredReasoning(
+    target: StringBuilder,
+    redactor: StreamingSecretRedactor,
+    delta: String,
+    secrets: List<String> = emptyList(),
+) {
+    if (delta.isEmpty()) return
+    redactor.registerSecrets(secrets)
+    val clean = redactor.accept(delta, StreamingSecretRedactor.Channel.REASONING)
+    appendBoundedReasoning(target, clean)
+}
+
+internal fun finishDeclaredReasoning(
+    target: StringBuilder,
+    redactor: StreamingSecretRedactor,
+): String {
+    for ((channel, tail) in redactor.finish()) {
+        if (channel == StreamingSecretRedactor.Channel.REASONING) {
+            appendBoundedReasoning(target, tail)
+        }
+    }
+    return target.toString()
+}
+
+internal fun discardDeclaredReasoning(
+    target: StringBuilder,
+    redactor: StreamingSecretRedactor,
+): String {
+    redactor.discard()
+    return target.toString()
+}

@@ -11,9 +11,8 @@ import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Chat
 import androidx.compose.material.icons.outlined.Settings
-import androidx.compose.material.icons.outlined.Tune
+import runtime.mobileagent.ui.AppIcons
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
@@ -410,7 +409,7 @@ class GlobalConversationUiTest {
                     GlobalDrawerShell(
                         selectedRoute = "chat",
                         destinations = listOf(ChatDrawerDestinationUi("chat", "对话")).map {
-                            runtime.mobileagent.ui.AppNavigationDestination(it.route, it.label, Icons.Outlined.Chat)
+                            runtime.mobileagent.ui.AppNavigationDestination(it.route, it.label, AppIcons.Chat)
                         },
                         onRouteSelected = {},
                         drawerOpen = false,
@@ -583,7 +582,7 @@ class GlobalConversationUiTest {
                             runtime.mobileagent.ui.AppNavigationDestination(
                                 "providers",
                                 "服务商",
-                                Icons.Outlined.Tune,
+                                AppIcons.Tune,
                             ),
                             runtime.mobileagent.ui.AppNavigationDestination(
                                 "settings",
@@ -647,7 +646,7 @@ class GlobalConversationUiTest {
                             runtime.mobileagent.ui.AppNavigationDestination(
                                 "providers",
                                 "服务商",
-                                Icons.Outlined.Tune,
+                                AppIcons.Tune,
                             ),
                         ),
                         onRouteSelected = {},

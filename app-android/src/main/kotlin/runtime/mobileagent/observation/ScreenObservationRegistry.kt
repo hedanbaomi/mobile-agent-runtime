@@ -5,6 +5,7 @@ package runtime.mobileagent.observation
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
+import android.content.SharedPreferences
 import android.graphics.Rect
 import android.os.SystemClock
 import android.os.Bundle
@@ -20,9 +21,14 @@ import java.util.ArrayDeque
 import java.util.UUID
 
 /** App-local observation channel, independent of the selected elevated ADB authority. */
-class ScreenObservationRegistry private constructor(context: Context) : ScreenObservationPort, ScreenActionPort {
-    private val ownPackage = context.applicationContext.packageName
-    private val preferences = context.applicationContext.getSharedPreferences("screen-observation", Context.MODE_PRIVATE)
+class ScreenObservationRegistry internal constructor(
+    private val ownPackage: String,
+    private val preferences: SharedPreferences,
+) : ScreenObservationPort, ScreenActionPort {
+    private constructor(context: Context) : this(
+        ownPackage = context.applicationContext.packageName,
+        preferences = context.applicationContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE),
+    )
     private val lock = Any()
     private var service: ScreenObservationService? = null
     private val mutableAccess = MutableStateFlow(ScreenAccess(consent = preferences.getBoolean("consent", false),
@@ -229,6 +235,7 @@ class ScreenObservationRegistry private constructor(context: Context) : ScreenOb
     private fun recycle(node: AccessibilityNodeInfo) { node.recycle() }
 
     companion object {
+        internal const val PREFERENCES_NAME = "screen-observation"
         private val NODE_ACTIONS = linkedMapOf(ScreenAction.CLICK to AccessibilityNodeInfo.ACTION_CLICK,
             ScreenAction.LONG_CLICK to AccessibilityNodeInfo.ACTION_LONG_CLICK,
             ScreenAction.SET_TEXT to AccessibilityNodeInfo.ACTION_SET_TEXT,

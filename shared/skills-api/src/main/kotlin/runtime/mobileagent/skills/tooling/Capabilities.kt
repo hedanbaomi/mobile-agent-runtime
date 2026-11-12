@@ -4,6 +4,7 @@
  */
 package runtime.mobileagent.skills.tooling
 
+import java.text.Normalizer
 import java.time.Instant
 import runtime.mobileagent.domain.CapabilityGrant as DomainCapabilityGrant
 import runtime.mobileagent.domain.CapabilityId as DomainCapabilityId
@@ -361,17 +362,25 @@ class EffectiveCapabilityResolver {
 /** Shared relative-path normalization for typed backends; performs no I/O. */
 object WorkspacePath {
     const val MAX_DEPTH = 32
+    private val DRIVE_PREFIX = Regex("^[A-Za-z]:($|/)")
 
     fun normalize(path: String, maxDepth: Int = MAX_DEPTH): String {
-        require(path.isNotEmpty()) { "path is empty" }
-        require(!path.contains('\u0000')) { "path contains NUL" }
-        val candidate = path.replace('\\', '/')
-        require(candidate.isNotEmpty() && !candidate.startsWith('/')) { "path must be relative" }
-        require(!Regex("^[A-Za-z]:($|/)").containsMatchIn(candidate)) { "path must be relative" }
+        validateRaw(path)
+        val candidate = Normalizer.normalize(path, Normalizer.Form.NFC)
+        validateRaw(candidate)
         val segments = candidate.split('/')
         require(segments.size <= maxDepth) { "path is too deep" }
         require(segments.all { it.isNotEmpty() && it != "." && it != ".." }) { "path contains an unsafe segment" }
         require(segments.none { it.contains(':') }) { "path contains a drive separator" }
         return segments.joinToString("/")
+    }
+
+    private fun validateRaw(value: String) {
+        require(value.isNotEmpty()) { "path is empty" }
+        require(!value.contains('\u0000')) { "path contains NUL" }
+        require(!value.contains('\\')) { "path contains backslash" }
+        require(value.none(Char::isISOControl)) { "path contains control character" }
+        require(!value.startsWith('/')) { "path must be relative" }
+        require(!DRIVE_PREFIX.containsMatchIn(value)) { "path must be relative" }
     }
 }

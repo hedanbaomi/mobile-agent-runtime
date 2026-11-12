@@ -1,10 +1,18 @@
 # SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
 # SPDX-License-Identifier: AGPL-3.0-only
 """Regression fixtures for absent, uncovered and misclassified runner targets."""
+import json
 import pathlib
 import tempfile
 import unittest
-from verify_test_selection import violations, result_summary, select_suite, invocation_groups, workflow_matrix_violations
+from verify_test_selection import (
+    violations,
+    result_summary,
+    select_suite,
+    invocation_groups,
+    workflow_matrix_violations,
+    pr_triggers_recovery,
+)
 
 
 class TestSelectionTest(unittest.TestCase):
@@ -21,14 +29,47 @@ class TestSelectionTest(unittest.TestCase):
             full = workflows / 'full-instrumentation.yml'
             original = full.read_text(encoding='utf-8')
             for old, new in [("'data/sqlite/src/main/kotlin/runtime/mobileagent/data/Root*'", "'unrelated/**'"),
+                             ("'data/sqlite/src/main/kotlin/runtime/mobileagent/data/migrations/**'", "'unrelated/migrations/**'"),
                              ("'app-android/src/main/kotlin/runtime/mobileagent/ChatExecutionController.kt'", "'unrelated/Controller.kt'"),
                              ("&& 'Review'", "&& 'Debug'"), ('  schedule:', '  disabled_schedule:')]:
                 full.write_text(original.replace(old, new), encoding='utf-8')
-                self.assertTrue(workflow_matrix_violations(root))
+                self.assertTrue(workflow_matrix_violations(root), f'Expected violation when replacing {old}')
             full.write_text(original, encoding='utf-8')
             ci = workflows / 'ci.yml'
-            ci.write_text(ci.read_text(encoding='utf-8').replace('smoke-api Debug', 'smoke Debug'), encoding='utf-8')
-            self.assertTrue(workflow_matrix_violations(root))
+            ci_original = ci.read_text(encoding='utf-8')
+            for old, new in [('smoke-api Debug', 'smoke Debug'),
+                             ('    needs: check\n', ''),
+                             ('bash tools/run-device-suite convergence Debug --prebuilt-apk-dir /tmp/prebuilt-debug-apks',
+                              'bash tools/run-device-suite convergence Debug')]:
+                ci.write_text(ci_original.replace(old, new, 1), encoding='utf-8')
+                self.assertTrue(workflow_matrix_violations(root), f'Expected violation when replacing {old}')
+
+    def test_subdirectory_migration_change_triggers_recovery_suite_selection(self):
+        import shutil
+        source = pathlib.Path(__file__).resolve().parent.parent
+        manifest = json.loads((source / 'tools/instrumentation-suites.json').read_text(encoding='utf-8'))
+        migration_subfile = 'data/sqlite/src/main/kotlin/runtime/mobileagent/data/migrations/MigrationV2ControlPlane.kt'
+        selected = pr_triggers_recovery(source, [migration_subfile], manifest)
+        self.assertEqual(select_suite(manifest, 'recovery'), selected)
+        self.assertIn('runtime.mobileagent.storage.BundledSqliteReliabilityTest', selected)
+        self.assertEqual([], pr_triggers_recovery(source, ['feature/worldbooks/src/main/kotlin/Unrelated.kt'], manifest))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            workflows = root / '.github/workflows'
+            workflows.mkdir(parents=True)
+            for name in ('ci.yml', 'full-instrumentation.yml'):
+                shutil.copyfile(source / '.github/workflows' / name, workflows / name)
+            full = workflows / 'full-instrumentation.yml'
+            without_subdir = '\n'.join(
+                line for line in full.read_text(encoding='utf-8').splitlines()
+                if 'data/migrations/**' not in line
+            ) + '\n'
+            full.write_text(without_subdir, encoding='utf-8')
+            self.assertEqual([], pr_triggers_recovery(root, [migration_subfile], manifest))
+            self.assertIn(
+                f'Review recovery trigger missing: {migration_subfile}',
+                workflow_matrix_violations(root),
+            )
 
     def test_fresh_host_classes_have_independent_invocations_and_complete_coverage(self):
         manifest = {"suites": {"full": ["a", "b", "c", "d"]}, "fresh_host_first": ["a", "b"]}

@@ -1,0 +1,6 @@
+// SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+
+package runtime.mobileagent.provider
+
+typealias StreamingSecretRedactor = runtime.mobileagent.provider.openai.StreamingSecretRedactor

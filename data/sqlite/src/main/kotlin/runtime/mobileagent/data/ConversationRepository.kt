@@ -220,11 +220,33 @@ class ConversationRepository(
             "UPDATE messages SET text=?,status=?,parts_json=?,metadata_json=? WHERE id=?",
             listOf(updated.text, updated.status, json.encodeToString(updated.parts), updated.metadataJson, updated.id),
         )
-        db.execute("DELETE FROM message_parts WHERE message_id=?", listOf(updated.id))
+        val existingParts = db.query(
+            "SELECT ordinal, part_type, payload_json FROM message_parts WHERE message_id=? ORDER BY ordinal ASC",
+            listOf(updated.id),
+        )
+        val existingByOrdinal = existingParts.associateBy { it.long("ordinal").toInt() }
         updated.parts.forEachIndexed { index, part ->
+            val type = partType(part)
+            val payload = json.encodeToString(part)
+            val existingRow = existingByOrdinal[index]
+            if (existingRow != null) {
+                if (existingRow.string("part_type") != type || existingRow.string("payload_json") != payload) {
+                    db.execute(
+                        "UPDATE message_parts SET part_type=?, payload_json=? WHERE message_id=? AND ordinal=?",
+                        listOf(type, payload, updated.id, index),
+                    )
+                }
+            } else {
+                db.execute(
+                    "INSERT INTO message_parts(id,message_id,ordinal,part_type,payload_json) VALUES(?,?,?,?,?)",
+                    listOf("${updated.id}:$index", updated.id, index, type, payload),
+                )
+            }
+        }
+        if (existingParts.any { it.long("ordinal") >= updated.parts.size }) {
             db.execute(
-                "INSERT INTO message_parts(id,message_id,ordinal,part_type,payload_json) VALUES(?,?,?,?,?)",
-                listOf("${updated.id}:$index", updated.id, index, partType(part), json.encodeToString(part)),
+                "DELETE FROM message_parts WHERE message_id=? AND ordinal >= ?",
+                listOf(updated.id, updated.parts.size),
             )
         }
         db.execute("UPDATE conversations SET updated_at=? WHERE id=?", listOf(clock(), updated.conversationId))

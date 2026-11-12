@@ -622,9 +622,9 @@ class ChatViewModel internal constructor(
             runCatching { threadPort?.conversationWorkspaceBinding(id) }.getOrNull()
         }
         val presentation = binding?.workspaceId?.let { workspaceId ->
-            runCatching { container.runtimeIntegration.workspaceUiPresentation(workspaceId) }.getOrNull()
+            runCatching { container.workspacePresentationPort.workspaceUiPresentation(workspaceId) }.getOrNull()
         }
-        val authority = runCatching { container.runtimeIntegration.snapshot() }.getOrNull()
+        val authority = runCatching { container.authorityQueryPort.snapshot() }.getOrNull()
         val storedAgentDefault = agentId?.let { id ->
             runCatching { threadPort?.agentWorkspaceDefault(id) }.getOrNull()
         }
@@ -632,7 +632,7 @@ class ChatViewModel internal constructor(
             runCatching { threadPort?.resolveNewThreadWorkspace(id) }.getOrNull()
         }
         val agentDefaultPresentation = resolvedAgentDefaultId?.let { workspaceId ->
-            runCatching { container.runtimeIntegration.workspaceUiPresentation(workspaceId) }.getOrNull()
+            runCatching { container.workspacePresentationPort.workspaceUiPresentation(workspaceId) }.getOrNull()
         }
         val systemLabel = when {
             authority == null -> ""

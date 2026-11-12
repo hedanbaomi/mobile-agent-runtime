@@ -26,17 +26,26 @@ internal class EmbeddingWindowCache(
         require(maxPayloadBytes in 0..1_048_576)
     }
 
-    /** Coalesces identical in-flight windows; the ONNX session already executes one window at a time. */
+    /** Returns a copy of the cached embedding vector for [encoded], or null on a cache miss. */
     @Synchronized
-    fun vector(encoded: BertWordPieceTokenizer.Encoded, infer: () -> FloatArray): FloatArray {
+    fun get(encoded: BertWordPieceTokenizer.Encoded): FloatArray? {
+        check(!closed) { "Local embedding runtime is closed" }
+        checkInterrupted()
+        return entries[Key(encoded)]?.vector?.copyOf()
+    }
+
+    /** Stores [vector] in the cache for [encoded], evicting LRU entries as required by budgets. */
+    @Synchronized
+    fun put(encoded: BertWordPieceTokenizer.Encoded, vector: FloatArray) {
         check(!closed) { "Local embedding runtime is closed" }
         checkInterrupted()
         val key = Key(encoded)
-        entries[key]?.let { return it.vector.copyOf() }
-        val vector = infer()
-        checkInterrupted()
         val bytes = key.bytes + vector.size.toLong() * Float.SIZE_BYTES
         if (maxEntries > 0 && bytes <= maxPayloadBytes && vector.all { it.isFinite() }) {
+            val old = entries.remove(key)
+            if (old != null) {
+                payloadBytes -= old.payloadBytes
+            }
             while (entries.size >= maxEntries || payloadBytes + bytes > maxPayloadBytes) {
                 val iterator = entries.entries.iterator()
                 payloadBytes -= iterator.next().value.payloadBytes
@@ -45,6 +54,15 @@ internal class EmbeddingWindowCache(
             entries[key.owned()] = Entry(vector.copyOf(), bytes)
             payloadBytes += bytes
         }
+    }
+
+    /** Coalesces identical in-flight windows; the ONNX session already executes one window at a time. */
+    @Synchronized
+    fun vector(encoded: BertWordPieceTokenizer.Encoded, infer: () -> FloatArray): FloatArray {
+        val cached = get(encoded)
+        if (cached != null) return cached
+        val vector = infer()
+        put(encoded, vector)
         return vector
     }
 

@@ -274,6 +274,15 @@ class GoogleGeminiAdapterTest {
         assertTrue(leaked.last() is ModelEvent.Failed)
     }
 
+    @Test fun `ambiguous redaction overflow after dispatch has unknown outcome`() = runTest {
+        val first = """{"candidates":[{"content":{"parts":[{"text":"api_"}]}}]}"""
+        val second = reply("key: '" + "x".repeat(32 * 1024))
+        val events = adapter(engine("data: $first\n\ndata: $second\n\n", type = "text/event-stream"))
+            .stream(request(true), key).toList()
+        assertEquals("UNKNOWN_OUTCOME", (events.last() as ModelEvent.Failed).sanitizedMessage)
+        assertFalse(events.any { it is ModelEvent.TextDelta || it is ModelEvent.ProviderContinuation })
+    }
+
     @Test fun `parallel signed results replay native order despite runtime reordering including idless identical functions`() = runTest {
         for (ids in listOf(true, false)) {
             val idA = if (ids) "\"id\":\"id-a\"," else ""

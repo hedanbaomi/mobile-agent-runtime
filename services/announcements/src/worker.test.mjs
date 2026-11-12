@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { verify } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { createWorker } from "./app.mjs";
+import { createWorker, BoundedSnapshotCache, MAX_SNAPSHOT_CACHE_ENTRIES, MAX_SNAPSHOT_CACHE_BYTES } from "./app.mjs";
 import workerEntry from "./worker.mjs";
 import { SIGN_PREFIX, audienceHash, generateKeyPair, keyPairFromSeed, signPayload } from "./sign.mjs";
 import { MemoryStore } from "./store.mjs";
@@ -547,6 +547,233 @@ assert.deepEqual(localeFallback("zh-Hans-CN"), ["zh-Hans-CN", "zh-CN", "zh-Hans"
   assert.equal(second.response.status, 304);
   assert.equal(second.response.headers.get("ETag"), first.response.headers.get("ETag"));
   console.log("NAR05 content-stable ETag 304 under advancing clock ok");
+}
+
+{
+  // Test P2-7: Bounded snapshot cache capacity, LRU eviction, and TTL expiration
+  assert.equal(MAX_SNAPSHOT_CACHE_ENTRIES, 200);
+  const worker = app();
+  await publishSample(worker);
+
+  // 1. Capacity bounding and LRU eviction verification
+  const totalClients = 210;
+  const etags = new Map();
+  for (let i = 0; i < totalClients; i += 1) {
+    const id = `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+    const res = await decodeFeed(worker, id);
+    assert.equal(res.response.status, 200);
+    etags.set(id, res.response.headers.get("ETag"));
+  }
+
+  // Verify bounded size does not exceed 200
+  assert.equal(worker.store.signedSnapshots.size, 200);
+
+  // Client 0 was the oldest and must have been evicted from the LRU cache
+  const client0Id = "00000000-0000-4000-8000-000000000000";
+  const client0KeyPrefix = `android|stable|1|en|${client0Id}|`;
+  let client0FoundInCache = false;
+  for (const k of worker.store.signedSnapshots.keys()) {
+    if (k.startsWith(client0KeyPrefix)) client0FoundInCache = true;
+  }
+  assert.equal(client0FoundInCache, false, "oldest client should be evicted from LRU cache");
+
+  // 2. Deterministic ETag 304 response on cache miss
+  // Even though client 0 was evicted, sending its previous ETag still yields 304 Not Modified!
+  const client0Etag = etags.get(client0Id);
+  const client0304 = await decodeFeed(worker, client0Id, { "If-None-Match": client0Etag });
+  assert.equal(client0304.response.status, 304, "evicted client with matching ETag returns 304");
+  assert.equal(client0304.response.headers.get("ETag"), client0Etag);
+
+  // 3. Re-signing after LRU eviction
+  // Requesting without If-None-Match re-signs and caches successfully
+  const client0ReSign = await decodeFeed(worker, client0Id);
+  assert.equal(client0ReSign.response.status, 200);
+  assert.equal(worker.store.signedSnapshots.size, 200);
+
+  // 4. TTL / Expiration check
+  const now = new Date("2026-08-28T12:00:00.000Z");
+  const cache = new BoundedSnapshotCache(10);
+  cache.set("item-active", { expiresAt: new Date("2026-08-29T12:00:00.000Z").toISOString() }, now.getTime());
+  cache.set("item-expired", { expiresAt: new Date("2026-08-28T11:00:00.000Z").toISOString() }, now.getTime());
+  assert.equal(cache.size, 2);
+
+  // Calling get on expired item returns undefined and evicts it
+  assert.equal(cache.get("item-expired", now.getTime()), undefined);
+  assert.equal(cache.size, 1);
+  assert.equal(cache.get("item-active", now.getTime()) !== undefined, true);
+
+  // Evict expired helper
+  cache.set("item-expired-2", { expiresAt: new Date("2026-08-28T10:00:00.000Z").toISOString() });
+  assert.equal(cache.size, 2);
+  const pruned = cache.evictExpired(now.getTime());
+  assert.equal(pruned, 1);
+  assert.equal(cache.size, 1);
+
+  // Capacity eviction prioritizing expired
+  const smallCache = new BoundedSnapshotCache(2);
+  smallCache.set("k1", { expiresAt: new Date("2026-08-28T11:00:00.000Z").toISOString() }, now.getTime());
+  smallCache.set("k2", { expiresAt: new Date("2026-08-28T13:00:00.000Z").toISOString() }, now.getTime());
+  // Adding k3 when full: k1 is expired, so k1 should be evicted even though it was inserted first
+  smallCache.set("k3", { expiresAt: new Date("2026-08-28T14:00:00.000Z").toISOString() }, now.getTime());
+  assert.equal(smallCache.size, 2);
+  assert.equal(smallCache.has("k1"), false);
+  assert.equal(smallCache.has("k2"), true);
+  assert.equal(smallCache.has("k3"), true);
+
+  // 5. Total UTF-8 byte budget ledger, mixed large/small envelopes, oversized bypass, 200/304, and re-signing
+  assert.equal(MAX_SNAPSHOT_CACHE_BYTES, 8 * 1024 * 1024);
+  const byteCache = new BoundedSnapshotCache(200, 600);
+  const vSmallA = { etag: '"a"', envelope: { payloadBase64: "x".repeat(80) }, expiresAt: "2026-08-29T12:00:00.000Z" };
+  const vSmallB = { etag: '"b"', envelope: { payloadBase64: "y".repeat(80) }, expiresAt: "2026-08-29T12:00:00.000Z" };
+  const vLarge = { etag: '"L"', envelope: { payloadBase64: "z".repeat(260) }, expiresAt: "2026-08-29T12:00:00.000Z" };
+  byteCache.set("small-a", vSmallA, now.getTime());
+  const bytesA = byteCache.byteLength;
+  assert.ok(bytesA > 80 && bytesA < 300);
+  byteCache.set("small-b", vSmallB, now.getTime());
+  assert.equal(byteCache.size, 2);
+  const bytesAB = byteCache.byteLength;
+  assert.ok(bytesAB <= 600);
+
+  // Same-key overwrite updates byte ledger accurately without leak
+  const vSmallAUpdated = { etag: '"a2"', envelope: { payloadBase64: "x".repeat(120) }, expiresAt: "2026-08-29T12:00:00.000Z" };
+  byteCache.set("small-a", vSmallAUpdated, now.getTime());
+  assert.equal(byteCache.size, 2);
+  assert.ok(byteCache.byteLength > bytesAB && byteCache.byteLength <= 600);
+
+  // Inserting vLarge exceeds 600B budget -> evicts LRU ("small-b", since "small-a" was just updated!)
+  byteCache.set("large-c", vLarge, now.getTime());
+  assert.ok(byteCache.byteLength <= 600);
+  assert.equal(byteCache.has("small-b"), false);
+  assert.equal(byteCache.has("small-a"), true);
+  assert.equal(byteCache.has("large-c"), true);
+
+  // Oversized single entry (> maxBytes) is neither inserted nor allowed to flush existing entries
+  const vOversized = { etag: '"huge"', envelope: { payloadBase64: "H".repeat(900) }, expiresAt: "2026-08-29T12:00:00.000Z" };
+  const beforeOversizedBytes = byteCache.byteLength;
+  byteCache.set("oversized-key", vOversized, now.getTime());
+  assert.equal(byteCache.has("oversized-key"), false);
+  assert.equal(byteCache.has("small-a"), true);
+  assert.equal(byteCache.has("large-c"), true);
+  assert.equal(byteCache.byteLength, beforeOversizedBytes);
+
+  // Delete and clear maintain zero-drift byte ledger
+  assert.equal(byteCache.delete("small-a"), true);
+  assert.ok(byteCache.byteLength > 0 && byteCache.byteLength < beforeOversizedBytes);
+  byteCache.clear();
+  assert.equal(byteCache.byteLength, 0);
+  assert.equal(byteCache.size, 0);
+
+  // End-to-end Worker test with mixed small (empty locale/rollout miss) and large (~24 KiB markdown) envelopes
+  let mixedNowMs = Date.parse("2026-08-28T12:00:00.000Z");
+  const keys = generateKeyPair();
+  const budgetBytes = 48 * 1024;
+  const mixedWorker = createWorker({
+    store: new MemoryStore(),
+    keys,
+    adminToken: ADMIN,
+    clock: () => new Date(mixedNowMs),
+    snapshotCacheLimit: 200,
+    snapshotCacheMaxBytes: budgetBytes,
+  });
+  // Publish an announcement targeting zh-CN with ~22 KiB markdown (~30 KiB Base64 envelope),
+  // while locale=en receives an empty ~400 B envelope (rollout/locale mix of small + large feeds!).
+  await publishSample(
+    mixedWorker,
+    sample({
+      id: "large-zh-only",
+      mustAcknowledge: false,
+      displayMode: "CENTER_ONLY",
+      severity: "INFO",
+      actions: [{ type: "DISMISS", key: "d", label: "OK" }],
+      target: { platform: "android", channel: "stable", locales: ["zh-CN"], rolloutPercent: 100, rolloutSalt: "stable-salt" },
+      translations: {
+        default: { title: "Large notice", summary: "Mixed cache test", bodyMarkdown: "Paragraph body for byte budget. ".repeat(700) },
+        "zh-CN": { title: "大体积公告", summary: "混合缓存测试", bodyMarkdown: "段落内容验证字节预算。".repeat(700) },
+      },
+    }),
+  );
+
+  const smallClient1 = "00000000-0000-4000-8000-000000000901";
+  const smallClient2 = "00000000-0000-4000-8000-000000000902";
+  const largeClient1 = "00000000-0000-4000-8000-000000000903";
+  const largeClient2 = "00000000-0000-4000-8000-000000000904";
+
+  const s1 = await decodeFeed(mixedWorker, smallClient1);
+  const l1 = await decodeFeed(mixedWorker, largeClient1, {}, "platform=android&channel=stable&versionCode=1&locale=zh-CN");
+  const s2 = await decodeFeed(mixedWorker, smallClient2);
+  assert.equal(s1.response.status, 200);
+  assert.equal(l1.response.status, 200);
+  assert.equal(s2.response.status, 200);
+  assert.equal(mixedWorker.store.signedSnapshots.size, 3);
+  assert.ok(mixedWorker.store.signedSnapshots.byteLength <= budgetBytes);
+
+  // Touch smallClient1 via 200 cache hit so largeClient1 becomes the oldest entry
+  const s1Hit = await decodeFeed(mixedWorker, smallClient1);
+  assert.equal(s1Hit.response.status, 200);
+  assert.equal(s1Hit.body.signatureBase64, s1.body.signatureBase64);
+
+  // Fetching second ~30 KiB envelope pushes total over 48 KiB -> evicts largeClient1 while keeping smallClient2 & smallClient1!
+  const l2 = await decodeFeed(mixedWorker, largeClient2, {}, "platform=android&channel=stable&versionCode=1&locale=zh-CN");
+  assert.equal(l2.response.status, 200);
+  assert.ok(mixedWorker.store.signedSnapshots.byteLength <= budgetBytes);
+  const remainingKeys = [...mixedWorker.store.signedSnapshots.keys()];
+  assert.equal(remainingKeys.some((k) => k.includes(largeClient1)), false, "largeClient1 evicted by byte budget");
+  assert.equal(remainingKeys.some((k) => k.includes(smallClient1)), true, "MRU smallClient1 retained");
+  assert.equal(remainingKeys.some((k) => k.includes(smallClient2)), true, "smallClient2 retained");
+  assert.equal(remainingKeys.some((k) => k.includes(largeClient2)), true, "new largeClient2 cached");
+
+  // Conditional 304 works both for cached largeClient2 and byte-evicted largeClient1
+  const l2NotMod = await decodeFeed(
+    mixedWorker,
+    largeClient2,
+    { "If-None-Match": l2.response.headers.get("ETag") },
+    "platform=android&channel=stable&versionCode=1&locale=zh-CN",
+  );
+  assert.equal(l2NotMod.response.status, 304);
+  const l1NotMod = await decodeFeed(
+    mixedWorker,
+    largeClient1,
+    { "If-None-Match": l1.response.headers.get("ETag") },
+    "platform=android&channel=stable&versionCode=1&locale=zh-CN",
+  );
+  assert.equal(l1NotMod.response.status, 304);
+
+  // Re-fetching evicted largeClient1 without If-None-Match re-signs a valid 200 envelope and re-caches within byte budget
+  const l1ReSigned = await decodeFeed(mixedWorker, largeClient1, {}, "platform=android&channel=stable&versionCode=1&locale=zh-CN");
+  assert.equal(l1ReSigned.response.status, 200);
+  assert.equal(
+    verify(null, Buffer.from(SIGN_PREFIX + l1ReSigned.body.payloadBase64), keys.publicKey, Buffer.from(l1ReSigned.body.signatureBase64, "base64")),
+    true,
+  );
+  assert.ok(mixedWorker.store.signedSnapshots.byteLength <= budgetBytes);
+
+  // Advance clock past 24h expiry: expired entries are reclaimed and byteLength resets cleanly
+  mixedNowMs = Date.parse("2026-08-29T13:00:00.000Z");
+  assert.ok(mixedWorker.store.signedSnapshots.evictExpired(mixedNowMs) >= 1);
+  assert.equal(mixedWorker.store.signedSnapshots.byteLength, 0);
+
+  // Oversized signed envelope (> maxBytes, <= 1 MiB) still returns valid 200 signed feed without flushing small cached entries
+  const tightWorker = createWorker({
+    store: mixedWorker.store,
+    keys,
+    adminToken: ADMIN,
+    clock: () => new Date(mixedNowMs),
+    snapshotCacheLimit: 200,
+    snapshotCacheMaxBytes: 4 * 1024,
+  });
+  const warmSmall = await decodeFeed(tightWorker, smallClient1);
+  assert.equal(warmSmall.response.status, 200);
+  assert.equal(tightWorker.store.signedSnapshots.size, 1);
+  const uncachedLarge = await decodeFeed(tightWorker, largeClient1, {}, "platform=android&channel=stable&versionCode=1&locale=zh-CN");
+  assert.equal(uncachedLarge.response.status, 200);
+  assert.equal(
+    verify(null, Buffer.from(SIGN_PREFIX + uncachedLarge.body.payloadBase64), keys.publicKey, Buffer.from(uncachedLarge.body.signatureBase64, "base64")),
+    true,
+  );
+  assert.equal(tightWorker.store.signedSnapshots.size, 1, "oversized envelope must not flush warm small entry");
+  assert.ok(tightWorker.store.signedSnapshots.byteLength <= 4 * 1024);
+
+  console.log("P2-7 announcement snapshot LRU/TTL/byte-budget cache ok");
 }
 
 console.log("announcement worker protocol tests ok");

@@ -43,7 +43,7 @@ internal class ChatToolApprovalRequest(
         // projection but reads repositories/content permissions;
         // collect the two enum labels off the Main dispatcher.
         val authoritySnapshot = try {
-            container.runtimeIntegration.snapshot()
+            container.authorityQueryPort.snapshot()
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (_: Exception) {
@@ -62,7 +62,7 @@ internal class ChatToolApprovalRequest(
         val invocationAuthority = if (workspaceScoped) {
             AgentToolConfirmation.invocationWorkspaceAuthority(
                 call.name, call.argumentsJson, threadWorkspaceId,
-            ) { workspaceId -> container.runtimeIntegration.approvalWorkspaceAuthority(workspaceId) }
+            ) { workspaceId -> container.toolApprovalAuthorityPort.approvalWorkspaceAuthority(workspaceId) }
         } else {
             approvals.diagnosticToolAuthority(call.name, toolExecutor.specs, threadWorkspaceId, selectedAuthority)
         }
@@ -98,7 +98,7 @@ internal class ChatToolApprovalRequest(
             rootReadConfirmed = AgentToolConfirmation.allowsRootRead(snapshotSettings, liveAgentSettings),
             ordinarySkip = AgentToolConfirmation.allows(snapshotSettings, liveAgentSettings),
             authorityForWorkspace = { workspaceId ->
-                container.runtimeIntegration.approvalWorkspaceAuthority(workspaceId)
+                container.toolApprovalAuthorityPort.approvalWorkspaceAuthority(workspaceId)
             },
         )
         if (autoApproved) {

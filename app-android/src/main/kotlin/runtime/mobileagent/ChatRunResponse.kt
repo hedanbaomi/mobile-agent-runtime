@@ -9,7 +9,7 @@ import kotlinx.coroutines.withContext
 import runtime.mobileagent.data.ConversationRepository
 import runtime.mobileagent.domain.*
 import runtime.mobileagent.knowledge.Citation
-import runtime.mobileagent.provider.SecretRedactor
+import runtime.mobileagent.provider.openai.StreamingSecretRedactor
 
 /**
  * One run's durable assistant response. Owns partial text, declared reasoning, tool/citation
@@ -26,68 +26,186 @@ internal class ChatRunResponse(
     private val nowMillis: () -> Long = System::currentTimeMillis,
 ) {
     var assistantId: String? = null
-    var answer = ""
-    var reasoning = ""
+
+    private val answerBuilder = StringBuilder()
+    var answer: String
+        get() = answerBuilder.toString()
+        set(value) {
+            answerBuilder.setLength(0)
+            answerBuilder.append(value)
+        }
+
+    private val reasoningBuilder = StringBuilder()
+    var reasoning: String
+        get() = reasoningBuilder.toString()
+        set(value) {
+            reasoningBuilder.setLength(0)
+            appendBoundedReasoning(reasoningBuilder, value)
+        }
+
     var terminalError: ErrorPart? = null
     var metadata = "{}"
     private var lastCheckpoint = 0L
     val observed = linkedMapOf<String, ToolCallPart>()
     private var lastUiFlush = 0L
 
-    fun flushStreamingAnswer(id: String?, text: String, force: Boolean, reasoningText: String = reasoning) {
-        val now = nowMillis()
-        if (!force && now - lastUiFlush < 50) return
-        lastUiFlush = now
-        onFlush(id, text, reasoningText, force)
-    }
+    private val redactor = StreamingSecretRedactor()
 
-    suspend fun beginModelResponse(initialAnswer: String, messageId: String) {
-        if (assistantId != null) checkpoint("COMPLETE")
-        observed.clear()
-        reasoning = ""
-        terminalError = null
-        answer = initialAnswer
-        assistantId = withContext(Dispatchers.IO) {
-            conversations.append(conversationId, MessageRole.ASSISTANT, answer,
-                status = "STREAMING", metadataJson = metadata, messageId = messageId).id
+    internal fun pendingRedactorLength(): Int = redactor.pendingLength()
+
+    private fun settleTails(tails: List<Pair<StreamingSecretRedactor.Channel, String>>) {
+        for ((channel, tail) in tails) {
+            if (tail.isNotEmpty()) {
+                when (channel) {
+                    StreamingSecretRedactor.Channel.TEXT,
+                    StreamingSecretRedactor.Channel.REFUSAL -> answerBuilder.append(tail)
+                    StreamingSecretRedactor.Channel.REASONING -> appendBoundedReasoning(reasoningBuilder, tail)
+                }
+            }
         }
     }
 
-    suspend fun appendText(delta: String, secrets: List<String>) {
-        answer = SecretRedactor.redact(answer + delta, secrets)
-        flushStreamingAnswer(assistantId, answer, force = false)
+    fun flushStreamingAnswer(id: String? = assistantId, force: Boolean = false) {
+        val now = nowMillis()
+        if (!force && now - lastUiFlush < 50) return
+        lastUiFlush = now
+        onFlush(id, answerBuilder.toString(), reasoningBuilder.toString(), force)
+    }
+
+    fun flushStreamingAnswer(
+        id: String?,
+        text: String,
+        force: Boolean,
+        reasoningText: String? = null,
+    ) {
+        val now = nowMillis()
+        if (!force && now - lastUiFlush < 50) return
+        lastUiFlush = now
+        onFlush(id, text, reasoningText ?: reasoningBuilder.toString(), force)
+    }
+
+    suspend fun beginModelResponse(initialAnswer: String, messageId: String) {
+        if (assistantId != null) {
+            finish()
+            checkpoint("COMPLETE")
+        }
+        discard()
+        observed.clear()
+        reasoningBuilder.setLength(0)
+        terminalError = null
+        answer = initialAnswer
+        assistantId = withContext(Dispatchers.IO) {
+            conversations.append(
+                conversationId, MessageRole.ASSISTANT, initialAnswer,
+                status = "STREAMING", metadataJson = metadata, messageId = messageId,
+            ).id
+        }
+    }
+
+    suspend fun appendText(delta: String, secrets: List<String> = emptyList()) {
+        if (delta.isEmpty()) return
+        redactor.registerSecrets(secrets)
+        val clean = redactor.accept(delta, StreamingSecretRedactor.Channel.TEXT)
+        if (clean.isNotEmpty()) {
+            answerBuilder.append(clean)
+        }
+        flushStreamingAnswer(assistantId, force = false)
         checkpointIfDue()
     }
 
-    suspend fun appendReasoning(delta: String, secrets: List<String>) {
+    suspend fun appendRefusal(delta: String, secrets: List<String> = emptyList()) {
         if (delta.isEmpty()) return
-        reasoning = appendDeclaredReasoning(reasoning, delta, secrets)
-        flushStreamingAnswer(assistantId, answer, force = false, reasoningText = reasoning)
+        redactor.registerSecrets(secrets)
+        val clean = redactor.accept(delta, StreamingSecretRedactor.Channel.REFUSAL)
+        if (clean.isNotEmpty()) {
+            answerBuilder.append(clean)
+        }
+        flushStreamingAnswer(assistantId, force = false)
+        checkpointIfDue()
+    }
+
+    suspend fun appendReasoning(delta: String, secrets: List<String> = emptyList()) {
+        if (delta.isEmpty()) return
+        appendDeclaredReasoning(reasoningBuilder, redactor, delta, secrets)
+        flushStreamingAnswer(assistantId, force = false)
         checkpointIfDue()
     }
 
     private suspend fun checkpointIfDue() {
-        if (nowMillis() - lastCheckpoint >= 500) {
+        val now = nowMillis()
+        if (now - lastCheckpoint >= 500) {
             checkpoint()
-            lastCheckpoint = nowMillis()
+            lastCheckpoint = now
+        }
+    }
+
+    suspend fun finish() {
+        if (redactor.hasPending()) {
+            settleTails(redactor.finish())
+        }
+        flushStreamingAnswer(assistantId, force = true)
+        checkpoint()
+        lastCheckpoint = nowMillis()
+    }
+
+    fun discard() {
+        redactor.discard()
+    }
+
+    suspend fun completeRoundForTransition() {
+        if (assistantId != null) checkpoint("COMPLETE")
+        discard()
+        assistantId = null
+        answerBuilder.setLength(0)
+        reasoningBuilder.setLength(0)
+        observed.clear()
+        terminalError = null
+    }
+
+    suspend fun failModelResponse(projected: ErrorPart): String {
+        discard()
+        val safeMessage = projected.message
+        val current = answerBuilder.toString()
+        answer = if (current.isBlank()) safeMessage else current.trimEnd() + "\n" + safeMessage
+        terminalError = projected
+        flushStreamingAnswer(assistantId, force = true)
+        if (assistantId == null) persistTerminalError(projected) else checkpoint("ERROR")
+        return safeMessage
+    }
+
+    suspend fun finishRun(completed: Boolean) {
+        if (completed) {
+            finish()
+        } else {
+            discard()
+            flushStreamingAnswer(assistantId, force = true)
+            checkpoint()
         }
     }
 
     suspend fun checkpoint(status: String = "STREAMING") {
+        if (status in TERMINAL_DISCARD_STATUSES) {
+            discard()
+        } else if (status in NORMAL_COMPLETE_STATUSES && redactor.hasPending()) {
+            settleTails(redactor.finish())
+        }
         val id = assistantId ?: return
+        val currentAnswer = answerBuilder.toString()
+        val currentReasoning = reasoningBuilder.toString()
         val parts = buildList<MessagePart> {
-            if (answer.isNotEmpty()) add(TextPart(answer))
-            if (reasoning.isNotEmpty()) add(ReasoningPart(reasoning, streaming = status == "STREAMING"))
+            if (currentAnswer.isNotEmpty()) add(TextPart(currentAnswer))
+            if (currentReasoning.isNotEmpty()) add(ReasoningPart(currentReasoning, streaming = status == "STREAMING"))
             terminalError?.let(::add)
             addAll(observed.values)
             addAll(citations.values.filter { it.first.runId == runId }.map { CitationPart(it.first.citationId) })
         }
         withContext(NonCancellable + Dispatchers.IO) {
-            conversations.checkpointAssistant(id, answer, parts, metadata, status)
+            conversations.checkpointAssistant(id, currentAnswer, parts, metadata, status)
         }
     }
 
     suspend fun persistTerminalError(part: ErrorPart) {
+        discard()
         terminalError = part
         if (assistantId == null) {
             val message = withContext(Dispatchers.IO) {
@@ -101,5 +219,20 @@ internal class ChatRunResponse(
         } else {
             checkpoint("ERROR")
         }
+    }
+
+    private companion object {
+        val NORMAL_COMPLETE_STATUSES = setOf("COMPLETE", "COMPLETED", "SUCCEEDED")
+        val TERMINAL_DISCARD_STATUSES = setOf(
+            "ERROR",
+            "CANCELLED",
+            "CANCELED",
+            "UNKNOWN_OUTCOME",
+            "FAILED",
+            "BUDGET_EXHAUSTED",
+            "TIMED_OUT",
+            "TIMEOUT",
+            "INTERRUPTED",
+        )
     }
 }

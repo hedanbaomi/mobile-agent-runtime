@@ -4,8 +4,6 @@
 package runtime.mobileagent.shizuku
 
 import android.os.Process
-import org.json.JSONArray
-import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
@@ -50,7 +48,7 @@ internal class ShizukuWorkspaceFileStore(
     private val rootPath: Path = rootFile.toPath().toAbsolutePath().normalize()
 
     fun status(): String = synchronized(lock) {
-        val result = JSONObject()
+        val result = ShizukuJson()
             .put("ok", true)
             .put("operation", "status")
             .put("workspace", WORKSPACE_LABEL)
@@ -113,13 +111,13 @@ internal class ShizukuWorkspaceFileStore(
             } ?: 0
             if (start > children.size) throw WorkspaceFailure(INVALID_CURSOR)
             val end = minOf(start + maxEntries, children.size)
-            val entries = JSONArray()
+            val entries = ArrayList<ShizukuJson>(end - start)
             var emittedEnd = start
             for (index in start until end) {
                 val child = children[index]
                 try {
                     val childSegments = segments + child.fileName.toString()
-                    val entry = JSONObject()
+                    val entry = ShizukuJson()
                         .put("path", relativePath(childSegments))
                     when (classifyChild(child)) {
                         ChildKind.DIRECTORY -> entry.put("type", "directory")
@@ -141,18 +139,18 @@ internal class ShizukuWorkspaceFileStore(
                 if (entry.optString("type") == "directory") {
                     entry.put("version", shallowDirectoryFingerprint(child))
                 }
-                    entries.put(entry)
+                    entries.add(entry)
                     // Long but valid names must still make progress without
                     // exceeding the Binder-safe JSON envelope.  Reserve room
                     // for a real continuation token before accepting the entry.
                     val probe = success("list", segments)
-                        .put("entries", entries)
+                        .putEntries("entries", entries)
                         .put("version", fingerprint)
                         .put("truncated", true)
                         .put("nextCursor", "x".repeat(CURSOR_DISPLAY_BYTES))
                     warnings.appendTo(probe)
                     if (probe.toString().toByteArray(StandardCharsets.UTF_8).size > MAX_OUTPUT_BYTES) {
-                        entries.remove(entries.length() - 1)
+                        entries.removeAt(entries.size - 1)
                         break
                     }
                     emittedEnd = index + 1
@@ -167,17 +165,17 @@ internal class ShizukuWorkspaceFileStore(
                     emittedEnd = index + 1
                 }
             }
-            if (entries.length() == 0 && emittedEnd == start && emittedEnd < children.size) {
+            if (entries.isEmpty() && emittedEnd == start && emittedEnd < children.size) {
                 // A valid but oversized model envelope (for example one very long filename)
                 // cannot make progress; retain the explicit bounded failure in that case.
                 throw WorkspaceFailure(OUTPUT_LIMIT)
             }
             val nextCursor = if (emittedEnd < children.size) cursorStore.issue(path, fingerprint, emittedEnd) else null
             val result = success("list", segments)
-                .put("entries", entries)
+                .putEntries("entries", entries)
                 .put("version", fingerprint)
                 .put("truncated", nextCursor != null)
-                .put("nextCursor", nextCursor ?: JSONObject.NULL)
+                .putNullable("nextCursor", nextCursor)
             warnings.appendTo(result)
             result
         }
@@ -309,6 +307,7 @@ internal class ShizukuWorkspaceFileStore(
             try {
                 createAndSync(temporary, patchedBytes)
                 rejectSymbolicLink(parent)
+                ShizukuWorkspacePathPolicy.verifyDirectoryClean(parent)
                 if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) || fileVersion(target) != currentVersion) {
                     throw WorkspaceFailure(CONFLICT)
                 }
@@ -391,6 +390,7 @@ internal class ShizukuWorkspaceFileStore(
                 // follow the target if it changed to a link, but rejecting the race keeps the
                 // contract explicit and fail-closed.
                 rejectSymbolicLink(parent)
+                ShizukuWorkspacePathPolicy.verifyDirectoryClean(parent)
                 if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
                     rejectSymbolicLink(target)
                     if (!Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
@@ -464,6 +464,7 @@ internal class ShizukuWorkspaceFileStore(
             }
 
             // Re-check after inspecting the directory and immediately before deletion.
+            target.parent?.let(ShizukuWorkspacePathPolicy::verifyDirectoryClean)
             rejectSymbolicLink(target)
             if (type == "file" && !Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS)) {
                 throw WorkspaceFailure(OPERATION_UNAVAILABLE)
@@ -528,6 +529,8 @@ internal class ShizukuWorkspaceFileStore(
 
                 // Re-check all mutable boundary conditions immediately before
                 // the atomic operation.  No copy/delete fallback is allowed.
+                source.parent?.let(ShizukuWorkspacePathPolicy::verifyDirectoryClean)
+                ShizukuWorkspacePathPolicy.verifyDirectoryClean(destinationParent)
                 rejectSymbolicLink(source)
                 if (!Files.exists(source, LinkOption.NOFOLLOW_LINKS)) throw WorkspaceFailure(NOT_FOUND)
                 rejectSymbolicLink(destinationParent)
@@ -596,7 +599,7 @@ internal class ShizukuWorkspaceFileStore(
             }
         }
 
-    private fun guarded(operation: String, action: () -> JSONObject): String = try {
+    private fun guarded(operation: String, action: () -> ShizukuJson): String = try {
         boundedJson(action())
     } catch (_: InvalidShizukuPath) {
         failure(operation, INVALID_PATH)
@@ -613,19 +616,19 @@ internal class ShizukuWorkspaceFileStore(
         failure(operation, OPERATION_UNAVAILABLE)
     }
 
-    private fun success(operation: String, segments: List<String>): JSONObject = JSONObject()
+    private fun success(operation: String, segments: List<String>): ShizukuJson = ShizukuJson()
         .put("ok", true)
         .put("operation", operation)
         .put("path", relativePath(segments))
 
     private fun failure(operation: String, code: String): String = boundedJson(
-        JSONObject()
+        ShizukuJson()
             .put("ok", false)
             .put("operation", operation)
             .put("code", code),
     )
 
-    private fun boundedJson(result: JSONObject): String {
+    private fun boundedJson(result: ShizukuJson): String {
         val encoded = result.toString()
         if (encoded.toByteArray(StandardCharsets.UTF_8).size > MAX_OUTPUT_BYTES) {
             return failure("result", OUTPUT_LIMIT)
@@ -637,22 +640,8 @@ internal class ShizukuWorkspaceFileStore(
         return ShizukuWorkspacePathPolicy.parse(raw, allowRoot)
     }
 
-    private fun resolve(segments: List<String>): Path {
-        val candidate = segments.fold(rootPath) { parent, segment -> parent.resolve(segment) }.normalize()
-        if (candidate != rootPath && !candidate.startsWith(rootPath)) throw WorkspaceFailure(OUTSIDE_ROOT)
-        var current = rootPath
-        rejectSymbolicLink(current)
-        segments.forEach { segment ->
-            current = current.resolve(segment)
-            if (Files.exists(current, LinkOption.NOFOLLOW_LINKS)) rejectSymbolicLink(current)
-        }
-        val canonicalRoot = rootPath.toFile().canonicalFile.toPath()
-        val canonicalCandidate = candidate.toFile().canonicalFile.toPath()
-        if (canonicalCandidate != canonicalRoot && !canonicalCandidate.startsWith(canonicalRoot)) {
-            throw WorkspaceFailure(OUTSIDE_ROOT)
-        }
-        return candidate
-    }
+    private fun resolve(segments: List<String>): Path =
+        ShizukuWorkspacePathPolicy.verifyResolvedPath(rootPath, segments, ::rejectSymbolicLink)
 
     private fun ensureRoot(): Path {
         if (Files.exists(rootPath, LinkOption.NOFOLLOW_LINKS)) {
@@ -695,6 +684,7 @@ internal class ShizukuWorkspaceFileStore(
         Files.newDirectoryStream(directory).use { stream: DirectoryStream<Path> ->
             stream.forEach { entry -> entries.add(entry) }
         }
+        ShizukuWorkspacePathPolicy.validateDirectoryEntries(entries)
         return entries
     }
 
@@ -834,14 +824,14 @@ internal class ShizukuWorkspaceFileStore(
             total++
         }
 
-        fun appendTo(result: JSONObject) {
+        fun appendTo(result: ShizukuJson) {
             if (total == 0) return
             result.put("skippedEntries", total)
-            val warningArray = JSONArray()
+            val warningArray = ArrayList<ShizukuJson>(counts.size)
             counts.forEach { (code, count) ->
-                warningArray.put(JSONObject().put("code", code).put("count", count))
+                warningArray.add(ShizukuJson().put("code", code).put("count", count))
             }
-            result.put("warnings", warningArray)
+            result.putEntries("warnings", warningArray)
         }
     }
 
@@ -1087,7 +1077,7 @@ internal class ShizukuWorkspaceFileStore(
 
     private data class Usage(val files: Int, val bytes: Long, val entries: Int)
 
-    private class WorkspaceFailure(val code: String) : Exception()
+    internal class WorkspaceFailure(val code: String) : Exception()
 
     companion object {
         internal const val WORKSPACE_LABEL = "Download/MobileAgentRuntime-Shizuku"
@@ -1126,6 +1116,7 @@ internal class ShizukuWorkspaceFileStore(
         private const val WARNING_UNREADABLE_ENTRY_SKIPPED = "UNREADABLE_ENTRY_SKIPPED"
 
         const val INVALID_PATH = "INVALID_PATH"
+        const val PROVIDER_ALIAS_AMBIGUOUS = "PROVIDER_ALIAS_AMBIGUOUS"
         const val INVALID_CONTENT = "INVALID_CONTENT"
         const val FILE_TOO_LARGE = "FILE_TOO_LARGE"
         const val LIMIT = "LIMIT"

@@ -4,31 +4,46 @@
 # Third-party notices
 
 This APK carries the original notices for the application's resolved dependency
-set (generated from the captured `debugRuntimeClasspath` report, which the
-non-debuggable review variant resolves identically). First-party code remains
-`AGPL-3.0-only`; these third-party texts retain their upstream licenses.
+set (generated from `app-android/gradle.lockfile` for `debugRuntimeClasspath`,
+which the non-debuggable review variant resolves identically). First-party code
+remains `AGPL-3.0-only`; these third-party texts retain their upstream licenses.
 
-The complete, versioned index is `licenses/index.json`. It contains 148
+The complete, versioned index is `licenses/index.json`. It contains 147
 external Maven coordinates (including Shizuku `aidl`, `api`, `provider`, and
-`shared`, all at 13.1.5), the exact version POM source, the license source,
-and APK-relative paths to the full license text. Each text file has a `.license`
-REUSE sidecar. The index also records SHA-256 values for the text and cached
-artifact evidence.
+`shared`, all at 13.1.5, and Google RE2/J at 1.8), the exact version POM source,
+the license source, and APK-relative paths to the full license text. Each text
+file has a `.license` REUSE sidecar. The index also records SHA-256 values for
+the text and cached artifact evidence.
 
 The bundle preserves legal text found in cached JAR/AAR files before using an
 official standard or exact-version source. The POM metadata groups are:
 
 | POM metadata | Count |
 | --- | ---: |
-| The Apache Software License, Version 2.0 | 136 |
+| The Apache Software License, Version 2.0 | 134 |
 | The Apache License, Version 2.0 (Kotlin stdlib family) | 4 |
 | MIT License (Shizuku API x4 and ONNX Runtime 1.29.0) | 5 |
+| Go License (Google RE2/J 1.8, BSD-3-Clause) | 1 |
 | Bouncy Castle Licence (1.79) | 1 |
 | POM without a license element, resolved from parent or exact artifact | 2 |
 
 OkHttp 4.12.0 additionally carries the original
 `okhttp3/internal/publicsuffix/NOTICE` and the complete Mozilla Public License
 2.0 text referenced by that notice. Its own Apache 2.0 text remains separate.
+
+In addition to the 147 external Maven coordinates, `licenses/index.json` indexes
+vendored third-party source material compiled from `vendor/`:
+
+- AOSP Jetpack Compose Material Icons (`vendored:aosp-material-icons-1.7.6`,
+  Apache-2.0, Copyright 2020 The Android Open Source Project): nine Material
+  icon vector definitions extracted from
+  `androidx.compose.material:material-icons-extended:1.7.6` in
+  `vendor/material-icons/src/main/kotlin/runtime/mobileagent/ui/vendored/VendoredMaterialIcons.kt`
+  (`3e217e283b810256bd016ab56e6351a2742f8fc479406d784aa8d658dac71bab`), packaged
+  with `licenses/aosp-material-icons-1.7.6/LICENSE.txt`
+  (`074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff`) and
+  `licenses/aosp-material-icons-1.7.6/NOTICE.txt`
+  (`2d31d693c02caf77f43872fe2aa365960a51e010a3645f687ec47e7b5c8aa762`).
 
 The index lists the native and model assets managed by other owners with exact
 generated-boundary legal/payload SHA-256 values. `runtime-notices.py --check`
@@ -53,9 +68,6 @@ asset boundary; it fails closed when a boundary or material is missing:
   `NOTICE.txt` `af50216ba6c698e64b3a91f63278543d79f963938ca14fd23df45f2d6de3491c`.
 - distiluse-base-multilingual-cased-v2: Apache-2.0; pinned Xenova int8 ONNX and upstream Sentence Transformers Dense Tanh projection.
   Exact weights, tokenizer, projection and manifest SHA256 values and pinned source revisions are recorded in `licenses/index.json` and the packaged `LICENSE-NOTICE.txt`.
-
-
-
 
 This asset notice is generated alongside the repository notice and is intended
 to remain readable from the installed APK without network access.

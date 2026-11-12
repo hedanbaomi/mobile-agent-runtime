@@ -839,76 +839,6 @@
       }
     },
     {
-      "id": "maven:androidx.compose.material:material-icons-extended-android:1.7.6",
-      "name": "material-icons-extended-android",
-      "version": "1.7.6",
-      "license": "Apache-2.0",
-      "source": "https://dl.google.com/dl/android/maven2/androidx/compose/material/material-icons-extended-android/1.7.6/material-icons-extended-android-1.7.6.pom",
-      "licenseSource": "https://www.apache.org/licenses/LICENSE-2.0.txt",
-      "files": [
-        {
-          "label": "complete Apache-2.0 text (cached POM metadata plus complete standard text)",
-          "path": "licenses/maven/androidx.compose.material__material-icons-extended-android__1.7.6/LICENSE.txt",
-          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-          "origin": "https://www.apache.org/licenses/LICENSE-2.0.txt"
-        }
-      ],
-      "provenance": {
-        "pomSha256": "25d2174304c3179e6b3bfdd8ce3ce95c90a92c4bd4ae8e0c7b941e5817840060",
-        "cachedArtifacts": [
-          {
-            "file": "material-icons-extended-release.aar",
-            "sha256": "07e97e52f35d789ef475d9c687e5ca46cc54f9a0d4af8e1dca92ac25fb21450c"
-          }
-        ],
-        "pomLicenseNames": [
-          "The Apache Software License, Version 2.0"
-        ],
-        "pomLicenseUrls": [
-          "http://www.apache.org/licenses/LICENSE-2.0.txt"
-        ],
-        "parent": null,
-        "projectUrl": "https://developer.android.com/jetpack/androidx/releases/compose-material#1.7.6",
-        "scmUrl": "https://cs.android.com/androidx/platform/frameworks/support",
-        "resolution": "cached POM metadata plus complete standard text"
-      }
-    },
-    {
-      "id": "maven:androidx.compose.material:material-icons-extended:1.7.6",
-      "name": "material-icons-extended",
-      "version": "1.7.6",
-      "license": "Apache-2.0",
-      "source": "https://dl.google.com/dl/android/maven2/androidx/compose/material/material-icons-extended/1.7.6/material-icons-extended-1.7.6.pom",
-      "licenseSource": "https://www.apache.org/licenses/LICENSE-2.0.txt",
-      "files": [
-        {
-          "label": "complete Apache-2.0 text (cached POM metadata plus complete standard text)",
-          "path": "licenses/maven/androidx.compose.material__material-icons-extended__1.7.6/LICENSE.txt",
-          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
-          "origin": "https://www.apache.org/licenses/LICENSE-2.0.txt"
-        }
-      ],
-      "provenance": {
-        "pomSha256": "ac54af03fa805d636c0bfa458be16ac3598bfbb36dbec180f65a0618503fa3bd",
-        "cachedArtifacts": [
-          {
-            "file": "material-icons-extended-metadata-1.7.6.jar",
-            "sha256": "714e2bfc4095b291e0dbcbd7626bc0e420fc2f6a78f2416398596504debd9117"
-          }
-        ],
-        "pomLicenseNames": [
-          "The Apache Software License, Version 2.0"
-        ],
-        "pomLicenseUrls": [
-          "http://www.apache.org/licenses/LICENSE-2.0.txt"
-        ],
-        "parent": null,
-        "projectUrl": "https://developer.android.com/jetpack/androidx/releases/compose-material#1.7.6",
-        "scmUrl": "https://cs.android.com/androidx/platform/frameworks/support",
-        "resolution": "cached POM metadata plus complete standard text"
-      }
-    },
-    {
       "id": "maven:androidx.compose.material:material-ripple-android:1.7.6",
       "name": "material-ripple-android",
       "version": "1.7.6",
@@ -5201,6 +5131,50 @@
         "scmUrl": null,
         "resolution": "exact cached JAR license plus official v2.0.16 source"
       }
+    },
+    {
+      "id": "vendored:aosp-material-icons-1.7.6",
+      "name": "AOSP Jetpack Compose Material Icons (vendored subset)",
+      "version": "1.7.6",
+      "license": "Apache-2.0",
+      "source": "https://dl.google.com/dl/android/maven2/androidx/compose/material/material-icons-extended/1.7.6/material-icons-extended-1.7.6.pom",
+      "licenseSource": "https://cs.android.com/androidx/platform/frameworks/support",
+      "files": [
+        {
+          "label": "AOSP Material Icons license",
+          "path": "licenses/aosp-material-icons-1.7.6/LICENSE.txt",
+          "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+          "origin": "vendor/material-icons/LICENSE.txt"
+        },
+        {
+          "label": "AOSP Material Icons notice",
+          "path": "licenses/aosp-material-icons-1.7.6/NOTICE.txt",
+          "sha256": "2d31d693c02caf77f43872fe2aa365960a51e010a3645f687ec47e7b5c8aa762",
+          "origin": "vendor/material-icons/NOTICE.txt"
+        }
+      ],
+      "provenance": {
+        "upstreamCoordinate": "androidx.compose.material:material-icons-extended:1.7.6",
+        "copyright": "Copyright 2020 The Android Open Source Project",
+        "vendoredSources": [
+          {
+            "path": "vendor/material-icons/src/main/kotlin/runtime/mobileagent/ui/vendored/VendoredMaterialIcons.kt",
+            "sha256": "3e217e283b810256bd016ab56e6351a2742f8fc479406d784aa8d658dac71bab"
+          }
+        ],
+        "icons": [
+          "Outlined.Chat",
+          "Outlined.SmartToy",
+          "Outlined.Tune",
+          "Outlined.MenuBook",
+          "Outlined.Extension",
+          "Outlined.Campaign",
+          "Outlined.Cloud",
+          "Outlined.BugReport",
+          "Filled.Error"
+        ]
+      },
+      "verification": "vendored-source-and-packaged-assets"
     },
     {
       "id": "asset:cpython-3.14.7",

@@ -24,7 +24,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import shutil
 import sys
 import urllib.error
 import urllib.parse
@@ -37,8 +39,8 @@ from xml.etree import ElementTree
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_LOG = ROOT / ".private" / "overnight" / "android-runtime-dependencies.log"
-DEFAULT_CACHE = Path(r"C:\Users\32735\.gradle\caches\modules-2\files-2.1")
+DEFAULT_LOG = ROOT / "app-android" / "gradle.lockfile"
+DEFAULT_CACHE = Path(os.environ.get("GRADLE_USER_HOME", str(Path.home() / ".gradle"))) / "caches" / "modules-2" / "files-2.1"
 ASSETS_ROOT = ROOT / "app-android" / "src" / "main" / "assets"
 MAVEN_ROOT = ASSETS_ROOT / "licenses" / "maven"
 INDEX_PATH = ASSETS_ROOT / "licenses" / "index.json"
@@ -50,7 +52,7 @@ DEFAULT_GENERATED_ASSET_ROOTS = (
 )
 ARTIFACT_ASSET_PREFIXES = ("assets/", "base/assets/")
 
-EXPECTED_COORDINATES = 149
+EXPECTED_COORDINATES = 147
 ALLOWED_OFFICIAL_HOSTS = {
     "www.apache.org",
     "raw.githubusercontent.com",
@@ -91,6 +93,56 @@ MPL_URL = "https://www.mozilla.org/media/MPL/2.0/index.txt"
 _OFFICIAL_CACHE: dict[str, bytes] = {}
 SPDX_LICENSE_PREFIX = "SPDX-" + "License-Identifier: "
 SPDX_COPYRIGHT_PREFIX = "SPDX-" + "FileCopyrightText: "
+
+VENDORED_ENTRIES = [
+    {
+        "id": "vendored:aosp-material-icons-1.7.6",
+        "name": "AOSP Jetpack Compose Material Icons (vendored subset)",
+        "version": "1.7.6",
+        "license": "Apache-2.0",
+        "source": (
+            "https://dl.google.com/dl/android/maven2/androidx/compose/material/"
+            "material-icons-extended/1.7.6/material-icons-extended-1.7.6.pom"
+        ),
+        "licenseSource": "https://cs.android.com/androidx/platform/frameworks/support",
+        "files": [
+            {
+                "label": "AOSP Material Icons license",
+                "path": "licenses/aosp-material-icons-1.7.6/LICENSE.txt",
+                "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+                "origin": "vendor/material-icons/LICENSE.txt",
+            },
+            {
+                "label": "AOSP Material Icons notice",
+                "path": "licenses/aosp-material-icons-1.7.6/NOTICE.txt",
+                "sha256": "2d31d693c02caf77f43872fe2aa365960a51e010a3645f687ec47e7b5c8aa762",
+                "origin": "vendor/material-icons/NOTICE.txt",
+            },
+        ],
+        "provenance": {
+            "upstreamCoordinate": "androidx.compose.material:material-icons-extended:1.7.6",
+            "copyright": "Copyright 2020 The Android Open Source Project",
+            "vendoredSources": [
+                {
+                    "path": "vendor/material-icons/src/main/kotlin/runtime/mobileagent/ui/vendored/VendoredMaterialIcons.kt",
+                    "sha256": "3e217e283b810256bd016ab56e6351a2742f8fc479406d784aa8d658dac71bab",
+                }
+            ],
+            "icons": [
+                "Outlined.Chat",
+                "Outlined.SmartToy",
+                "Outlined.Tune",
+                "Outlined.MenuBook",
+                "Outlined.Extension",
+                "Outlined.Campaign",
+                "Outlined.Cloud",
+                "Outlined.BugReport",
+                "Filled.Error",
+            ],
+        },
+        "verification": "vendored-source-and-packaged-assets",
+    }
+]
 
 NATIVE_MODEL_ENTRIES = [{'id': 'asset:cpython-3.14.7',
   'name': 'CPython Android runtime',
@@ -259,16 +311,31 @@ def file_sha256(path: Path) -> str:
 
 
 def parse_coordinates(log_path: Path) -> list[Coordinate]:
-    """Parse the captured Gradle tree's resolved coordinate at each edge.
+    """Parse resolved ``debugRuntimeClasspath`` coordinates from a lockfile or tree log.
 
-    Gradle's tree repeats resolved nodes with ``(*)`` and prints constraints
-    with ``(c)``.  Both are useful for the captured inventory, while project
-    edges and the ``platform`` pseudo-group are excluded.  De-duplication
-    yields the 148-coordinate inventory recorded by the current strict main flow.
+    Accepts either a committed Gradle ``gradle.lockfile`` (selecting entries
+    locked into ``debugRuntimeClasspath``) or a captured Gradle dependency tree
+    report (``+---`` / ``\\---`` edges, excluding ``project :`` and the
+    ``platform`` pseudo-group).  De-duplication yields the 147-coordinate
+    inventory recorded by the current strict main flow.
     """
 
+    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
     coordinates: set[Coordinate] = set()
-    for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+    if any(line.startswith("# This is a Gradle generated file for dependency locking.") for line in lines[:5]):
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or stripped.startswith("empty=") or "=" not in stripped:
+                continue
+            gav, confs = stripped.split("=", 1)
+            if "debugRuntimeClasspath" not in confs.split(","):
+                continue
+            parts = gav.split(":")
+            if len(parts) == 3 and parts[0] != "platform":
+                coordinates.add(Coordinate(parts[0], parts[1], parts[2]))
+        return sorted(coordinates, key=lambda item: item.gav)
+
+    for line in lines:
         if not TREE_MARKER_RE.search(line) or "project :" in line:
             continue
         match = COORDINATE_RE.search(line)
@@ -412,11 +479,16 @@ def check_official_url(url: str) -> None:
         raise RuntimeError(f"refusing non-official license URL: {url}")
 
 
-def fetch_official(url: str, offline: bool) -> bytes:
+def fetch_official(url: str, offline: bool, existing_path: Path | None = None) -> bytes:
     check_official_url(url)
     if url in _OFFICIAL_CACHE:
         return _OFFICIAL_CACHE[url]
     if offline:
+        if existing_path is not None and existing_path.is_file():
+            data = existing_path.read_bytes()
+            if data:
+                _OFFICIAL_CACHE[url] = data
+                return data
         raise RuntimeError(f"offline mode cannot fetch missing official license text: {url}")
     request = urllib.request.Request(url, headers={"User-Agent": "mobileAgentRuntime-runtime-notices/1"})
     with urllib.request.urlopen(request, timeout=30) as response:
@@ -468,13 +540,20 @@ def sidecar_for(license_kind: str) -> str:
     return "Apache-2.0"
 
 
-def write_legal_file(path: Path, data: bytes, license_kind: str) -> str:
+def write_legal_file(
+    path: Path,
+    data: bytes,
+    license_kind: str,
+    copyright_text: str | None = None,
+) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     sidecar_lines = []
-    if license_kind == "BSD-3-Clause" and b"Copyright (c) 2009 The Go Authors. All rights reserved." in data:
+    if copyright_text is not None:
+        sidecar_lines.append(SPDX_COPYRIGHT_PREFIX + copyright_text)
+    elif license_kind == "BSD-3-Clause" and b"Copyright (c) 2009 The Go Authors. All rights reserved." in data:
         sidecar_lines.append(SPDX_COPYRIGHT_PREFIX + "2009 The Go Authors. All rights reserved.")
-    if license_kind == "MPL-2.0":
+    elif license_kind == "MPL-2.0":
         # The NOTICE and the standard MPL text carry no copyright line of
         # their own.  NONE records that fact without inventing an owner.
         sidecar_lines.append(SPDX_COPYRIGHT_PREFIX + "NONE")
@@ -626,6 +705,127 @@ def validate_sha256(value: object, context: str) -> str:
     return value
 
 
+def validate_vendor_path(path: object, context: str) -> str:
+    if (
+        not isinstance(path, str)
+        or not path.startswith("vendor/")
+        or path.startswith("/")
+        or "\\" in path
+        or ".." in Path(path).parts
+    ):
+        raise RuntimeError(f"verify: invalid vendor path for {context}: {path}")
+    return path
+
+
+def generate_vendored_assets() -> list[dict]:
+    for entry in VENDORED_ENTRIES:
+        entry_id = str(entry["id"])
+        provenance = entry.get("provenance", {})
+        copyright_text = str(provenance.get("copyright", "")).strip()
+        if not copyright_text:
+            raise RuntimeError(f"missing copyright metadata for {entry_id}")
+        for source_record in provenance.get("vendoredSources", []):
+            src_rel = validate_vendor_path(source_record.get("path"), f"{entry_id} vendored source")
+            expected_src_sha = validate_sha256(source_record.get("sha256"), f"{entry_id} {src_rel}")
+            src_file = ROOT / src_rel
+            if not src_file.is_file():
+                raise RuntimeError(f"missing vendored source file for {entry_id}: {src_file}")
+            actual_src_sha = file_sha256(src_file)
+            if actual_src_sha != expected_src_sha:
+                raise RuntimeError(
+                    f"vendored source SHA-256 mismatch for {entry_id} at {src_rel}: "
+                    f"expected {expected_src_sha}, got {actual_src_sha}"
+                )
+        for record in entry.get("files", []):
+            asset_rel = validate_asset_path(record.get("path"), f"{entry_id} {record.get('label')}")
+            origin_rel = validate_vendor_path(record.get("origin"), f"{entry_id} {asset_rel}")
+            expected_sha = validate_sha256(record.get("sha256"), f"{entry_id} {asset_rel}")
+            origin_file = ROOT / origin_rel
+            if not origin_file.is_file():
+                raise RuntimeError(f"missing vendored legal file for {entry_id}: {origin_file}")
+            origin_bytes = origin_file.read_bytes()
+            if sha256(origin_bytes) != expected_sha:
+                raise RuntimeError(
+                    f"vendored legal file SHA-256 mismatch for {entry_id} at {origin_rel}: "
+                    f"expected {expected_sha}, got {sha256(origin_bytes)}"
+                )
+            written_sha = write_legal_file(
+                ASSETS_ROOT / asset_rel,
+                origin_bytes,
+                str(entry["license"]),
+                copyright_text=copyright_text,
+            )
+            if written_sha != expected_sha:
+                raise RuntimeError(f"written asset SHA-256 mismatch for {entry_id} at {asset_rel}")
+    return list(VENDORED_ENTRIES)
+
+
+def verify_vendored_entries(components: list[dict]) -> list[dict]:
+    expected_by_id = {entry["id"]: entry for entry in VENDORED_ENTRIES}
+    actual = {
+        entry.get("id"): entry
+        for entry in components
+        if isinstance(entry, dict) and str(entry.get("id", "")).startswith("vendored:")
+    }
+    if set(actual) != set(expected_by_id):
+        missing = sorted(set(expected_by_id) - set(actual))
+        extra = sorted(set(actual) - set(expected_by_id))
+        raise RuntimeError(f"verify: vendored entries mismatch missing={missing} extra={extra}")
+
+    for entry_id, expected in expected_by_id.items():
+        entry = actual[entry_id]
+        if entry != expected:
+            raise RuntimeError(f"verify: vendored index metadata mismatch for {entry_id}")
+        provenance = entry.get("provenance", {})
+        copyright_text = str(provenance.get("copyright", "")).strip()
+        if not copyright_text:
+            raise RuntimeError(f"verify: missing copyright metadata for {entry_id}")
+        vendored_sources = provenance.get("vendoredSources")
+        if not isinstance(vendored_sources, list) or not vendored_sources:
+            raise RuntimeError(f"verify: missing vendoredSources for {entry_id}")
+        for source_record in vendored_sources:
+            src_rel = validate_vendor_path(source_record.get("path"), f"{entry_id} vendored source")
+            expected_src_sha = validate_sha256(source_record.get("sha256"), f"{entry_id} {src_rel}")
+            src_file = ROOT / src_rel
+            if not src_file.is_file():
+                raise RuntimeError(f"verify: missing vendored source file {src_file}")
+            actual_src_sha = file_sha256(src_file)
+            if actual_src_sha != expected_src_sha:
+                raise RuntimeError(
+                    f"verify: vendored source SHA-256 mismatch for {entry_id} at {src_rel}: "
+                    f"expected {expected_src_sha}, got {actual_src_sha}"
+                )
+        files = entry.get("files")
+        if not isinstance(files, list) or not files:
+            raise RuntimeError(f"verify: no legal files for {entry_id}")
+        expected_sidecar = (
+            SPDX_COPYRIGHT_PREFIX + copyright_text + "\n"
+            + SPDX_LICENSE_PREFIX + sidecar_for(str(entry["license"])) + "\n"
+        ).encode("utf-8")
+        for record in files:
+            asset_rel = validate_asset_path(record.get("path"), f"{entry_id} {record.get('label')}")
+            origin_rel = validate_vendor_path(record.get("origin"), f"{entry_id} {asset_rel}")
+            expected_sha = validate_sha256(record.get("sha256"), f"{entry_id} {asset_rel}")
+            vendor_file = ROOT / origin_rel
+            if not vendor_file.is_file():
+                raise RuntimeError(f"verify: missing vendored legal source {vendor_file}")
+            if file_sha256(vendor_file) != expected_sha:
+                raise RuntimeError(f"verify: vendored legal source SHA-256 mismatch {vendor_file}")
+            asset_file = ASSETS_ROOT / asset_rel
+            if not asset_file.is_file():
+                raise RuntimeError(f"verify: missing legal asset {asset_file}")
+            if file_sha256(asset_file) != expected_sha:
+                raise RuntimeError(f"verify: SHA-256 mismatch {asset_file}")
+            if asset_file.read_bytes() != vendor_file.read_bytes():
+                raise RuntimeError(f"verify: legal asset {asset_file} differs from {vendor_file}")
+            sidecar = asset_file.with_name(asset_file.name + ".license")
+            if not sidecar.is_file():
+                raise RuntimeError(f"verify: missing REUSE sidecar {sidecar}")
+            if sidecar.read_bytes() != expected_sidecar:
+                raise RuntimeError(f"verify: REUSE sidecar content mismatch {sidecar}")
+    return [actual[entry_id] for entry_id in expected_by_id]
+
+
 def verify_native_index_entries(components: list[dict]) -> list[dict]:
     expected_by_id = {entry["id"]: entry for entry in NATIVE_MODEL_ENTRIES}
     actual = {
@@ -774,7 +974,7 @@ def verify_artifact(artifact_path: Path, components: list[dict]) -> None:
         for component in components:
             component_id = component.get("id")
             records = indexed_asset_records(component)
-            is_maven = isinstance(component_id, str) and component_id.startswith("maven:")
+            has_source_sidecars = isinstance(component_id, str) and component_id.startswith(("maven:", "vendored:"))
             for record in records:
                 path = validate_asset_path(
                     record.get("path"),
@@ -789,7 +989,7 @@ def verify_artifact(artifact_path: Path, components: list[dict]) -> None:
                         f"verify: packaged asset SHA-256 mismatch for {component_id} at {path}: "
                         f"expected {expected}, got {actual}"
                     )
-                if is_maven and record in component.get("files", []):
+                if has_source_sidecars and record in component.get("files", []):
                     sidecar_path = f"{path}.license"
                     packaged_sidecar = read_artifact_asset(
                         bundle,
@@ -850,7 +1050,12 @@ def maven_pom_url(coordinate: Coordinate) -> str:
     return f"{repository}/{group_path}/{artifact}/{version}/{artifact}-{version}.pom"
 
 
-def generate(log_path: Path, cache_root: Path, offline: bool) -> tuple[list[dict], list[Coordinate]]:
+def generate(
+    log_path: Path,
+    cache_root: Path,
+    offline: bool,
+    write_evidence_doc: bool = False,
+) -> tuple[list[dict], list[Coordinate]]:
     coordinates = parse_coordinates(log_path)
     if len(coordinates) != EXPECTED_COORDINATES:
         raise RuntimeError(f"expected {EXPECTED_COORDINATES} coordinates, parsed {len(coordinates)}")
@@ -888,7 +1093,7 @@ def generate(log_path: Path, cache_root: Path, offline: bool) -> tuple[list[dict
                 output_name = "LICENSE.html"
             else:
                 output_name = "LICENSE.txt"
-            license_bytes = fetch_official(license_source, offline)
+            license_bytes = fetch_official(license_source, offline, output_dir / output_name)
             digest = write_legal_file(output_dir / output_name, license_bytes, license_kind)
             files.insert(
                 0,
@@ -919,7 +1124,7 @@ def generate(log_path: Path, cache_root: Path, offline: bool) -> tuple[list[dict
 
         if coordinate.gav == "com.squareup.okhttp3:okhttp:4.12.0":
             mpl_path = output_dir / "MPL-2.0.txt"
-            mpl_bytes = fetch_official(MPL_URL, offline)
+            mpl_bytes = fetch_official(MPL_URL, offline, mpl_path)
             digest = write_legal_file(mpl_path, mpl_bytes, "MPL-2.0")
             files.append(
                 {
@@ -956,11 +1161,18 @@ def generate(log_path: Path, cache_root: Path, offline: bool) -> tuple[list[dict
         }
         components.append(component)
 
+    expected_slugs = {coordinate.slug for coordinate in coordinates}
+    if MAVEN_ROOT.is_dir():
+        for child in sorted(MAVEN_ROOT.iterdir()):
+            if child.is_dir() and child.name not in expected_slugs:
+                shutil.rmtree(child)
+
+    vendored_components = generate_vendored_assets()
     index = {
         "schemaVersion": 1,
         "generatedFor": "app-android debugRuntimeClasspath",
         "generatedFrom": "captured app-android debugRuntimeClasspath report",
-        "components": components + NATIVE_MODEL_ENTRIES,
+        "components": components + vendored_components + NATIVE_MODEL_ENTRIES,
     }
     ASSETS_ROOT.joinpath("licenses").mkdir(parents=True, exist_ok=True)
     INDEX_PATH.write_text(json.dumps(index, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
@@ -970,7 +1182,8 @@ def generate(log_path: Path, cache_root: Path, offline: bool) -> tuple[list[dict
         encoding="utf-8",
         newline="\n",
     )
-    write_evidence(components, coordinates)
+    if write_evidence_doc:
+        write_evidence(components, coordinates)
     return components, coordinates
 
 
@@ -1081,11 +1294,11 @@ def verify(
     components = index.get("components")
     if not isinstance(components, list):
         raise RuntimeError("verify: components must be an array")
-    expected_component_count = EXPECTED_COORDINATES + len(NATIVE_MODEL_ENTRIES)
+    expected_component_count = EXPECTED_COORDINATES + len(VENDORED_ENTRIES) + len(NATIVE_MODEL_ENTRIES)
     if len(components) != expected_component_count:
         raise RuntimeError(
             f"verify: expected {expected_component_count} total components "
-            f"({EXPECTED_COORDINATES} Maven + {len(NATIVE_MODEL_ENTRIES)} native/model), found {len(components)}"
+            f"({EXPECTED_COORDINATES} Maven + {len(VENDORED_ENTRIES)} vendored + {len(NATIVE_MODEL_ENTRIES)} native/model), found {len(components)}"
         )
     maven = [item for item in components if str(item.get("id", "")).startswith("maven:")]
     if len(maven) != EXPECTED_COORDINATES:
@@ -1130,7 +1343,22 @@ def verify(
             sidecar = local.with_name(local.name + ".license")
             if not sidecar.is_file():
                 raise RuntimeError(f"verify: missing REUSE sidecar {sidecar}")
+    vendored_entries = verify_vendored_entries(components)
     native_entries = verify_native_index_entries(components)
+    licenses_root = ASSETS_ROOT / "licenses"
+    if licenses_root.is_dir():
+        source_license_entries: list[str] = []
+        for entry_path in sorted(licenses_root.rglob("*")):
+            rel_posix = entry_path.relative_to(ASSETS_ROOT).as_posix()
+            parts = PurePosixPath(rel_posix).parts
+            if entry_path.is_file():
+                source_license_entries.append(f"assets/{rel_posix}")
+            elif entry_path.is_dir() and (
+                (len(parts) == 3 and parts[1] == "maven")
+                or (len(parts) == 2 and parts[1] != "maven")
+            ):
+                source_license_entries.append(f"assets/{rel_posix}/__dir__")
+        assert_no_unindexed_license_dirs(source_license_entries, components, "source assets/licenses")
     source_notice = ASSETS_ROOT / "THIRD_PARTY_NOTICES.md"
     if source_notice.is_file():
         assert_notice_hashes_are_indexed(source_notice.read_bytes(), components, "source THIRD_PARTY_NOTICES.md")
@@ -1150,8 +1378,8 @@ def verify(
         boundary_summary.append(f"{len(artifacts)} artifact(s)")
     print(
         f"runtime-notices check PASS: {len(maven)} Maven coordinates, "
-        f"{len(native_entries)} native/model entries, indexed legal files and "
-        f"{' + '.join(boundary_summary)} verified"
+        f"{len(vendored_entries)} vendored entries, {len(native_entries)} native/model entries, "
+        f"indexed legal files and {' + '.join(boundary_summary)} verified"
     )
 
 
@@ -1175,17 +1403,28 @@ def main(argv: list[str]) -> int:
         help="APK/AAB/ZIP artifact boundary to verify (repeat to verify multiple artifacts)",
     )
     parser.add_argument("--offline", action="store_true", help="disallow official license text fetches")
+    parser.add_argument(
+        "--write-evidence",
+        action="store_true",
+        help="also rewrite the historical docs/evidence runtime-notices report",
+    )
     args = parser.parse_args(argv)
     try:
         if args.write:
-            components, coordinates = generate(args.log, args.gradle_cache, args.offline)
-            print(f"runtime-notices write PASS: {len(coordinates)} coordinates, {len(components)} Maven assets")
+            components, coordinates = generate(
+                args.log,
+                args.gradle_cache,
+                args.offline,
+                write_evidence_doc=args.write_evidence,
+            )
+            print(f"runtime-notices write PASS: {len(coordinates)} coordinates, {len(components)} Maven assets, {len(VENDORED_ENTRIES)} vendored assets")
         if args.check:
             verify(args.log, args.gradle_cache, args.generated_assets, args.artifact)
         if args.check_artifact:
             if not args.artifact:
                 parser.error("--check-artifact requires --artifact")
             components = json.loads(INDEX_PATH.read_text(encoding="utf-8"))["components"]
+            verify_vendored_entries(components)
             verify_native_index_entries(components)
             for artifact in args.artifact:
                 verify_artifact(artifact, components)

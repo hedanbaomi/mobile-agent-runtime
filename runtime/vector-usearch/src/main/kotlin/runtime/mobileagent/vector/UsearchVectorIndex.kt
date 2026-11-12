@@ -35,14 +35,24 @@ import runtime.mobileagent.knowledge.VectorIndexSnapshotPort
  * truncated or mismatched snapshot is rejected instead of silently serving a
  * partial index.
  */
-class UsearchVectorIndex(
+class UsearchVectorIndex internal constructor(
     override val spaceId: String,
     override val dimension: Int,
     capacity: Int,
+    private val backend: UsearchBackend,
 ) : VectorIndex, VectorIndexSnapshotPort {
+    constructor(
+        spaceId: String,
+        dimension: Int,
+        capacity: Int,
+    ) : this(spaceId, dimension, capacity, NativeUsearchIndex)
+
     private val lock = Any()
     @Volatile
-    private var pointer: Long = NativeUsearchIndex.create(dimension, capacity)
+    private var pointer: Long = backend.create(dimension, capacity).also {
+        check(it != 0L) { "USearch index creation returned no handle" }
+    }
+    private var closed = false
     private val keys = linkedMapOf<Long, String>()
     private val vectors = linkedMapOf<Long, FloatArray>()
 
@@ -60,14 +70,19 @@ class UsearchVectorIndex(
 
     override val vectorCount: Int get() = synchronized(lock) { keys.size }
 
+    private fun requireOpen() {
+        check(!closed) { "USearch index is closed" }
+        check(pointer != 0L) { "USearch index is closed" }
+    }
+
     override fun add(id: String, vector: FloatArray) {
         synchronized(lock) {
-            check(pointer != 0L) { "USearch index is closed" }
+            requireOpen()
             require(vector.size == dimension) { "vector dimension mismatch" }
             require(vector.all { it.isFinite() }) { "vector must be finite" }
             require(id !in uniqueIds) { "duplicate vector id: $id" }
             val key = nextKey
-            NativeUsearchIndex.add(pointer, key, vector)
+            backend.add(pointer, key, vector)
             nextKey++
             keys[key] = id
             vectors[key] = vector.copyOf()
@@ -76,19 +91,20 @@ class UsearchVectorIndex(
     }
 
     override fun search(query: FloatArray, topK: Int): List<Pair<String, Float>> = synchronized(lock) {
-        check(pointer != 0L) { "USearch index is closed" }
+        requireOpen()
         require(query.size == dimension) { "query dimension mismatch" }
         require(query.all { it.isFinite() }) { "query must be finite" }
         if (topK <= 0 || keys.isEmpty()) return emptyList()
-        return NativeUsearchIndex.search(pointer, query, topK.coerceAtMost(keys.size)).asSequence().mapNotNull { key ->
+        return backend.search(pointer, query, topK.coerceAtMost(keys.size)).asSequence().mapNotNull { key ->
             val id = keys[key] ?: return@mapNotNull null
             id to cosine(query, vectors.getValue(key))
         }.toList()
     }
 
     override fun close() = synchronized(lock) {
+        closed = true
         if (pointer == 0L) return
-        NativeUsearchIndex.close(pointer)
+        backend.close(pointer)
         pointer = 0L
         keys.clear()
         vectors.clear()
@@ -113,13 +129,14 @@ class UsearchVectorIndex(
      * serving it and retry the snapshot later.
      */
     override fun saveSnapshot(target: File): VectorIndexSnapshotIdentity = synchronized(lock) {
-        check(pointer != 0L) { "USearch index is closed" }
+        requireOpen()
         val ordered = keys.entries.sortedBy { it.key }.map { it.key to it.value }
         try {
-            check(NativeUsearchIndex.hasSequentialKeys(pointer, ordered.size) &&
+            check(backend.hasSequentialKeys(pointer, ordered.size) &&
                 ordered.withIndex().all { (index, pair) -> pair.first == index+1L }) { "Snapshot keys are not a complete sequence" }
-            NativeUsearchIndex.save(pointer, target.absolutePath)
+            backend.save(pointer, target.absolutePath)
             val nativeLength = target.length()
+            check(nativeLength > 0L) { "USearch native snapshot payload is empty" }
             writeMapping(target, ordered)
             val mappingLength = target.length() - nativeLength
             val payloadHash = sha256(target, 0L, nativeLength + mappingLength)
@@ -143,6 +160,7 @@ class UsearchVectorIndex(
      */
     override fun loadSnapshot(source: File, expected: VectorIndexSnapshotIdentity) {
         synchronized(lock) {
+            check(!closed) { "USearch index is closed" }
             releaseNative()
             var restored = 0L
             var committed = false
@@ -168,22 +186,22 @@ class UsearchVectorIndex(
                     throw VectorIndexSnapshotException("vector snapshot identity mismatch: ${source.name}")
                 }
                 restored = try {
-                    NativeUsearchIndex.restore(source.absolutePath)
+                    backend.restore(source.absolutePath)
                 } catch (failure: Exception) {
                     // JNI raises IllegalStateException for a truncated/foreign
                     // file; callers must see one fail-closed snapshot type.
                     throw VectorIndexSnapshotException("vector snapshot is not a readable USearch index", failure)
                 }
                 if (restored == 0L) throw VectorIndexSnapshotException("USearch restore returned no handle")
-                val restoredCount = NativeUsearchIndex.size(restored)
+                val restoredCount = backend.size(restored)
                 if (restoredCount != stored.memberIds.size) {
                     throw VectorIndexSnapshotException(
                         "vector snapshot is incomplete: index holds $restoredCount of ${stored.memberIds.size} vectors",
                     )
                 }
-                if (!NativeUsearchIndex.hasSequentialKeys(restored, stored.memberIds.size))
+                if (!backend.hasSequentialKeys(restored, stored.memberIds.size))
                     throw VectorIndexSnapshotException("vector snapshot key mapping is incomplete")
-                val restoredDimension = NativeUsearchIndex.dimensions(restored)
+                val restoredDimension = backend.dimensions(restored)
                 if (restoredDimension != dimension) {
                     throw VectorIndexSnapshotException(
                         "vector snapshot dimension $restoredDimension does not match $dimension",
@@ -207,7 +225,7 @@ class UsearchVectorIndex(
                 throw VectorIndexSnapshotException("vector snapshot could not be restored", failure)
             } finally {
                 if (!committed) {
-                    if (restored != 0L) runCatching { NativeUsearchIndex.close(restored) }
+                    if (restored != 0L) runCatching { backend.close(restored) }
                     releaseNative()
                 }
             }
@@ -222,7 +240,7 @@ class UsearchVectorIndex(
         vectors.clear()
         uniqueIds.clear()
         nextKey = 1L
-        if (current != 0L) runCatching { NativeUsearchIndex.close(current) }
+        if (current != 0L) runCatching { backend.close(current) }
     }
 
     private class SnapshotMap(
@@ -401,33 +419,54 @@ class UsearchVectorIndex(
     }
 }
 
-/** Factory to inject into KnowledgeRepository from the Android app container. */
-class UsearchVectorIndexFactory : VectorIndexFactory {
-    override fun create(spaceId: String, dimension: Int, capacity: Int): VectorIndex =
-        UsearchVectorIndex(spaceId, dimension, capacity)
+internal interface UsearchBackend {
+    fun create(dimension: Int, capacity: Int): Long
+    fun add(pointer: Long, key: Long, vector: FloatArray)
+    fun search(pointer: Long, query: FloatArray, topK: Int): LongArray
+    fun save(pointer: Long, path: String)
+    fun restore(path: String): Long
+    fun size(pointer: Long): Int
+    fun dimensions(pointer: Long): Int
+    fun hasSequentialKeys(pointer: Long, count: Int): Boolean
+    fun close(pointer: Long)
 }
 
-private object NativeUsearchIndex {
+/** Factory to inject into KnowledgeRepository from the Android app container. */
+class UsearchVectorIndexFactory internal constructor(
+    private val backend: UsearchBackend? = null,
+) : VectorIndexFactory {
+    constructor() : this(null)
+
+    override fun create(spaceId: String, dimension: Int, capacity: Int): VectorIndex =
+        if (backend != null) {
+            UsearchVectorIndex(spaceId, dimension, capacity, backend)
+        } else {
+            UsearchVectorIndex(spaceId, dimension, capacity)
+        }
+}
+
+private object NativeUsearchIndex : UsearchBackend {
     init {
         System.loadLibrary("usearch_jni")
     }
 
-    fun create(dimension: Int, capacity: Int): Long = nativeCreate(dimension, capacity)
+    override fun create(dimension: Int, capacity: Int): Long = nativeCreate(dimension, capacity)
 
-    fun add(pointer: Long, key: Long, vector: FloatArray) = nativeAdd(pointer, key, vector)
+    override fun add(pointer: Long, key: Long, vector: FloatArray) = nativeAdd(pointer, key, vector)
 
-    fun search(pointer: Long, query: FloatArray, topK: Int): LongArray = nativeSearch(pointer, query, topK)
+    override fun search(pointer: Long, query: FloatArray, topK: Int): LongArray = nativeSearch(pointer, query, topK)
 
-    fun save(pointer: Long, path: String) = nativeSave(pointer, path)
+    override fun save(pointer: Long, path: String) = nativeSave(pointer, path)
 
-    fun restore(path: String): Long = nativeRestore(path)
+    override fun restore(path: String): Long = nativeRestore(path)
 
-    fun size(pointer: Long): Int = nativeSize(pointer)
+    override fun size(pointer: Long): Int = nativeSize(pointer)
 
-    fun dimensions(pointer: Long): Int = nativeDimensions(pointer)
-    fun hasSequentialKeys(pointer: Long, count: Int): Boolean = nativeHasSequentialKeys(pointer, count)
+    override fun dimensions(pointer: Long): Int = nativeDimensions(pointer)
 
-    fun close(pointer: Long) = nativeClose(pointer)
+    override fun hasSequentialKeys(pointer: Long, count: Int): Boolean = nativeHasSequentialKeys(pointer, count)
+
+    override fun close(pointer: Long) = nativeClose(pointer)
 
     private external fun nativeCreate(dimension: Int, capacity: Int): Long
     private external fun nativeAdd(pointer: Long, key: Long, vector: FloatArray)

@@ -378,3 +378,7 @@ interface RootWorkspaceUiPort {
         shell: Boolean,
     ): Boolean
 }
+
+fun interface RootWorkspaceUiPortProvider {
+    fun rootWorkspaceUiPort(): RootWorkspaceUiPort
+}

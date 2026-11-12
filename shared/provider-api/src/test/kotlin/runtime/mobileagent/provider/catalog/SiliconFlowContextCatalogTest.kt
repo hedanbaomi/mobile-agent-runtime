@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors
 // SPDX-License-Identifier: AGPL-3.0-only
 
-package runtime.mobileagent
+package runtime.mobileagent.provider.catalog
 
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine

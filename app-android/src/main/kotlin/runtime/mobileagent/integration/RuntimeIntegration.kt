@@ -202,7 +202,7 @@ class RuntimeIntegration(
     private val shizukuAuthority: ShizukuAuthorityBridge? = null,
     private val wiredAuthority: WiredAdbAuthorityPort,
 ) : SettingsAuthorityPort, runtime.mobileagent.RootRecoveryAuthorityPort, RootWorkspaceUiPort, ThreadWorkspacePort, ThreadWorkspaceRuntimePort, WorkspacePickerPort,
-    CanonicalWorkspaceSink, AutoCloseable {
+    CanonicalWorkspaceSink, WorkspacePresentationPort, ToolAssemblyPort, ToolApprovalAuthorityPort, RootExecutionPort, SkillMemoryAvailabilityPort, AutoCloseable {
     private val appContext = context.applicationContext
     private val workspaceUiPresentations = WorkspaceUiPresentationStore(appContext)
     private val scopeJob = SupervisorJob()
@@ -579,7 +579,8 @@ class RuntimeIntegration(
     }
 
     /** Optional accessibility actions assist only the explicitly selected, ready ADB authority. */
-    fun screenActionAuthority() = runtime.mobileagent.observation.ScreenActionAdmission.from(authorityManager.state.value)
+    override fun screenActionAuthority(): runtime.mobileagent.observation.ScreenActionAuthority? =
+        runtime.mobileagent.observation.ScreenActionAdmission.from(authorityManager.state.value)
 
     override fun authoritySnapshot(): WorkspacePickerAuthoritySnapshot {
         val manager = authorityManager.state.value
@@ -992,17 +993,17 @@ class RuntimeIntegration(
      * displayName after rejecting URI/locator markers.
      */
     /** Attribution only: never grants access or selects a fallback Authority. */
-    internal fun diagnosticWorkspaceAuthority(workspaceId: String?): DiagnosticAuthority =
+    override fun diagnosticWorkspaceAuthority(workspaceId: String?): DiagnosticAuthority =
         workspaceId?.let(workspaceRepository::get)?.authorityOrNull()?.toDiagnostic() ?: DiagnosticAuthority.NONE
 
     /** Approval classification must distinguish an ordinary workspace from a failed/missing read. */
-    internal fun approvalWorkspaceAuthority(workspaceId: String): DiagnosticAuthority {
+    override fun approvalWorkspaceAuthority(workspaceId: String): DiagnosticAuthority {
         val workspace = requireNotNull(workspaceRepository.get(workspaceId)) { "Workspace unavailable for approval" }
         if (workspace.backendType != WorkspaceBackendType.PRIVILEGED) return DiagnosticAuthority.NONE
         return requireNotNull(workspace.authorityOrNull()) { "Workspace authority unavailable for approval" }.toDiagnostic()
     }
 
-    fun workspaceUiPresentation(workspaceId: String, chinese: Boolean = true): WorkspaceUiPresentation? {
+    override fun workspaceUiPresentation(workspaceId: String, chinese: Boolean): WorkspaceUiPresentation? {
         workspaceUiPresentations.get(workspaceId)?.let { return it }
         val workspace = workspaceRepository.get(workspaceId) ?: return null
         return fallbackWorkspaceUiPresentation(workspace, workspace.authorityOrNull(), chinese)
@@ -1028,22 +1029,22 @@ class RuntimeIntegration(
     }
 
     /** Compose only the tools admitted by this run's frozen and live canonical authorization. */
-    fun createToolExecutorFactory(
+    override fun createToolExecutorFactory(
         context: ToolExecutionContext,
-        web: ToolExecutor? = null,
-        mcp: ToolExecutor? = null,
-        python: ToolExecutor? = null,
+        web: ToolExecutor?,
+        mcp: ToolExecutor?,
+        python: ToolExecutor?,
     ): ToolExecutorFactory = runToolAssembly.createToolExecutorFactory(context, web, mcp, python)
 
     /** Frozen Root routes remain reserved while their live service is unavailable. */
-    fun frozenRootWorkspaceIds(context: ToolExecutionContext): Set<String> = runToolAssembly.frozenRootWorkspaceIds(context)
+    override fun frozenRootWorkspaceIds(context: ToolExecutionContext): Set<String> = runToolAssembly.frozenRootWorkspaceIds(context)
 
     /**
      * Return a closed, aggregate-only explanation of the workspace exposure inputs for one run.
      * This is diagnostic data, not an authorization decision; executors still revalidate every
      * grant, binding, provider state, path, and one-shot lifetime immediately before dispatch.
      */
-    fun toolExposureDiagnostics(context: ToolExecutionContext): RuntimeToolExposureDiagnostics {
+    override fun toolExposureDiagnostics(context: ToolExecutionContext): RuntimeToolExposureDiagnostics {
         val frozen = freezeContext(context)
         val agentContext = freezeContext(context.copy(skillId = null, skillRevision = null, trustedSkillEnvelope = false))
         val registeredIds = workspaceRegistry.descriptors().map { it.id }.toSet()
@@ -1123,7 +1124,7 @@ class RuntimeIntegration(
      * canonical repository remains the sole authority; no binding, install,
      * package, path, storage, or URI identity crosses this seam.
      */
-    fun skillMemoryAvailability(
+    override fun skillMemoryAvailability(
         agentId: String,
         snapshotId: String,
         trustedSkillId: String,
@@ -1132,6 +1133,15 @@ class RuntimeIntegration(
         snapshotId = snapshotId,
         trustedSkillId = trustedSkillId,
     )
+
+    override fun currentExecutionStamp(
+        authority: runtime.mobileagent.domain.Authority,
+        requireShellConsent: Boolean,
+    ): runtime.mobileagent.domain.RootExecutionStamp? =
+        rootCoordinator.currentExecutionStamp(authority, requireShellConsent)
+
+    override fun admitNewRun(record: runtime.mobileagent.domain.RunRecord): runtime.mobileagent.domain.RunRecord =
+        rootCoordinator.admitNewRun(record)
 
     /**
      * Create one immutable Agent snapshot and bind the current canonical grants to it as one

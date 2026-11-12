@@ -87,4 +87,21 @@
     <string name="chat_retrieval_partial_coverage_fallback">本次检索有知识库未参与；不要声称已检索这些未参与的来源。</string>
     <string name="chat_user_message_saved_unconfirmed">消息已在本机保存；尚无本轮完成确认，送达与处理结果未确认，不会自动重发。</string>
     <string name="chat_configuration_snapshot_label">配置快照 %1$s</string>
+    <string name="shell_current_agent">当前智能体</string>
+    <string name="workspace_browser_title">选择设备目录</string>
+    <string name="workspace_browser_current">当前位置：%1$s</string>
+    <string name="workspace_browser_privacy_hint">目录名称只在本机界面显示；模型只会得到选中后的工作区标识和相对路径。</string>
+    <string name="workspace_browser_empty">此处没有可进入的子目录。</string>
+    <string name="workspace_browser_load_more">加载更多目录</string>
+    <string name="workspace_browser_incomplete">目录列表未完整返回，请重新打开。</string>
+    <string name="workspace_browser_up">返回上一级</string>
+    <string name="workspace_browser_attach">使用当前目录</string>
+    <string name="workspace_dialog_cancel">取消</string>
+    <string name="workspace_wired_title">输入 ADB 设备目录</string>
+    <string name="workspace_wired_hint">请输入由你确认的绝对目录，例如 /sdcard/Download。路径只用于本次前台绑定，不会进入模型、日志或工具参数。</string>
+    <string name="workspace_wired_label">设备绝对目录</string>
+    <string name="workspace_wired_attach">绑定</string>
+    <string name="workspace_full_device_title">开启完整设备文件访问？</string>
+    <string name="workspace_full_device_body">此授权允许该智能体在当前工作区之外访问所选 ADB 级通道实际可见的文件。它不等于 Root，并会在暂时断联时保留。若已设置默认工作区，将仅按该工作区原有且未撤销的能力重新确认授权，不会补回已撤销的写入权限。</string>
+    <string name="workspace_full_device_confirm">确认开启</string>
 </resources>

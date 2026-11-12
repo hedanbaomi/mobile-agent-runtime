@@ -25,6 +25,12 @@ SPDX-FileCopyrightText = "Copyright Gradle contributors"
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
+path = ["vendor/material-icons/**"]
+precedence = "override"
+SPDX-FileCopyrightText = "Copyright 2020 The Android Open Source Project"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
 path = ["app-android/src/main/assets/AGPL-3.0-only.txt"]
 precedence = "override"
 SPDX-FileCopyrightText = "Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>"

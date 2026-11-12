@@ -23,6 +23,7 @@ import runtime.mobileagent.domain.stripOutputCapAliases
 import runtime.mobileagent.domain.validateOutputCapLayers
 import runtime.mobileagent.domain.advancedOutputLimitOverride
 import runtime.mobileagent.provider.*
+import runtime.mobileagent.provider.openai.RedactionBufferLimitExceeded
 import runtime.mobileagent.provider.openai.SseEventDecoder
 import runtime.mobileagent.provider.openai.SseLineReader
 import runtime.mobileagent.provider.openai.receiveStreamedReplyInFull
@@ -236,6 +237,7 @@ class GoogleGeminiAdapter(
             }
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (_: MissingSecret) { Outcome(ProviderConnectionErrorCode.CREDENTIAL_UNAVAILABLE) }
+        catch (_: RedactionBufferLimitExceeded) { Outcome(ProviderConnectionErrorCode.UNKNOWN, observedStatus) }
         catch (error: ProviderHttpResponseException) { Outcome(httpCode(error.httpStatus), error.httpStatus) }
         catch (_: SSLException) { Outcome(ProviderConnectionErrorCode.TLS_FAILURE, eventCode = if (sent) "UNKNOWN_OUTCOME" else null) }
         catch (_: SocketTimeoutException) { Outcome(ProviderConnectionErrorCode.TIMEOUT, eventCode = if (sent) "UNKNOWN_OUTCOME" else null) }

@@ -12,7 +12,7 @@ internal fun AppContainer.readChatSessionPage(archived: Boolean, cursor: Convers
     val owners = agents.snapshotAgentIds(page.conversations.map { it.snapshotId })
     val labels = chatSessionWorkspaceLabels(page.conversations.map { it.id },
         bindingWorkspaceId = { threadWorkspacePort.conversationWorkspaceBinding(it)?.workspaceId },
-        title = { runtimeIntegration.workspaceUiPresentation(it)?.title })
+        title = { workspacePresentationPort.workspaceUiPresentation(it)?.title })
     return page.conversations.map { conversation ->
         val owner = owners[conversation.snapshotId]
         ChatSessionUi(id = conversation.id, title = conversation.title, timeLabel = conversation.updatedAt.take(16),

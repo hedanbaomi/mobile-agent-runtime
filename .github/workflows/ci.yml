@@ -69,6 +69,7 @@ jobs:
           python tools/verify_test_selection.py
           python tools/test_verify_test_selection.py
           python tools/test_device_suite_runner.py
+          python tools/test_run_device_suite.py
           python tools/test_measure_app_startup.py
           python tools/test_measure_frame_times.py
           python tools/test_compare_retrieval_metrics.py
@@ -83,8 +84,17 @@ jobs:
         run: python tools/test_verify_native_alignment.py
       - name: Packaged notice inventory regression tests
         run: python tools/test_runtime_notices.py
-      - name: Unit tests and Android debug APK/SBOM
-        run: ./gradlew -I tools/verify-ci-kotlin-heap.gradle debugEvidenceGate --dependency-verification=strict --no-daemon
+      - name: Unit tests, Android debug APK and androidTest APK
+        run: ./gradlew -I tools/verify-ci-kotlin-heap.gradle debugEvidenceGate :app-android:assembleDebug :app-android:assembleDebugAndroidTest --dependency-verification=strict --no-daemon
+      - name: Upload debug and androidTest APK artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: debug-apks-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            app-android/build/outputs/apk/debug/*.apk
+            app-android/build/outputs/apk/androidTest/debug/*.apk
+
       - name: Upload debug artifact evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -106,8 +116,30 @@ jobs:
             app-android/build/reports/provenance/review.provenance.json
             app-android/build/reports/apk-size/review.json
 
+  # ---------------------------------------------------------------------------
+  # P1-4 CI Build Reuse Architecture:
+  # Across the 7 emulator matrix runners (5 android-smoke API levels, convergence,
+  # and knowledge-pipeline), Gradle previously recompiled C++ native libraries
+  # (libmobileagent.so, libusearch.so), Kotlin bytecode, and packaged APKs in each VM.
+  #
+  # Topology:
+  # 1. The check job packages both target and test APKs once:
+  #    ./gradlew :app-android:assembleDebug :app-android:assembleDebugAndroidTest
+  # 2. Publishes the artifact bundle: `debug-apks-${{ github.sha }}` via upload-artifact.
+  # 3. Downstream Debug emulator jobs declare `needs: check`, restore the pre-built APKs
+  #    into `/tmp/prebuilt-debug-apks` via download-artifact
+  #    (pinned: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8),
+  #    and pass `--prebuilt-apk-dir /tmp/prebuilt-debug-apks` to `tools/run-device-suite`.
+  # 4. `tools/run-device-suite` verifies and installs the restored APKs via `adb install -r`
+  #    and runs `adb shell am instrument -w -r`, avoiding redundant compilation while preserving:
+  #    - tools/verify_test_selection.py (minimum-suite router & smoke-api script)
+  #    - tools/verify-workflows.py (fail-closed YAML parser, no continue-on-error)
+  #    - tools/release-gate.gradle.kts:verifyCiPins (40-char SHA pins & # v... comments)
+  # ---------------------------------------------------------------------------
+
   android-smoke:
     name: Android UI smoke (API ${{ matrix.api-level }})
+    needs: check
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -127,6 +159,11 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - name: Download prebuilt debug and androidTest APKs
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: debug-apks-${{ github.sha }}
+          path: /tmp/prebuilt-debug-apks
       - name: Enable KVM acceleration
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -146,7 +183,7 @@ jobs:
           disable-animations: true
           script: |
             timeout 120 sh -c 'until adb -s "emulator-${EMULATOR_PORT:-5554}" shell service check package 2>/dev/null | grep -q "found"; do sleep 2; done'
-            bash tools/run-device-suite smoke-api Debug '${{ matrix.api-level }}'
+            bash tools/run-device-suite smoke-api Debug '${{ matrix.api-level }}' --prebuilt-apk-dir /tmp/prebuilt-debug-apks
       - name: Preserve smoke result and first failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -159,6 +196,7 @@ jobs:
 
   convergence-device:
     name: Convergence device tests (API 36)
+    needs: check
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -174,6 +212,11 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - name: Download prebuilt debug and androidTest APKs
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: debug-apks-${{ github.sha }}
+          path: /tmp/prebuilt-debug-apks
       - name: Enable KVM acceleration
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -193,7 +236,7 @@ jobs:
           disable-animations: true
           script: |
             timeout 120 sh -c 'until adb -s "emulator-${EMULATOR_PORT:-5554}" shell service check package 2>/dev/null | grep -q "found"; do sleep 2; done'
-            bash tools/run-device-suite convergence Debug
+            bash tools/run-device-suite convergence Debug --prebuilt-apk-dir /tmp/prebuilt-debug-apks
       - name: Preserve convergence result and first failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -207,6 +250,7 @@ jobs:
 
   knowledge-pipeline-device:
     name: Document pipeline device tests (API 36, synthetic only)
+    needs: check
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -222,6 +266,11 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+      - name: Download prebuilt debug and androidTest APKs
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: debug-apks-${{ github.sha }}
+          path: /tmp/prebuilt-debug-apks
       - name: Enable KVM acceleration
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -239,7 +288,7 @@ jobs:
           disable-animations: true
           script: |
             timeout 120 sh -c 'until adb -s "emulator-${EMULATOR_PORT:-5554}" shell service check package 2>/dev/null | grep -q "found"; do sleep 2; done'
-            bash tools/run-device-suite pipeline Debug
+            bash tools/run-device-suite pipeline Debug --prebuilt-apk-dir /tmp/prebuilt-debug-apks
       - name: Upload pipeline device results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

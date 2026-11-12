@@ -124,18 +124,7 @@ class BundledSqliteConnection(
     }
 
     private fun queryConnection(value: SQLiteConnection, sql: String, args: List<Any?>): List<SqlRow> =
-            value.prepare(sql).use { stmt ->
-                bind(stmt, args)
-                val rows = mutableListOf<SqlRow>()
-                while (stmt.step()) {
-                    val map = linkedMapOf<String, Any?>()
-                    for (i in 0 until stmt.getColumnCount()) {
-                        map[stmt.getColumnName(i)] = readColumn(stmt, i)
-                    }
-                    rows += SqlRow(map)
-                }
-                rows
-            }
+        querySqliteConnection(value, sql, args, ::bind, ::readColumn)
 
     override fun <T> transaction(block: () -> T): T {
         return withWriter {
@@ -186,30 +175,54 @@ class BundledSqliteConnection(
         catch (failure: Throwable) { writerPoisoned = true; original.addSuppressed(failure) }
     }
 
-    private fun bind(stmt: SQLiteStatement, args: List<Any?>) {
-        args.forEachIndexed { index, value ->
-            val i = index + 1
-            when (value) {
-                null -> stmt.bindNull(i)
-                is ByteArray -> stmt.bindBlob(i, value)
-                is Long -> stmt.bindLong(i, value)
-                is Int -> stmt.bindLong(i, value.toLong())
-                is Double -> stmt.bindDouble(i, value)
-                is Float -> stmt.bindDouble(i, value.toDouble())
-                is Boolean -> stmt.bindLong(i, if (value) 1 else 0)
-                else -> stmt.bindText(i, value.toString())
-            }
+    private fun readColumn(stmt: SQLiteStatement, index: Int): Any? = readStatementColumn(stmt, index)
+    private fun bind(stmt: SQLiteStatement, args: List<Any?>) = bindStatement(stmt, args)
+}
+
+internal fun querySqliteConnection(
+    value: SQLiteConnection,
+    sql: String,
+    args: List<Any?>,
+    bind: (SQLiteStatement, List<Any?>) -> Unit = ::bindStatement,
+    readColumn: (SQLiteStatement, Int) -> Any? = ::readStatementColumn,
+): List<SqlRow> = value.prepare(sql).use { stmt ->
+    bind(stmt, args)
+    val columnCount = stmt.getColumnCount()
+    val columnNames = Array(columnCount) { stmt.getColumnName(it) }
+    val rows = mutableListOf<SqlRow>()
+    while (stmt.step()) {
+        val map = LinkedHashMap<String, Any?>(columnCount)
+        for (i in 0 until columnCount) {
+            map[columnNames[i]] = readColumn(stmt, i)
+        }
+        rows += SqlRow(map)
+    }
+    rows
+}
+
+internal fun bindStatement(stmt: SQLiteStatement, args: List<Any?>) {
+    args.forEachIndexed { index, value ->
+        val i = index + 1
+        when (value) {
+            null -> stmt.bindNull(i)
+            is ByteArray -> stmt.bindBlob(i, value)
+            is Long -> stmt.bindLong(i, value)
+            is Int -> stmt.bindLong(i, value.toLong())
+            is Double -> stmt.bindDouble(i, value)
+            is Float -> stmt.bindDouble(i, value.toDouble())
+            is Boolean -> stmt.bindLong(i, if (value) 1 else 0)
+            else -> stmt.bindText(i, value.toString())
         }
     }
+}
 
-    private fun readColumn(stmt: SQLiteStatement, index: Int): Any? {
-        return when (stmt.getColumnType(index)) {
-            SQLITE_DATA_NULL -> null
-            SQLITE_DATA_INTEGER -> stmt.getLong(index)
-            SQLITE_DATA_FLOAT -> stmt.getDouble(index)
-            SQLITE_DATA_BLOB -> stmt.getBlob(index)
-            SQLITE_DATA_TEXT -> stmt.getText(index)
-            else -> if (stmt.isNull(index)) null else stmt.getText(index)
-        }
+internal fun readStatementColumn(stmt: SQLiteStatement, index: Int): Any? {
+    return when (stmt.getColumnType(index)) {
+        SQLITE_DATA_NULL -> null
+        SQLITE_DATA_INTEGER -> stmt.getLong(index)
+        SQLITE_DATA_FLOAT -> stmt.getDouble(index)
+        SQLITE_DATA_BLOB -> stmt.getBlob(index)
+        SQLITE_DATA_TEXT -> stmt.getText(index)
+        else -> if (stmt.isNull(index)) null else stmt.getText(index)
     }
 }

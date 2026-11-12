@@ -169,32 +169,71 @@ class SkillMemoryRepository(
         val nextContent = if (append && existing != null) existing.content + content else content
         val bytes = nextContent.toByteArray(Charsets.UTF_8)
         require(bytes.size.toLong() <= MAX_ENTRY_BYTES) { "Skill memory entry exceeds the file limit" }
-        val currentBytes = db.query(
-            "SELECT COALESCE(SUM(byte_length), 0) AS total FROM skill_memory_entries WHERE space_id = ?",
-            listOf(space.spaceId),
-        ).singleOrNull()?.long("total") ?: 0L
-        val newTotal = currentBytes - (existing?.byteLength ?: 0L) + bytes.size
-        require(newTotal <= space.quotaBytes) { "Skill memory quota exceeded" }
-        if (existing == null) {
-            val count = db.query(
-                "SELECT COUNT(*) AS count FROM skill_memory_entries WHERE space_id = ?", listOf(space.spaceId),
-            ).singleOrNull()?.long("count") ?: 0L
-            require(count < space.maxEntries) { "Skill memory entry quota exceeded" }
-        }
 
         val entryId = existing?.entryId ?: UUID.randomUUID().toString()
         val nextVersion = (existing?.version ?: 0L) + 1L
-        val storageRef = "${space.spaceId}/${entryId}-v$nextVersion.memory"
+        val writeToken = UUID.randomUUID().toString().take(8)
+        val storageRef = "${space.spaceId}/${entryId}-v${nextVersion}-$writeToken.memory"
         val now = clock()
-        writeSidecar(storageRef, bytes)
         try {
+            writeSidecar(storageRef, bytes)
             db.transaction {
+                val spaceRow = db.query(
+                    "SELECT quota_bytes, max_entries FROM skill_memory_spaces WHERE space_id = ?",
+                    listOf(space.spaceId),
+                ).singleOrNull()
+                val quotaBytes = spaceRow?.long("quota_bytes") ?: space.quotaBytes
+                val maxEntries = spaceRow?.long("max_entries")?.toInt() ?: space.maxEntries
+
                 if (existing == null) {
-                    db.execute(
-                        "INSERT INTO skill_memory_entries(entry_id,space_id,path,content_hash,storage_ref,byte_length,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                        listOf(entryId, space.spaceId, validPath, sha256Hex(bytes), storageRef, bytes.size, nextVersion, now, now),
-                    )
+                    val inTxEntry = db.query(
+                        "SELECT entry_id, version, byte_length FROM skill_memory_entries WHERE space_id = ? AND path = ?",
+                        listOf(space.spaceId, validPath),
+                    ).singleOrNull()
+                    if (inTxEntry != null) {
+                        throw AuthorityPolicyConflictException("Skill memory version changed")
+                    }
+
+                    val count = db.query(
+                        "SELECT COUNT(*) AS count FROM skill_memory_entries WHERE space_id = ?",
+                        listOf(space.spaceId),
+                    ).singleOrNull()?.long("count") ?: 0L
+                    require(count + 1 <= maxEntries) { "Skill memory entry quota exceeded" }
+
+                    val currentBytes = db.query(
+                        "SELECT COALESCE(SUM(byte_length), 0) AS total FROM skill_memory_entries WHERE space_id = ?",
+                        listOf(space.spaceId),
+                    ).singleOrNull()?.long("total") ?: 0L
+                    require(currentBytes + bytes.size <= quotaBytes) { "Skill memory quota exceeded" }
+
+                    try {
+                        db.execute(
+                            "INSERT INTO skill_memory_entries(entry_id,space_id,path,content_hash,storage_ref,byte_length,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                            listOf(entryId, space.spaceId, validPath, sha256Hex(bytes), storageRef, bytes.size, nextVersion, now, now),
+                        )
+                    } catch (e: Exception) {
+                        if (e.message?.contains("UNIQUE", ignoreCase = true) == true || e.message?.contains("constraint", ignoreCase = true) == true) {
+                            throw AuthorityPolicyConflictException("Skill memory version changed")
+                        }
+                        throw e
+                    }
                 } else {
+                    val inTxEntry = db.query(
+                        "SELECT entry_id, version, byte_length FROM skill_memory_entries WHERE entry_id = ?",
+                        listOf(entryId),
+                    ).singleOrNull()
+                    if (inTxEntry == null || inTxEntry.long("version") != existing.version || (expectedVersion != null && inTxEntry.long("version") != expectedVersion)) {
+                        throw AuthorityPolicyConflictException("Skill memory version changed")
+                    }
+
+                    val oldByteLength = inTxEntry.long("byte_length")
+                    val currentBytes = db.query(
+                        "SELECT COALESCE(SUM(byte_length), 0) AS total FROM skill_memory_entries WHERE space_id = ?",
+                        listOf(space.spaceId),
+                    ).singleOrNull()?.long("total") ?: 0L
+                    val newTotal = currentBytes - oldByteLength + bytes.size
+                    require(newTotal <= quotaBytes) { "Skill memory quota exceeded" }
+
                     db.execute(
                         "UPDATE skill_memory_entries SET content_hash = ?, storage_ref = ?, byte_length = ?, version = ?, updated_at = ? WHERE entry_id = ? AND version = ?",
                         listOf(sha256Hex(bytes), storageRef, bytes.size, nextVersion, now, entryId, existing.version),
@@ -209,8 +248,8 @@ class SkillMemoryRepository(
                 )
             }
         } catch (failure: Throwable) {
-            // The sidecar is content-addressed by entry/version and is safe to remove when the
-            // metadata transaction did not commit.  Older versions remain untouched on success.
+            // The sidecar is content-addressed by entry/version and unique write token, safe to remove
+            // when the metadata transaction did not commit. Committed versions remain untouched.
             runCatching { Files.deleteIfExists(resolveStorageRef(storageRef)) }
             throw failure
         }

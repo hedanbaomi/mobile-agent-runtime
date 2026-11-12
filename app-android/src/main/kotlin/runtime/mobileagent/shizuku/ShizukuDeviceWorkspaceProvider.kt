@@ -360,24 +360,7 @@ internal class ShizukuDeviceWorkspaceProvider(
         }
     }
 
-    private fun mapError(code: String?): ToolErrorCode = when (code) {
-        ShizukuDirectoryHandleStore.PERMISSION_DENIED -> ToolErrorCode.PERMISSION_DENIED
-        ShizukuDirectoryHandleStore.INVALID_HANDLE -> ToolErrorCode.INVALID_REQUEST
-        ShizukuDirectoryHandleStore.RECOVERY_LOCATOR_INVALID -> ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH
-        ShizukuDirectoryHandleStore.WORKSPACE_NOT_FOUND,
-        ShizukuWorkspaceFileStore.NOT_FOUND -> ToolErrorCode.WORKSPACE_NOT_FOUND
-        ShizukuWorkspaceFileStore.INVALID_PATH,
-        ShizukuWorkspaceFileStore.OUTSIDE_ROOT -> ToolErrorCode.PATH_OUT_OF_SCOPE
-        ShizukuWorkspaceFileStore.SYMLINK_REJECTED -> ToolErrorCode.SYMLINK_FORBIDDEN
-        ShizukuWorkspaceFileStore.FILE_TOO_LARGE -> ToolErrorCode.FILE_TOO_LARGE
-        ShizukuWorkspaceFileStore.INVALID_CURSOR -> ToolErrorCode.INVALID_CURSOR
-        ShizukuWorkspaceFileStore.LIMIT,
-        ShizukuWorkspaceFileStore.OUTPUT_LIMIT -> ToolErrorCode.QUOTA_EXCEEDED
-        ShizukuWorkspaceFileStore.UNKNOWN_OUTCOME -> ToolErrorCode.UNKNOWN_OUTCOME
-        ShizukuWorkspaceFileStore.UNSUPPORTED_ENTRY -> ToolErrorCode.UNSUPPORTED_ENTRY
-        ShizukuWorkspaceFileStore.OPERATION_UNAVAILABLE -> ToolErrorCode.OPERATION_UNAVAILABLE
-        else -> ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE
-    }
+    private fun mapError(code: String?): ToolErrorCode = mapShizukuDeviceBrowserError(code)
 
     private fun safeDispatch(block: () -> ShizukuDispatchResult): ShizukuDispatchResult = try {
         block()
@@ -767,32 +750,8 @@ private class ShizukuTokenWorkspaceBackend(
         }
     }
 
-    private fun mapError(code: String?, fallback: ToolErrorCode = ToolErrorCode.IO_ERROR): ToolErrorCode = when (code) {
-        ShizukuDirectoryHandleStore.PERMISSION_DENIED -> ToolErrorCode.PERMISSION_DENIED
-        ShizukuDirectoryHandleStore.INVALID_HANDLE -> ToolErrorCode.INVALID_REQUEST
-        ShizukuWorkspaceFileStore.INVALID_PATH,
-        ShizukuWorkspaceFileStore.OUTSIDE_ROOT -> ToolErrorCode.PATH_OUT_OF_SCOPE
-        ShizukuWorkspaceFileStore.SYMLINK_REJECTED -> ToolErrorCode.SYMLINK_FORBIDDEN
-        ShizukuWorkspaceFileStore.NOT_FOUND -> ToolErrorCode.WORKSPACE_NOT_FOUND
-        ShizukuWorkspaceFileStore.FILE_TOO_LARGE -> ToolErrorCode.FILE_TOO_LARGE
-        ShizukuWorkspaceFileStore.LIMIT,
-        ShizukuWorkspaceFileStore.OUTPUT_LIMIT -> ToolErrorCode.QUOTA_EXCEEDED
-        ShizukuWorkspaceFileStore.UNKNOWN_OUTCOME -> ToolErrorCode.UNKNOWN_OUTCOME
-        ShizukuWorkspaceFileStore.CONFLICT -> ToolErrorCode.CONFLICT
-        ShizukuWorkspaceFileStore.PERMISSION_DENIED -> ToolErrorCode.PERMISSION_DENIED
-        ShizukuWorkspaceFileStore.INVALID_CURSOR -> ToolErrorCode.INVALID_CURSOR
-        ShizukuWorkspaceFileStore.INVALID_VERSION,
-        ShizukuWorkspaceFileStore.OFFSET_OUT_OF_RANGE,
-        ShizukuWorkspaceFileStore.INVALID_PATCH,
-        -> ToolErrorCode.INVALID_REQUEST
-        ShizukuWorkspaceFileStore.UNSUPPORTED_ENTRY -> ToolErrorCode.UNSUPPORTED_ENTRY
-        ShizukuWorkspaceFileStore.UNSUPPORTED,
-        ShizukuWorkspaceFileStore.OPERATION_UNAVAILABLE,
-        ShizukuWorkspaceFileStore.ATOMIC_REPLACE_UNAVAILABLE,
-        ShizukuWorkspaceFileStore.WRITE_UNVERIFIED,
-        -> ToolErrorCode.OPERATION_UNAVAILABLE
-        else -> fallback
-    }
+    private fun mapError(code: String?, fallback: ToolErrorCode = ToolErrorCode.IO_ERROR): ToolErrorCode =
+        mapShizukuTokenWorkspaceError(code, fallback)
 
     private fun dispatch(block: () -> ShizukuDispatchResult): ShizukuDispatchResult = try {
         block()
@@ -821,4 +780,55 @@ private class ShizukuTokenWorkspaceBackend(
     }.getOrNull()
 
     private fun <T> failure(code: ToolErrorCode): WorkspaceResult<T> = WorkspaceResult.Failure(ToolError(code))
+}
+
+internal fun mapShizukuDeviceBrowserError(code: String?): ToolErrorCode = when (code) {
+    ShizukuDirectoryHandleStore.PERMISSION_DENIED -> ToolErrorCode.PERMISSION_DENIED
+    ShizukuDirectoryHandleStore.INVALID_HANDLE -> ToolErrorCode.INVALID_REQUEST
+    ShizukuDirectoryHandleStore.RECOVERY_LOCATOR_INVALID -> ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH
+    ShizukuDirectoryHandleStore.WORKSPACE_NOT_FOUND,
+    ShizukuWorkspaceFileStore.NOT_FOUND -> ToolErrorCode.WORKSPACE_NOT_FOUND
+    ShizukuWorkspaceFileStore.INVALID_PATH,
+    ShizukuWorkspaceFileStore.OUTSIDE_ROOT -> ToolErrorCode.PATH_OUT_OF_SCOPE
+    ShizukuWorkspaceFileStore.PROVIDER_ALIAS_AMBIGUOUS -> ToolErrorCode.IO_ERROR
+    ShizukuWorkspaceFileStore.SYMLINK_REJECTED -> ToolErrorCode.SYMLINK_FORBIDDEN
+    ShizukuWorkspaceFileStore.FILE_TOO_LARGE -> ToolErrorCode.FILE_TOO_LARGE
+    ShizukuWorkspaceFileStore.INVALID_CURSOR -> ToolErrorCode.INVALID_CURSOR
+    ShizukuWorkspaceFileStore.LIMIT,
+    ShizukuWorkspaceFileStore.OUTPUT_LIMIT -> ToolErrorCode.QUOTA_EXCEEDED
+    ShizukuWorkspaceFileStore.UNKNOWN_OUTCOME -> ToolErrorCode.UNKNOWN_OUTCOME
+    ShizukuWorkspaceFileStore.UNSUPPORTED_ENTRY -> ToolErrorCode.UNSUPPORTED_ENTRY
+    ShizukuWorkspaceFileStore.OPERATION_UNAVAILABLE -> ToolErrorCode.OPERATION_UNAVAILABLE
+    else -> ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE
+}
+
+internal fun mapShizukuTokenWorkspaceError(
+    code: String?,
+    fallback: ToolErrorCode = ToolErrorCode.IO_ERROR,
+): ToolErrorCode = when (code) {
+    ShizukuDirectoryHandleStore.PERMISSION_DENIED -> ToolErrorCode.PERMISSION_DENIED
+    ShizukuDirectoryHandleStore.INVALID_HANDLE -> ToolErrorCode.INVALID_REQUEST
+    ShizukuWorkspaceFileStore.INVALID_PATH,
+    ShizukuWorkspaceFileStore.OUTSIDE_ROOT -> ToolErrorCode.PATH_OUT_OF_SCOPE
+    ShizukuWorkspaceFileStore.PROVIDER_ALIAS_AMBIGUOUS -> ToolErrorCode.IO_ERROR
+    ShizukuWorkspaceFileStore.SYMLINK_REJECTED -> ToolErrorCode.SYMLINK_FORBIDDEN
+    ShizukuWorkspaceFileStore.NOT_FOUND -> ToolErrorCode.WORKSPACE_NOT_FOUND
+    ShizukuWorkspaceFileStore.FILE_TOO_LARGE -> ToolErrorCode.FILE_TOO_LARGE
+    ShizukuWorkspaceFileStore.LIMIT,
+    ShizukuWorkspaceFileStore.OUTPUT_LIMIT -> ToolErrorCode.QUOTA_EXCEEDED
+    ShizukuWorkspaceFileStore.UNKNOWN_OUTCOME -> ToolErrorCode.UNKNOWN_OUTCOME
+    ShizukuWorkspaceFileStore.CONFLICT -> ToolErrorCode.CONFLICT
+    ShizukuWorkspaceFileStore.PERMISSION_DENIED -> ToolErrorCode.PERMISSION_DENIED
+    ShizukuWorkspaceFileStore.INVALID_CURSOR -> ToolErrorCode.INVALID_CURSOR
+    ShizukuWorkspaceFileStore.INVALID_VERSION,
+    ShizukuWorkspaceFileStore.OFFSET_OUT_OF_RANGE,
+    ShizukuWorkspaceFileStore.INVALID_PATCH,
+    -> ToolErrorCode.INVALID_REQUEST
+    ShizukuWorkspaceFileStore.UNSUPPORTED_ENTRY -> ToolErrorCode.UNSUPPORTED_ENTRY
+    ShizukuWorkspaceFileStore.UNSUPPORTED,
+    ShizukuWorkspaceFileStore.OPERATION_UNAVAILABLE,
+    ShizukuWorkspaceFileStore.ATOMIC_REPLACE_UNAVAILABLE,
+    ShizukuWorkspaceFileStore.WRITE_UNVERIFIED,
+    -> ToolErrorCode.OPERATION_UNAVAILABLE
+    else -> fallback
 }

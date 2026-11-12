@@ -810,11 +810,13 @@ internal class ChatExecutionController(
     private fun boundedHistory(messages: List<Message>, max: Int, allowedKbs: Set<String>, source: Map<String, Pair<Citation, String>> = citations, replayReasoning: Boolean = false, allowOriginals: Boolean = true) =
         projectBoundedHistory(container, ::visualReferencePlan, messages, max, allowedKbs, source, replayReasoning, allowOriginals)
 
-    private fun visualReferencePlan(assetIds: List<String>): VisualReferencePlan =
-        VisualAttachmentPolicy.references(assetIds) { id ->
-            container.db.query("SELECT b.media_type,b.byte_length,a.blob_hash FROM assets a JOIN blobs b ON b.hash=a.blob_hash WHERE a.id=?", listOf(id))
-                .singleOrNull()?.let { Triple(it.string("media_type"), it.string("byte_length").toLong(), it.string("blob_hash")) }
-        }
+    internal fun queryAssetMetadataBatch(assetIds: List<String>): Map<String, Triple<String, Long, String>> =
+        runtime.mobileagent.queryAssetMetadataBatch(container.db, assetIds)
+
+    private fun visualReferencePlan(assetIds: List<String>): VisualReferencePlan {
+        val metadata = queryAssetMetadataBatch(assetIds.distinct())
+        return VisualAttachmentPolicy.references(assetIds) { id -> metadata[id] }
+    }
 
     private companion object {
         private const val RUN_WATCHDOG_GRACE_MS = 60_000L

@@ -33,6 +33,7 @@ on:
       - 'app-android/src/main/kotlin/runtime/mobileagent/HostInitialization.kt'
       - 'app-android/src/main/kotlin/runtime/mobileagent/DatabaseRecoveryStore.kt'
       - 'data/sqlite/src/main/kotlin/runtime/mobileagent/data/*Migration*'
+      - 'data/sqlite/src/main/kotlin/runtime/mobileagent/data/migrations/**'
       - 'data/sqlite/src/main/kotlin/runtime/mobileagent/data/Root*'
       - 'data/sqlite/src/main/kotlin/runtime/mobileagent/data/RunRepository.kt'
       - 'data/sqlite/src/main/kotlin/runtime/mobileagent/data/AuthorityRepository.kt'

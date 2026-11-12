@@ -5,6 +5,7 @@ package runtime.mobileagent
 
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -14,9 +15,9 @@ import runtime.mobileagent.feature.settings.ThirdPartyNoticesUiState
 /**
  * Loads the notice catalog from the same signed-in-package assets the UI reads.
  *
- * The index references `modelpacks/distiluse-base-multilingual-cased-v2/LICENSE-NOTICE.txt`; the previous
- * allow-list only accepted `licenses/` plus one hard-coded path, and one rejected entry blanked
- * the whole component list.
+ * The index references `modelpacks/distiluse-base-multilingual-cased-v2/LICENSE-NOTICE.txt` and
+ * `licenses/aosp-material-icons-1.7.6/{LICENSE.txt,NOTICE.txt}`; every packaged entry must remain
+ * accepted and readable without network access.
  */
 class ThirdPartyNoticesDeviceTest {
     @Test
@@ -39,5 +40,17 @@ class ThirdPartyNoticesDeviceTest {
         val text = ThirdPartyNoticeAssets.loadComponentText(context, modelPack).getOrThrow()
         assertTrue(text.contains(noticePath))
         assertTrue(text.contains("===== "))
+
+        val vendoredIcons = state.components.firstOrNull { it.id == "vendored:aosp-material-icons-1.7.6" }
+        assertTrue("the vendored Material icons attribution must be indexed", vendoredIcons != null)
+        assertEquals("Apache-2.0", vendoredIcons!!.license)
+        val iconLicensePath = "licenses/aosp-material-icons-1.7.6/LICENSE.txt"
+        val iconNoticePath = "licenses/aosp-material-icons-1.7.6/NOTICE.txt"
+        assertTrue(vendoredIcons.files.any { it.path == iconLicensePath })
+        assertTrue(vendoredIcons.files.any { it.path == iconNoticePath })
+
+        val vendoredText = ThirdPartyNoticeAssets.loadComponentText(context, vendoredIcons).getOrThrow()
+        assertTrue(vendoredText.contains("Apache License"))
+        assertTrue(vendoredText.contains("Outlined.Chat"))
     }
 }

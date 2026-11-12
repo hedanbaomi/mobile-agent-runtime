@@ -6,6 +6,7 @@ package runtime.mobileagent
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import runtime.mobileagent.domain.*
+import runtime.mobileagent.provider.openai.StreamingSecretRedactor
 
 class ToolEvidenceHistoryTest {
     private fun message(id: String, role: MessageRole, parts: List<MessagePart> = emptyList(), metadata: String = "{}") =
@@ -41,12 +42,73 @@ class ToolEvidenceHistoryTest {
         assertNull(replayableReasoning(message("clipped-response", MessageRole.ASSISTANT, listOf(ReasoningPart("x".repeat(MessagePartLimits.MAX_REASONING_CHARS)))), enabled = false))
     }
 
-    @Test fun declaredReasoningCollectorPreservesWhitespaceAndRedactsAcrossChunks() {
-        val accumulated = listOf("alpha", " ", "beta", "\n").fold("") { current, delta -> appendDeclaredReasoning(current, delta, emptyList()) }
+    @Test fun declaredReasoningCollectorPreservesWhitespaceAndRedactsAcrossChunksIncrementally() {
+        val plainTarget = StringBuilder()
+        val plainRedactor = StreamingSecretRedactor()
+        listOf("alpha", " ", "beta", "\n").forEach { delta ->
+            appendDeclaredReasoning(plainTarget, plainRedactor, delta)
+        }
+        val accumulated = finishDeclaredReasoning(plainTarget, plainRedactor)
         val persisted = message("assistant", MessageRole.ASSISTANT, listOf(ReasoningPart(accumulated)))
         assertEquals("alpha beta\n", replayableReasoning(persisted))
         assertEquals(" \n", replayableReasoning(message("white", MessageRole.ASSISTANT, listOf(ReasoningPart(" \n")))))
-        val safe = listOf("key secret-", "value end").fold("") { current, delta -> appendDeclaredReasoning(current, delta, listOf("secret-value")) }
+
+        val secretTarget = StringBuilder()
+        val secretRedactor = StreamingSecretRedactor()
+        val secrets = listOf("secret-value")
+        listOf("key secret-", "value and Cook", "ie: sid=synthetic_123\n", "sk", "-synthetic1234567890 end").forEach { delta ->
+            appendDeclaredReasoning(secretTarget, secretRedactor, delta, secrets)
+        }
+        val safe = finishDeclaredReasoning(secretTarget, secretRedactor)
         assertFalse(safe.contains("secret-value"))
+        assertFalse(safe.contains("synthetic_123"))
+        assertFalse(safe.contains("synthetic1234567890"))
+        assertEquals("key *** and Cookie: ***\n*** end", safe)
+    }
+
+    @Test fun declaredReasoningCollectorDiscardsUnconfirmedPrefixOnAbortAndCapsLength() {
+        val secretRef = "synthetic-reasoning-secret-7788"
+        val secretHalf = "synthetic-reasoning-"
+        val abortedTarget = StringBuilder()
+        val abortedRedactor = StreamingSecretRedactor()
+        appendDeclaredReasoning(abortedTarget, abortedRedactor, "Confirmed step. Leaking: $secretHalf", listOf(secretRef))
+        val discarded = discardDeclaredReasoning(abortedTarget, abortedRedactor)
+        assertEquals("Confirmed step. Leaking: ", discarded)
+        assertFalse(discarded.contains(secretHalf))
+        assertTrue(abortedRedactor.finish().isEmpty())
+
+        val boundedTarget = StringBuilder("x".repeat(MessagePartLimits.MAX_REASONING_CHARS - 4))
+        val boundedRedactor = StreamingSecretRedactor()
+        appendDeclaredReasoning(boundedTarget, boundedRedactor, "123456789")
+        val capped = finishDeclaredReasoning(boundedTarget, boundedRedactor)
+        assertEquals(MessagePartLimits.MAX_REASONING_CHARS, capped.length)
+        assertTrue(capped.endsWith("1234"))
+    }
+
+    @Test fun declaredReasoningStreams1024ChunksWithBoundedTailAndExactRedaction() {
+        val target = StringBuilder()
+        val redactor = StreamingSecretRedactor()
+        val secret = "synthetic-reasoning-long-secret-9001"
+        val full = buildString {
+            while (length < 16_384) {
+                if (length in 4_000..4_020) {
+                    append(" token=$secret ")
+                } else {
+                    append("step-analysis-01")
+                }
+            }
+        }.substring(0, 16_384)
+
+        var idx = 0
+        while (idx < full.length) {
+            val next = (idx + 16).coerceAtMost(full.length)
+            appendDeclaredReasoning(target, redactor, full.substring(idx, next), listOf(secret))
+            assertTrue(redactor.pendingLength() <= 64)
+            idx = next
+        }
+        val settled = finishDeclaredReasoning(target, redactor)
+        assertFalse(settled.contains(secret))
+        assertTrue(settled.contains("token=***"))
+        assertEquals(0, redactor.pendingLength())
     }
 }

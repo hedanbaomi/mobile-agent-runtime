@@ -107,5 +107,56 @@ class EmbeddingWindowCacheTest {
         assertEquals(2, calls.get())
     }
 
+    @Test fun getAndPutDirectAccessWithIsolationAndEviction() {
+        val cache = EmbeddingWindowCache(maxEntries = 2)
+        val w1 = encoded(1)
+        val w2 = encoded(2)
+        val w3 = encoded(3)
+
+        assertNull(cache.get(w1))
+        val v1 = floatArrayOf(0.1f, 0.2f)
+        cache.put(w1, v1)
+        val retrieved = cache.get(w1)
+        assertNotNull(retrieved)
+        assertArrayEquals(floatArrayOf(0.1f, 0.2f), retrieved, 0f)
+
+        // Mutating returned array does not affect cache
+        retrieved!![0] = 99.0f
+        assertArrayEquals(floatArrayOf(0.1f, 0.2f), cache.get(w1), 0f)
+
+        // Mutating source array after put does not affect cache
+        v1[0] = 88.0f
+        assertArrayEquals(floatArrayOf(0.1f, 0.2f), cache.get(w1), 0f)
+
+        // Add second entry
+        cache.put(w2, floatArrayOf(0.3f, 0.4f))
+        assertNotNull(cache.get(w2))
+        assertNotNull(cache.get(w1)) // touches w1 last, so w2 is LRU
+
+        // Adding third entry evicts LRU (which is w2)
+        cache.put(w3, floatArrayOf(0.5f, 0.6f))
+        assertNotNull(cache.get(w1))
+        assertNull(cache.get(w2))
+        assertNotNull(cache.get(w3))
+    }
+
+    @Test fun getAndPutRespectClosedAndInterruptedStatus() {
+        val cache = EmbeddingWindowCache()
+        val w = encoded(1)
+        cache.put(w, floatArrayOf(1.0f))
+
+        Thread.currentThread().interrupt()
+        try {
+            assertThrows(InterruptedException::class.java) { cache.get(w) }
+            assertThrows(InterruptedException::class.java) { cache.put(w, floatArrayOf(2.0f)) }
+        } finally {
+            Thread.interrupted()
+        }
+
+        cache.close()
+        assertThrows(IllegalStateException::class.java) { cache.get(w) }
+        assertThrows(IllegalStateException::class.java) { cache.put(w, floatArrayOf(3.0f)) }
+    }
+
     private fun encoded(vararg ids: Long) = BertWordPieceTokenizer.Encoded(ids, LongArray(ids.size) { 1L }, LongArray(ids.size))
 }

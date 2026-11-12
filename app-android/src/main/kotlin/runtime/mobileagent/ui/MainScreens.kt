@@ -92,6 +92,9 @@ import kotlinx.coroutines.withContext
 internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
     val app = LocalContext.current.applicationContext as MobileAgentApp
     val shellVm: ShellViewModel = viewModel()
+    val quickStartStep by shellVm.quickStartStep.collectAsState()
+    val quickStartCollapsed by shellVm.quickStartCollapsed.collectAsState()
+    val quickStartRefreshing by shellVm.quickStartAwaitingRefresh.collectAsState()
     val shellOwner = checkNotNull(LocalViewModelStoreOwner.current) { "MainApp requires a stable shell ViewModelStoreOwner" }
     val chatVm: runtime.mobileagent.ChatViewModel = viewModel(viewModelStoreOwner = shellOwner)
     val knowledgeVm: runtime.mobileagent.KnowledgeViewModel = viewModel(viewModelStoreOwner = shellOwner)
@@ -99,30 +102,21 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
     val navController = rememberNavController()
     val initialRoute = shellVm.route().takeIf { it in allAppRoutes } ?: AppRoutes.CHAT
     var route by rememberSaveable { mutableStateOf(initialRoute) }
-    var pendingRoute by rememberSaveable { mutableStateOf<String?>(null) }
+    val draftState = rememberShellDraftState()
+    val detailState = rememberShellDetailState()
+    val pickerState = rememberShellWorkspacePickerState()
     var pendingAgentId by rememberSaveable { mutableStateOf<String?>(null) }
-    var unsavedDialog by rememberSaveable { mutableStateOf(false) }
     var inspectorReturnRoute by rememberSaveable { mutableStateOf(AppRoutes.CHAT) }
-    var editorOwner by rememberSaveable { mutableStateOf<String?>(null) }
-    var editorDirty by rememberSaveable { mutableStateOf(false) }
-    var editorDiscard by remember { mutableStateOf<(() -> Unit)?>(null) }
     var settingsRevision by remember { mutableIntStateOf(0) }
     var pendingUpdateCheck by rememberSaveable { mutableStateOf(false) }
     var drawerOpen by rememberSaveable { mutableStateOf(false) }
-    var workspacePickerOpen by rememberSaveable { mutableStateOf(false) }
-    var workspacePickerAgentId by rememberSaveable { mutableStateOf<String?>(null) }
-    var workspacePickerThreadId by rememberSaveable { mutableStateOf<String?>(null) }
-    var workspacePickerLabel by rememberSaveable { mutableStateOf("当前智能体") }
-    var shellDetailOwner by rememberSaveable { mutableStateOf<String?>(null) }
-    var shellDetailTitle by rememberSaveable { mutableStateOf<String?>(null) }
-    var shellDetailBack by remember { mutableStateOf<(() -> Unit)?>(null) }
 
-    val workspacePickerFactory = remember(app.container.runtimeIntegration) {
+    val workspacePickerFactory = remember(app.container.workspacePickerPort) {
         object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 require(modelClass.isAssignableFrom(WorkspacePickerViewModel::class.java))
-                return WorkspacePickerViewModel(app, app.container.runtimeIntegration) as T
+                return WorkspacePickerViewModel(app, app.container.workspacePickerPort) as T
             }
         }
     }
@@ -135,14 +129,14 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
     // deliberately not stored in WorkspacePickerViewModel: the host emits only display-safe pages
     // and a late page must not resurrect a picker that was already closed.
     val pickerScope = rememberCoroutineScope()
-    val pickerRootUiPort = remember(app.container.runtimeIntegration) {
-        app.container.runtimeIntegration as? RootWorkspaceUiPort
+    val pickerRootUiPort = remember(app.container.rootWorkspaceUiPort) {
+        app.container.rootWorkspaceUiPort
     }
     val pickerRootDialogs = remember(pickerRootUiPort) {
         RootWorkspaceDialogState(pickerScope, pickerRootUiPort) { 0L }
     }
-    val pickerAuthoritySnapshot = remember(workspacePickerOpen, settingsRevision) {
-        runCatching { app.container.runtimeIntegration.snapshot() }.getOrNull()
+    val pickerAuthoritySnapshot = remember(pickerState.isOpen, settingsRevision) {
+        runCatching { app.container.authorityQueryPort.snapshot() }.getOrNull()
     }
     val pickerRootAuthority =
         pickerAuthoritySnapshot?.selectedAuthority ?: runtime.mobileagent.domain.Authority.NONE
@@ -179,16 +173,17 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
 
     fun closeWorkspacePicker() {
         pickerRootDialogs.invalidate()
-        workspacePickerOpen = false
+        pickerState.close()
         workspacePickerVm.clearResult()
     }
 
     fun openWorkspacePicker(agentId: String?, threadId: String?, label: String) {
-        workspacePickerAgentId = agentId?.takeIf { it.isNotBlank() }
-        workspacePickerThreadId = threadId?.takeIf { it.isNotBlank() }
-        workspacePickerLabel = label.trim().ifBlank { "当前智能体" }.take(128)
+        pickerState.open(
+            agentId?.takeIf { it.isNotBlank() },
+            threadId?.takeIf { it.isNotBlank() },
+            label.trim().ifBlank { "当前智能体" }.take(128),
+        )
         drawerOpen = false
-        workspacePickerOpen = true
     }
 
     val currentEntry by navController.currentBackStackEntryAsState()
@@ -207,62 +202,28 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
     fun navigate(target: String) {
         if (target !in allAppRoutes || target == route) return
         if (target == AppRoutes.INSPECTOR) inspectorReturnRoute = route
-        shellDetailOwner = null
-        shellDetailTitle = null
-        shellDetailBack = null
+        detailState.clear()
         route = target
         shellVm.setRoute(target)
     }
 
-    fun requestRoute(target: String) {
-        if (target !in allAppRoutes || target == route) return
-        if (editorOwner == route && editorDirty) {
-            pendingRoute = target
-            unsavedDialog = true
-        } else {
-            editorOwner = null
-            editorDirty = false
-            editorDiscard = null
-            navigate(target)
-        }
-    }
+    fun requestRoute(target: String) =
+        draftState.requestRoute(target, route, ::navigate)
 
-    fun requestEditorClose() {
-        if (editorOwner == route && editorDirty) {
-            pendingRoute = null
-            unsavedDialog = true
-        } else {
-            editorDiscard?.invoke()
-        }
-    }
+    fun requestEditorClose() =
+        draftState.requestClose(route)
 
-    fun registerEditorState(owner: String, dirty: Boolean, discard: (() -> Unit)?) {
-        if (owner != route) return
-        editorOwner = owner
-        editorDirty = dirty
-        editorDiscard = discard
-    }
+    fun registerEditorState(owner: String, dirty: Boolean, discard: (() -> Unit)?) =
+        draftState.register(owner, dirty, discard, route)
 
-    fun registerShellDetail(owner: String, title: String?, onBack: (() -> Unit)?) {
-        if (owner != route) return
-        shellDetailOwner = owner.takeIf { title != null && onBack != null }
-        shellDetailTitle = title
-        shellDetailBack = onBack
-    }
+    fun registerShellDetail(owner: String, title: String?, onBack: (() -> Unit)?) =
+        detailState.register(owner, title, onBack, route)
 
-    fun discardUnsaved() {
-        val target = pendingRoute
-        unsavedDialog = false
-        pendingRoute = null
-        editorDiscard?.invoke()
-        editorOwner = null
-        editorDirty = false
-        editorDiscard = null
-        target?.let(::navigate)
-    }
+    fun discardUnsaved() =
+        draftState.discard(::navigate)
 
     fun handleBack(compact: Boolean) {
-        if (editorOwner == route && editorDirty) {
+        if (draftState.isEditorActiveFor(route)) {
             requestEditorClose()
             return
         }
@@ -301,21 +262,21 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
         runtime.mobileagent.domain.ThemePreference.SYSTEM -> AppThemeMode.SYSTEM
     }
 
-    LaunchedEffect(workspacePickerOpen, workspacePickerAgentId, workspacePickerThreadId, workspacePickerLabel, pickerRootAuthority) {
-        if (workspacePickerOpen) {
+    LaunchedEffect(pickerState.isOpen, pickerState.agentId, pickerState.threadId, pickerState.label, pickerRootAuthority) {
+        if (pickerState.isOpen) {
             pickerRootDialogs.invalidate()
             workspacePickerVm.setTarget(
                 WorkspacePickerTarget(
-                    agentId = workspacePickerAgentId,
-                    threadId = workspacePickerThreadId,
+                    agentId = pickerState.agentId,
+                    threadId = pickerState.threadId,
                 ),
-                workspacePickerLabel,
+                pickerState.label,
             )
             workspacePickerVm.refresh()
         }
     }
-    LaunchedEffect(workspacePickerOpen, workspacePickerState.attachPhase) {
-        if (workspacePickerOpen && workspacePickerState.attachPhase == WorkspacePickerAttachPhaseUi.SUCCESS) {
+    LaunchedEffect(pickerState.isOpen, workspacePickerState.attachPhase) {
+        if (pickerState.isOpen && workspacePickerState.attachPhase == WorkspacePickerAttachPhaseUi.SUCCESS) {
             chatVm.reload()
             closeWorkspacePicker()
         }
@@ -330,6 +291,9 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
         language = if (chinese) "zh-CN" else "en-US",
         drawerDestinations = drawerDestinationUi,
     )
+    LaunchedEffect(route, drawerChatState.streaming, drawerChatState.selectedSessionId, drawerChatState.messages.size) {
+        shellVm.syncQuickStart(drawerChatState.streaming)
+    }
     val drawerSelectedAgentLabel = drawerChatState.agents
         .firstOrNull { it.id == drawerChatState.selectedAgentId }
         ?.label
@@ -383,23 +347,23 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
         },
     )
 
-    BackHandler(enabled = editorOwner == route && editorDirty) { requestEditorClose() }
+    BackHandler(enabled = draftState.isEditorActiveFor(route)) { requestEditorClose() }
     MobileAgentTheme(mode = themeMode) {
         AppLocalizedResources(language) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val compact = maxWidth < 600.dp
-            val shellDetailOpen = shellDetailOwner == route && shellDetailTitle != null && shellDetailBack != null
+            val shellDetailOpen = detailState.owner == route && detailState.title != null && detailState.onBack != null
             val navigationAffordance = shellNavigationAffordance(
                 route = route,
-                childDetailOpen = workspacePickerOpen || shellDetailOpen,
+                childDetailOpen = pickerState.isOpen || shellDetailOpen,
             )
             BackHandler(
-                    enabled = !(editorOwner == route && editorDirty) &&
-                        (workspacePickerOpen || shellDetailOpen || route != AppRoutes.CHAT || drawerChatState.streaming),
+                    enabled = !draftState.isEditorActiveFor(route) &&
+                        (pickerState.isOpen || shellDetailOpen || route != AppRoutes.CHAT || drawerChatState.streaming),
             ) {
                 when {
-                    workspacePickerOpen -> closeWorkspacePicker()
-                    shellDetailOpen -> shellDetailBack?.invoke()
+                    pickerState.isOpen -> closeWorkspacePicker()
+                    shellDetailOpen -> detailState.onBack?.invoke()
                     route == AppRoutes.CHAT && drawerChatState.streaming -> onMoveTaskToBack()
                     else -> handleBack(compact)
                 }
@@ -408,12 +372,12 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
             AppNavigationScaffold(
                 destinations = destinations,
                 selectedRoute = route,
-                title = shellDetailTitle.takeIf { shellDetailOpen } ?: appShellTitle(
+                title = detailState.title.takeIf { shellDetailOpen } ?: appShellTitle(
                     route = route,
                     chinese = chinese,
-                    childDetailOpen = workspacePickerOpen,
+                    childDetailOpen = pickerState.isOpen,
                 ),
-                headerSubtitle = if (workspacePickerOpen || shellDetailOpen) "" else when (route) {
+                headerSubtitle = if (pickerState.isOpen || shellDetailOpen) "" else when (route) {
                     AppRoutes.CHAT -> drawerChatState.agents.firstOrNull {
                         it.id == drawerChatState.selectedAgentId
                     }?.label ?: if (chinese) "选择智能体开始对话" else "Choose an Agent to start"
@@ -422,8 +386,8 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
                 navigationAffordance = navigationAffordance,
                 onBack = {
                     when {
-                        workspacePickerOpen -> closeWorkspacePicker()
-                        shellDetailOpen -> shellDetailBack?.invoke()
+                        pickerState.isOpen -> closeWorkspacePicker()
+                        shellDetailOpen -> detailState.onBack?.invoke()
                         else -> handleBack(compact)
                     }
                 },
@@ -451,7 +415,12 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
                 },
             ) { padding ->
                 Column(Modifier.fillMaxSize().padding(padding)) {
-                    QuickStartCard(app.container, route, shellDetailOpen, drawerChatState.streaming, { drawerOpen = true }, ::requestRoute)
+                    QuickStartCard(
+                        state = shellVm.quickStartUiState(route, shellDetailOpen, drawerChatState.streaming, quickStartStep, quickStartCollapsed, quickStartRefreshing),
+                        onStepClick = { stepId -> shellVm.onQuickStartStepClick(stepId, { drawerOpen = true }, ::requestRoute) },
+                        onDismiss = { shellVm.setQuickStartCollapsed(true) },
+                        onResume = { shellVm.setQuickStartCollapsed(false) },
+                    )
                     Box(Modifier.weight(1f)) {
                     NavHost(navController = navController, startDestination = initialRoute) {
                         composable(AppRoutes.CHAT) {
@@ -532,7 +501,7 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
                             )
                         }
                     }
-                    if (workspacePickerOpen) {
+                    if (pickerState.isOpen) {
                         BackHandler { closeWorkspacePicker() }
                         Surface(
                             modifier = Modifier
@@ -631,13 +600,13 @@ internal fun MainApp(onMoveTaskToBack: () -> Unit = {}) {
                 },
             )
         }
-        if (unsavedDialog) UnsavedChangesDialog(chinese, ::discardUnsaved, { unsavedDialog = false })
+        if (draftState.unsavedDialog) UnsavedChangesDialog(chinese, ::discardUnsaved, { draftState.unsavedDialog = false })
         AppUpdateDialog(app.container.appUpdates, chinese)
         }
     }
 }
 
-private val allAppRoutes = setOf(
+internal val allAppRoutes = setOf(
     AppRoutes.CHAT, AppRoutes.AGENTS, AppRoutes.PROVIDERS, AppRoutes.KNOWLEDGE, AppRoutes.WORLD_BOOKS,
     AppRoutes.SKILLS, AppRoutes.NEWS, AppRoutes.SETTINGS,
     AppRoutes.ABOUT, AppRoutes.INSPECTOR, AppRoutes.MCP,
@@ -1437,258 +1406,6 @@ internal fun appendPrivilegedBrowserPage(
         truncated = next.truncated || limitReached,
     )
 }
-
-@Composable
-private fun PrivilegedWorkspaceBrowserDialog(
-    page: runtime.mobileagent.skills.tooling.WorkspaceDirectoryPage?,
-    currentLabel: String,
-    busy: Boolean,
-    error: String,
-    chinese: Boolean,
-    onOpenDirectory: (runtime.mobileagent.skills.tooling.WorkspaceDirectoryEntry) -> Unit,
-    onUp: () -> Unit,
-    onLoadMore: () -> Unit,
-    onAttach: () -> Unit,
-    onClose: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onClose,
-        modifier = Modifier.testTag("agents.workspace.browser"),
-        title = { Text(if (chinese) "选择设备目录" else "Choose device directory") },
-        text = {
-            LazyColumn(
-                Modifier.fillMaxWidth().heightIn(max = 480.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                item { Text(if (chinese) "当前位置：$currentLabel" else "Current: $currentLabel", style = MaterialTheme.typography.titleSmall) }
-                item {
-                    Text(
-                        if (chinese) "目录名称只在本机界面显示；模型只会得到选中后的工作区标识和相对路径。"
-                        else "Directory names stay in the local UI; the model receives only the attached workspace and relative paths.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                if (error.isNotBlank()) item { Text(error, color = MaterialTheme.colorScheme.error) }
-                if (busy) {
-                    item { CircularProgressIndicator(Modifier.size(28.dp)) }
-                } else {
-                    val directories = page?.entries.orEmpty().filter { it.type == runtime.mobileagent.skills.tooling.WorkspaceEntryType.DIRECTORY }
-                    items(directories) { entry ->
-                        Card(
-                            Modifier.fillMaxWidth().clickable(enabled = entry.handle != null) { onOpenDirectory(entry) },
-                        ) {
-                            Text(entry.name, Modifier.padding(14.dp), style = MaterialTheme.typography.bodyLarge)
-                        }
-                    }
-                    if (directories.isEmpty()) {
-                        item { Text(if (chinese) "此处没有可进入的子目录。" else "No child directories are available here.") }
-                    }
-                    if (page?.continuation != null) {
-                        item {
-                            TextButton(onClick = onLoadMore, modifier = Modifier.testTag("agents.workspace.browser.load_more")) {
-                                Text(if (chinese) "加载更多目录" else "Load more directories")
-                            }
-                        }
-                    } else if (page?.truncated == true) {
-                        item { Text(if (chinese) "目录列表未完整返回，请重新打开。" else "Directory listing is incomplete; reopen it.") }
-                    }
-                }
-                if (page?.parent != null) {
-                    item {
-                        TextButton(onClick = onUp, enabled = !busy) {
-                            Text(if (chinese) "返回上一级" else "Up one level")
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            Button(onClick = onAttach, enabled = page != null && !busy) {
-                Text(if (chinese) "使用当前目录" else "Use this directory")
-            }
-        },
-        dismissButton = { TextButton(onClick = onClose) { Text(if (chinese) "取消" else "Cancel") } },
-    )
-}
-
-@Composable
-private fun WiredPathDialog(
-    value: String,
-    chinese: Boolean,
-    onValue: (String) -> Unit,
-    onConfirm: () -> Unit,
-    onClose: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onClose,
-        modifier = Modifier.testTag("agents.workspace.wired_path"),
-        title = { Text(if (chinese) "输入 ADB 设备目录" else "Enter an ADB device directory") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    if (chinese) {
-                        "请输入由你确认的绝对目录，例如 /sdcard/Download。路径只用于本次前台绑定，不会进入模型、日志或工具参数。"
-                    } else {
-                        "Enter an absolute directory you verified, such as /sdcard/Download. It is consumed only for this foreground binding and is not exposed to the model or logs."
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                OutlinedTextField(
-                    value = value,
-                    onValueChange = onValue,
-                    singleLine = true,
-                    label = { Text(if (chinese) "设备绝对目录" else "Absolute device directory") },
-                )
-            }
-        },
-        confirmButton = {
-            Button(onClick = onConfirm, enabled = value.startsWith("/") && value != "/") {
-                Text(if (chinese) "绑定" else "Attach")
-            }
-        },
-        dismissButton = { TextButton(onClick = onClose) { Text(if (chinese) "取消" else "Cancel") } },
-    )
-}
-
-@Composable
-private fun FullDeviceFilesConfirmationDialog(
-    chinese: Boolean,
-    onConfirm: () -> Unit,
-    onClose: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onClose,
-        modifier = Modifier.testTag("agents.workspace.full_device_confirm"),
-        title = { Text(if (chinese) "开启完整设备文件访问？" else "Enable full-device file access?") },
-        text = {
-            Text(
-                if (chinese) {
-                    "此授权允许该智能体在当前工作区之外访问所选 ADB 级通道实际可见的文件。它不等于 Root，并会在暂时断联时保留。若已设置默认工作区，将仅按该工作区原有且未撤销的能力重新确认授权，不会补回已撤销的写入权限。"
-                } else {
-                    "This lets the Agent access files outside its current workspace that the selected ADB-level authority can see. It is not Root and survives temporary disconnects. An existing default workspace is renewed only with its unrevoked capabilities; revoked write access stays revoked."
-                },
-            )
-        },
-        confirmButton = { Button(onClick = onConfirm) { Text(if (chinese) "确认开启" else "Enable") } },
-        dismissButton = { TextButton(onClick = onClose) { Text(if (chinese) "取消" else "Cancel") } },
-    )
-}
-
-private fun workspaceBackendLabel(
-    backend: runtime.mobileagent.domain.WorkspaceBackendType,
-    authority: runtime.mobileagent.domain.Authority?,
-    chinese: Boolean,
-): String = when (backend) {
-    runtime.mobileagent.domain.WorkspaceBackendType.SAF_TREE -> if (chinese) "手机文件夹（SAF）" else "Phone folder (SAF)"
-    runtime.mobileagent.domain.WorkspaceBackendType.PRIVILEGED -> when (authority) {
-        runtime.mobileagent.domain.Authority.SHIZUKU -> if (chinese) "Shizuku（ADB 级）" else "Shizuku (ADB-level)"
-        runtime.mobileagent.domain.Authority.WIRED_ADB -> if (chinese) "电脑 ADB" else "Desktop ADB"
-        runtime.mobileagent.domain.Authority.ROOT_DIRECT -> if (chinese) "直接 Root" else "Direct Root"
-        runtime.mobileagent.domain.Authority.SHIZUKU_ROOT -> "Shizuku Root"
-        else -> if (chinese) "ADB 级目录" else "ADB-level directory"
-    }
-    runtime.mobileagent.domain.WorkspaceBackendType.INTERNAL -> if (chinese) "应用私有目录" else "App-private directory"
-}
-
-private fun workspaceAccessResultMessage(
-    result: runtime.mobileagent.integration.WorkspaceAccessResult,
-    chinese: Boolean,
-): String = when (result) {
-    is runtime.mobileagent.integration.WorkspaceAccessResult.Success -> if (chinese) {
-        "工作区授权已保存；此智能体的所有会话将在下一次运行时使用最新权限。"
-    } else {
-        "Workspace access is saved; every session of this Agent uses the latest permissions on its next run."
-    }
-    is runtime.mobileagent.integration.WorkspaceAccessResult.NewThreadRequired -> if (chinese) {
-        "工作区属于当前会话上下文，切换将创建新会话。"
-    } else {
-        "This workspace belongs to the current conversation. Switching creates a new conversation."
-    }
-    is runtime.mobileagent.integration.WorkspaceAccessResult.Failure ->
-        workspaceAccessFailureMessage(result.code, chinese)
-}
-
-internal fun workspaceToolErrorMessage(
-    code: runtime.mobileagent.skills.tooling.ToolErrorCode,
-    chinese: Boolean,
-): String = when (code) {
-    runtime.mobileagent.skills.tooling.ToolErrorCode.FILE_TOO_LARGE ->
-        if (chinese) "文件太大，无法作为文本读取。" else "The file is too large to read as text."
-    runtime.mobileagent.skills.tooling.ToolErrorCode.INVALID_CURSOR ->
-        if (chinese) "目录内容已发生变化，请从第一页重新打开。" else "The directory changed. Open it again from the first page."
-    runtime.mobileagent.skills.tooling.ToolErrorCode.PERMISSION_DENIED,
-    runtime.mobileagent.skills.tooling.ToolErrorCode.SHIZUKU_PERMISSION_DENIED,
-    runtime.mobileagent.skills.tooling.ToolErrorCode.CAPABILITY_DENIED,
-    runtime.mobileagent.skills.tooling.ToolErrorCode.AUTHORITY_NOT_GRANTED,
-        -> if (chinese) "没有权限访问该工作区，请检查授权。" else "Permission to access this workspace is missing. Check its authorization."
-    runtime.mobileagent.skills.tooling.ToolErrorCode.PATH_OUT_OF_SCOPE ->
-        if (chinese) "请求路径超出已授权工作区。" else "The requested path is outside the authorized workspace."
-    runtime.mobileagent.skills.tooling.ToolErrorCode.SYMLINK_FORBIDDEN ->
-        if (chinese) "不允许从工作区跟随符号链接。" else "Symbolic links cannot be followed from this workspace."
-    runtime.mobileagent.skills.tooling.ToolErrorCode.ROOT_OPERATION_FORBIDDEN ->
-        if (chinese) "不能对设备根目录执行此操作。" else "This operation is not allowed on the device root."
-    runtime.mobileagent.skills.tooling.ToolErrorCode.WORKSPACE_NOT_FOUND ->
-        if (chinese) "工作区或目录已不可用，请重新选择。" else "The workspace or directory is unavailable. Select it again."
-    runtime.mobileagent.skills.tooling.ToolErrorCode.AUTHORITY_PROVIDER_NOT_SELECTED ->
-        if (chinese) "请先在设置中选定 ADB 级通道。" else "Select an ADB-level authority in Settings first."
-    runtime.mobileagent.skills.tooling.ToolErrorCode.AUTHORITY_TEMPORARILY_UNAVAILABLE,
-    runtime.mobileagent.skills.tooling.ToolErrorCode.SHIZUKU_SERVICE_UNAVAILABLE,
-    runtime.mobileagent.skills.tooling.ToolErrorCode.BRIDGE_DISCONNECTED,
-    runtime.mobileagent.skills.tooling.ToolErrorCode.ADB_DEVICE_OFFLINE,
-    runtime.mobileagent.skills.tooling.ToolErrorCode.ADB_DEVICE_DISCONNECTED,
-        -> if (chinese) "工作区暂时不可用，请重新连接后重试。" else "The workspace is temporarily unavailable. Reconnect it and try again."
-    runtime.mobileagent.skills.tooling.ToolErrorCode.BRIDGE_NOT_PAIRED,
-    runtime.mobileagent.skills.tooling.ToolErrorCode.ADB_DEVICE_UNAUTHORIZED,
-    runtime.mobileagent.skills.tooling.ToolErrorCode.ADB_APP_NOT_INSTALLED,
-        -> if (chinese) "ADB 设备尚未完成配对或授权，请先在设置中处理。" else "The ADB device is not paired or authorized. Complete setup in Settings."
-    runtime.mobileagent.skills.tooling.ToolErrorCode.WORKSPACE_READ_ONLY ->
-        if (chinese) "该工作区为只读，无法执行写入操作。" else "This workspace is read-only."
-    runtime.mobileagent.skills.tooling.ToolErrorCode.QUOTA_EXCEEDED ->
-        if (chinese) "目录或输出超过安全上限，请缩小范围后重试。" else "The directory or output exceeds its safety limit. Narrow the request and try again."
-    runtime.mobileagent.skills.tooling.ToolErrorCode.CONFLICT ->
-        if (chinese) "目标条目已变化，请读取其最新版本后重试。" else "The requested entry changed. Read its latest version and try again."
-    runtime.mobileagent.skills.tooling.ToolErrorCode.WORKSPACE_VERSION_UNSUPPORTED ->
-        if (chinese) "此操作不支持版本条件，未执行。" else "This operation cannot enforce a version condition. Nothing was executed."
-    runtime.mobileagent.skills.tooling.ToolErrorCode.UNSUPPORTED_ENTRY ->
-        if (chinese) "该文件类型暂不支持。" else "This workspace entry type is not supported."
-    runtime.mobileagent.skills.tooling.ToolErrorCode.OPERATION_UNAVAILABLE ->
-        if (chinese) "当前工作区后端不支持此操作。" else "This operation is unavailable on the selected workspace backend."
-    runtime.mobileagent.skills.tooling.ToolErrorCode.INVALID_REQUEST,
-    runtime.mobileagent.skills.tooling.ToolErrorCode.BRIDGE_PROTOCOL_MISMATCH,
-        -> if (chinese) "目录请求已失效，请重新打开后重试。" else "The directory request is no longer valid. Open it again and retry."
-    runtime.mobileagent.skills.tooling.ToolErrorCode.TIMEOUT,
-    runtime.mobileagent.skills.tooling.ToolErrorCode.IO_ERROR,
-        -> if (chinese) "读取目录失败，请重试。" else "The directory could not be read. Try again."
-    else -> if (chinese) "工作区运行时发生内部错误。" else "An internal workspace runtime error occurred."
-}
-
-private fun workspaceAccessFailureMessage(
-    code: runtime.mobileagent.integration.WorkspaceAccessErrorCode,
-    chinese: Boolean,
-): String = when (code) {
-    runtime.mobileagent.integration.WorkspaceAccessErrorCode.WORKSPACE_NOT_FOUND ->
-        if (chinese) "工作区已不可用，请重新选择。" else "The workspace is unavailable. Select it again."
-    runtime.mobileagent.integration.WorkspaceAccessErrorCode.AUTHORITY_NOT_SELECTED ->
-        if (chinese) "请先在设置中选定 ADB 级通道。" else "Select an ADB-level authority in Settings first."
-    runtime.mobileagent.integration.WorkspaceAccessErrorCode.AUTHORITY_UNAVAILABLE ->
-        if (chinese) "ADB 级通道暂时不可用，请重新连接后重试。" else "The ADB-level authority is temporarily unavailable. Reconnect it and try again."
-    runtime.mobileagent.integration.WorkspaceAccessErrorCode.CAPABILITY_DENIED,
-    runtime.mobileagent.integration.WorkspaceAccessErrorCode.URI_PERMISSION_REQUIRED,
-        -> if (chinese) "没有权限访问该工作区，请重新授权。" else "Permission to access this workspace is missing. Authorize it again."
-    runtime.mobileagent.integration.WorkspaceAccessErrorCode.CONFLICT ->
-        if (chinese) "工作区状态已变化，请刷新后重试。" else "The workspace state changed. Refresh it and try again."
-    runtime.mobileagent.integration.WorkspaceAccessErrorCode.UNSUPPORTED ->
-        if (chinese) "当前工作区不支持此操作。" else "This workspace does not support the operation."
-    runtime.mobileagent.integration.WorkspaceAccessErrorCode.INVALID_REQUEST ->
-        if (chinese) "工作区请求无效，请重新选择。" else "The workspace request is invalid. Select it again."
-    runtime.mobileagent.integration.WorkspaceAccessErrorCode.PERSISTENCE_FAILED ->
-        if (chinese) "工作区设置未能保存，请重试。" else "The workspace setting could not be saved. Try again."
-    runtime.mobileagent.integration.WorkspaceAccessErrorCode.UNKNOWN_OUTCOME ->
-        if (chinese) "工作区运行时发生内部错误。" else "An internal workspace runtime error occurred."
-}
-
-private fun newWorkspaceId(prefix: String): String =
-    "$prefix-${java.util.UUID.randomUUID().toString().replace("-", "")}".take(128)
 
 @Composable
 private fun ProvidersRoute(entry: NavBackStackEntry, chinese: Boolean, onRoute: (String) -> Unit,

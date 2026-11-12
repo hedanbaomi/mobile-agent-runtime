@@ -111,5 +111,5 @@ tasks.matching { it.name.startsWith("configureCMake") || it.name.startsWith("bui
 dependencies {
     implementation(project(":shared:domain"))
     implementation(project(":shared:knowledge-api"))
-
+    testImplementation(libs.junit4)
 }

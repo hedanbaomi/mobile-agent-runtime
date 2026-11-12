@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: 2026 mobileAgentRuntime contributors -->
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<data-extraction-rules>
+    <cloud-backup disableIfNoEncryptionCapabilities="true">
+        <!-- Reject all cloud backups to protect local agent data, consents, and secrets -->
+        <exclude domain="sharedpref" path="screen-observation.xml" />
+        <exclude domain="sharedpref" path="workspace-ui-presentation.xml" />
+        <exclude domain="sharedpref" path="ui-preferences.xml" />
+        <exclude domain="sharedpref" path="trpg-atlas-basemap.xml" />
+        <exclude domain="sharedpref" path="trpg-media-selection.xml" />
+        <exclude domain="sharedpref" path="resident-adb-v1.xml" />
+        <exclude domain="sharedpref" path="runtime.mobileagent.wired.adb.trust.v1.xml" />
+        <exclude domain="sharedpref" path="runtime.mobileagent.wired.metadata.v1.xml" />
+        <exclude domain="sharedpref" path="runtime.mobileagent.identity.v1.xml" />
+        <exclude domain="sharedpref" path="diagnostic-preferences.xml" />
+        <exclude domain="file" path="import-staging" />
+        <exclude domain="file" path="python-skill-kv" />
+        <exclude domain="root" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="external" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <!-- Databases: Local SQLite databases containing chats, runs, and secret references -->
+        <exclude domain="database" path="mobile-agent.db" />
+        <exclude domain="database" path="mobile-agent.db-wal" />
+        <exclude domain="database" path="mobile-agent.db-shm" />
+        <exclude domain="database" path="." />
+
+        <!-- SharedPreferences: High-privilege consents, Keystore-wrapped secrets, device identity, and local bindings -->
+        <exclude domain="sharedpref" path="screen-observation.xml" />
+        <exclude domain="sharedpref" path="resident-adb-v1.xml" />
+        <exclude domain="sharedpref" path="runtime.mobileagent.wired.adb.trust.v1.xml" />
+        <exclude domain="sharedpref" path="runtime.mobileagent.wired.metadata.v1.xml" />
+        <exclude domain="sharedpref" path="runtime.mobileagent.identity.v1.xml" />
+        <exclude domain="sharedpref" path="diagnostic-preferences.xml" />
+        <exclude domain="sharedpref" path="workspace-ui-presentation.xml" />
+        <exclude domain="sharedpref" path="ui-preferences.xml" />
+        <exclude domain="sharedpref" path="trpg-atlas-basemap.xml" />
+        <exclude domain="sharedpref" path="trpg-media-selection.xml" />
+        <exclude domain="sharedpref" path="app-updates.xml" />
+        <exclude domain="sharedpref" path="notification-permission.xml" />
+        <exclude domain="sharedpref" path="." />
+
+        <!-- Files: User content-addressed storage, agent workspaces, skill memory, and recovery copies -->
+        <exclude domain="file" path="cas" />
+        <exclude domain="file" path="skill-memory" />
+        <exclude domain="file" path="python-skill-kv" />
+        <exclude domain="file" path="import-staging" />
+        <exclude domain="file" path="agent-workspace" />
+        <exclude domain="file" path="agent-workspaces" />
+        <exclude domain="file" path="database-recovery" />
+        <exclude domain="file" path="diagnostics" />
+        <exclude domain="file" path="app-updates" />
+        <exclude domain="file" path="." />
+
+        <!-- Defense-in-depth: Exclude root and external domains -->
+        <exclude domain="root" path="." />
+        <exclude domain="external" path="." />
+    </device-transfer>
+</data-extraction-rules>

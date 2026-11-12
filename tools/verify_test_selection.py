@@ -9,9 +9,50 @@ import pathlib
 import re
 import sys
 import xml.etree.ElementTree as ET
-import fnmatch
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def _workflow_path_matches(path: str, pattern: str) -> bool:
+    parts: list[str] = ["^"]
+    i = 0
+    n = len(pattern)
+    while i < n:
+        if pattern[i:i + 4] == "/**/":
+            parts.append("(?:/.+/|/)")
+            i += 4
+        elif pattern[i:i + 3] == "**/":
+            parts.append("(?:.+/)?")
+            i += 3
+        elif pattern[i:i + 3] == "/**" and i + 3 == n:
+            parts.append("/.*")
+            i += 3
+        elif pattern[i:i + 2] == "**":
+            parts.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            parts.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            parts.append("[^/]")
+            i += 1
+        else:
+            parts.append(re.escape(pattern[i]))
+            i += 1
+    parts.append("$")
+    return re.match("".join(parts), path) is not None
+
+
+def pr_triggers_recovery(root: pathlib.Path, changed_paths: list[str], manifest: dict | None = None) -> list[str]:
+    import yaml
+    full = yaml.safe_load((root / ".github/workflows/full-instrumentation.yml").read_text(encoding="utf-8"))
+    events = full.get("on", full.get(True, {}))
+    patterns = events.get("pull_request", {}).get("paths", [])
+    if any(_workflow_path_matches(changed, pattern) for changed in changed_paths for pattern in patterns):
+        if manifest is None:
+            manifest = json.loads((root / "tools/instrumentation-suites.json").read_text(encoding="utf-8"))
+        return select_suite(manifest, "recovery")
+    return []
 
 
 def select_suite(manifest: dict, name: str) -> list[str]:
@@ -41,11 +82,27 @@ def workflow_matrix_violations(root: pathlib.Path) -> list[str]:
     full = yaml.safe_load((root / '.github/workflows/full-instrumentation.yml').read_text(encoding='utf-8'))
     def scripts(job):
         return '\n'.join(str(step.get('with', {}).get('script', '')) for step in job.get('steps', []))
-    smoke = ci.get('jobs', {}).get('android-smoke', {})
+    ci_jobs = ci.get('jobs', {})
+    smoke = ci_jobs.get('android-smoke', {})
     if 26 not in smoke.get('strategy', {}).get('matrix', {}).get('api-level', []):
         errors.append('API26 must remain in the smoke matrix')
     if "bash tools/run-device-suite smoke-api Debug '${{ matrix.api-level }}'" not in scripts(smoke):
         errors.append('smoke must pass the API level to the minimum-suite router')
+    for job_name in ('android-smoke', 'convergence-device', 'knowledge-pipeline-device'):
+        job = ci_jobs.get(job_name, {})
+        needs = job.get('needs', [])
+        needs_set = {needs} if isinstance(needs, str) else set(needs or [])
+        if 'check' not in needs_set:
+            errors.append(f'{job_name} must depend on check to consume prebuilt debug APKs')
+        downloads = [
+            step for step in job.get('steps', [])
+            if str(step.get('uses', '')).startswith('actions/download-artifact@')
+            and step.get('with', {}).get('name') == 'debug-apks-${{ github.sha }}'
+        ]
+        if not downloads:
+            errors.append(f'{job_name} must download debug-apks-${{{{ github.sha }}}}')
+        if '--prebuilt-apk-dir' not in scripts(job):
+            errors.append(f'{job_name} must pass --prebuilt-apk-dir to tools/run-device-suite')
     events = full.get('on', full.get(True, {}))
     if not events.get('schedule'):
         errors.append('nightly device schedule is required')
@@ -66,12 +123,14 @@ def workflow_matrix_violations(root: pathlib.Path) -> list[str]:
                 'app-android/src/main/kotlin/runtime/mobileagent/integration/RuntimeIntegration.kt',
                 'app-android/src/main/kotlin/runtime/mobileagent/security/PrivilegedWorkspaceBindingCipher.kt',
                 'app-android/src/main/kotlin/runtime/mobileagent/tooling/ApprovalEngine.kt',
+                'data/sqlite/src/main/kotlin/runtime/mobileagent/data/Migrations.kt',
+                'data/sqlite/src/main/kotlin/runtime/mobileagent/data/migrations/MigrationV2ControlPlane.kt',
                 'data/sqlite/src/main/kotlin/runtime/mobileagent/data/RootRunAdmission.kt',
                 'data/sqlite/src/main/kotlin/runtime/mobileagent/data/RootAuthorityRepository.kt',
                 'data/sqlite/src/main/kotlin/runtime/mobileagent/data/RunRepository.kt',
                 'tools/instrumentation-suites.json', 'tools/verify_test_selection.py']
     for path in required:
-        if not any(fnmatch.fnmatchcase(path, pattern) for pattern in paths):
+        if not any(_workflow_path_matches(path, pattern) for pattern in paths):
             errors.append(f'Review recovery trigger missing: {path}')
     expected = "bash tools/run-device-suite '${{ github.event_name == 'pull_request' && 'recovery' || inputs.suite || 'nightly' }}' '${{ github.event_name == 'pull_request' && 'Review' || inputs.variant || 'Debug' }}'"
     if expected not in scripts(full.get('jobs', {}).get('full-device', {})):

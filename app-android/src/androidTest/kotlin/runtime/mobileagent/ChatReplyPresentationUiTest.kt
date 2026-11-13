@@ -14,6 +14,8 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.semantics.SemanticsActions
@@ -77,6 +79,44 @@ class ChatReplyPresentationUiTest {
         val position = node.fetchSemanticsNode().positionInRoot + offset
         assertTrue(compose.onRoot().fetchSemanticsNode().boundsInRoot.contains(position))
         compose.onRoot().performTouchInput { click(position) }
+    }
+
+    @Test fun selectedWordContrastsWithTheLightOutgoingBubble() {
+        val message = "Send this message"
+        val state = ChatUiState(selectedSessionId = "s", messages = listOf(ChatMessageUi("u", "user", message)))
+        compose.setContent { MobileAgentTheme(AppThemeMode.LIGHT) { ConversationScreen(state) } }
+        awaitWindowFocus()
+        val node = compose.onNodeWithText(message, useUnmergedTree = true)
+        val layouts = mutableListOf<TextLayoutResult>()
+        node.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        val layout = layouts.single()
+        val center = layout.getBoundingBox(message.indexOf("this") + 1).center
+        val before = node.captureToImage().asAndroidBitmap()
+        node.performTouchInput { longClick(center) }
+        val after = node.captureToImage().asAndroidBitmap()
+
+        fun background(bitmap: Bitmap, word: String): Color {
+            val start = message.indexOf(word)
+            val first = layout.getBoundingBox(start)
+            val last = layout.getBoundingBox(start + word.length - 1)
+            val pixels = mutableMapOf<Int, Int>()
+            for (y in first.top.toInt() until first.bottom.toInt()) {
+                for (x in first.left.toInt() until last.right.toInt()) {
+                    val color = bitmap.getPixel(x, y)
+                    pixels[color] = (pixels[color] ?: 0) + 1
+                }
+            }
+            return Color(pixels.maxBy { it.value }.key)
+        }
+        fun contrast(a: Color, b: Color): Float {
+            val x = a.luminance()
+            val y = b.luminance()
+            return (maxOf(x, y) + 0.05f) / (minOf(x, y) + 0.05f)
+        }
+        val selected = background(after, "this")
+        assertEquals(background(before, "message"), background(after, "message"))
+        assertTrue("Selected range must stand out from the bubble", contrast(selected, background(before, "this")) >= 3f)
+        assertTrue("White letters must remain readable", contrast(selected, Color.White) >= 4.5f)
     }
 
     @Test fun inlineNumbersDeduplicateAndOpenTheMatchingDocumentExcerpt() {

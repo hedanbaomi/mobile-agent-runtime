@@ -1310,12 +1310,10 @@ private fun MessageBubble(
                             if (working) ToolEventRow(part, zh, Modifier.padding(top = 4.dp))
                             else TrpgInlineToolCard(part)
                         }
-                        else if (part.text.isNotBlank()) SelectionContainer {
-                            if (part.role.equals("assistant", true)) MarkdownText(
-                                displayedText, Modifier.padding(top = 4.dp), presentation.markers, onCitation,
-                            )
-                            else Text(part.text, Modifier.padding(top = 4.dp))
-                        }
+                        else if (part.text.isNotBlank()) SelectableMessageText(
+                            role = part.role, text = displayedText, userInk = userInk,
+                            markers = presentation.markers, onCitation = onCitation,
+                        )
                     }
                     if (!user && orderedMessages.none { it.text.isNotBlank() || it.reasoning.isNotBlank() || isToolEventRow(it.role) }) {
                         Text(stringResource(R.string.ui_no_visible_output_yet_check_the_66aa196b),
